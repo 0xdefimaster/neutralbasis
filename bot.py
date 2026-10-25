@@ -1527,7 +1527,7 @@ def serve(engine, port):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
                 self.send_header(
-                    "Content-Disposition", 'attachment; filename="herdcall-paper.csv"'
+                    "Content-Disposition", 'attachment; filename="neutralbasis-paper.csv"'
                 )
                 self.end_headers()
                 return self.wfile.write(raw)

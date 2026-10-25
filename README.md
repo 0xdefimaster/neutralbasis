@@ -1,6 +1,6 @@
-# herdcall v2 — Windows paketi
+# neutralbasis v2 — Windows paketi
 
-Funding kesintisi sonrası tahmini değerleme kurtarması, yayımlanmayan funding saatinin girişleri kalıcı kilitlememesi ve 67 test; Python kaynakları Black ile biçimlendirildi. Ayrıntılar HERDCALL-KAPSAM.md son bölümündedir.
+Funding kesintisi sonrası tahmini değerleme kurtarması, yayımlanmayan funding saatinin girişleri kalıcı kilitlememesi ve 67 test; Python kaynakları Black ile biçimlendirildi. Ayrıntılar NEUTRALBASIS-KAPSAM.md son bölümündedir.
 
 1. ZIP dosyasını bir klasöre çıkarın.
 2. Python 3.11 veya üzeri kurulu olmalı. İlk kullanımda Kurulum.cmd dosyasına çift tıklayın. İnternet üzerinden requirements.txt bağımlılıkları yüklenir.
@@ -15,4 +15,4 @@ Kapsam: 63 platform kataloğu / 30 public adaptör; her platform bağlı değild
 
 Bu paket temiz başlangıç içindir. API anahtarları, bağlantı kayıtları, yerel veritabanı, paper bakiyeler ve işlem geçmişi içermez. Çalıştırıldığında yeni data-five-rh klasörü oluşur. Public tarama için anahtar gerekmez.
 
-Net paper sonuç = fiyat PnL + funding − ücretler. Slippage dolum fiyatına dahildir. Gelecek çıkış likiditesi tahminidir. Ayrıntılar HERDCALL-KAPSAM.md dosyasında.
+Net paper sonuç = fiyat PnL + funding − ücretler. Slippage dolum fiyatına dahildir. Gelecek çıkış likiditesi tahminidir. Ayrıntılar NEUTRALBASIS-KAPSAM.md dosyasında.

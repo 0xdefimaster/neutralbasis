@@ -212,9 +212,9 @@ class WideMarkets:
                     )
                 except (ValueError, TypeError):
                     pass
-            if age > 120 and getattr(ex, "herdcall_live", False):
+            if age > 120 and getattr(ex, "neutralbasis_live", False):
                 raise ValueError("HTTP verisi eski; taramaya dahil edilmedi")
-            ex.herdcall_audit = self.store.audit(
+            ex.neutralbasis_audit = self.store.audit(
                 url,
                 (ex.last_http_response or json.dumps(result)).encode(),
                 received,
@@ -223,7 +223,7 @@ class WideMarkets:
             return result
 
         ex.fetch = audited
-        ex.herdcall_audit = None
+        ex.neutralbasis_audit = None
         ex.load_markets()
         self.clients[key] = ex
         return ex
@@ -232,7 +232,7 @@ class WideMarkets:
         try:
             with self.client_locks[v]:
                 ex = self.client(v)
-                ex.herdcall_live = True
+                ex.neutralbasis_live = True
                 selected = {}
                 for m in ex.markets.values():
                     if (
@@ -266,7 +266,7 @@ class WideMarkets:
                 else:
                     rates = {}
                 rates_received = now()
-                rate_audit = getattr(ex, "herdcall_audit", None)
+                rate_audit = getattr(ex, "neutralbasis_audit", None)
                 period_meta = {}
                 marks = {}
                 open_interest = {}
@@ -424,7 +424,7 @@ class WideMarkets:
                 # Spot cannot be shorted in the simulator. It is only a long cash leg.
                 try:
                     spot_ex = self.client(v, True) if v in SPOT_ADAPTERS else ex
-                    spot_ex.herdcall_live = True
+                    spot_ex.neutralbasis_live = True
                 except Exception:
                     spot_ex = ex
                 spots = {
@@ -470,7 +470,7 @@ class WideMarkets:
                                         volume=finite(t.get("quoteVolume")),
                                         oi=None,
                                         basis="Spot alış kotasyonu; funding yok",
-                                        audit_id=spot_ex.herdcall_audit,
+                                        audit_id=spot_ex.neutralbasis_audit,
                                         execution=False,
                                         quote=m["quote"],
                                     )
@@ -533,7 +533,7 @@ class WideMarkets:
     def history(self, v, a, days, kind="perp", at=None):
         with self.client_locks[v]:
             ex = self.client(v, kind == "spot" and v in SPOT_ADAPTERS)
-            ex.herdcall_live = False
+            ex.neutralbasis_live = False
             end = hour(at if at is not None else now())
             start = end - (int(days) * 24 + 1) * 3600
             with self.lock:
@@ -554,7 +554,7 @@ class WideMarkets:
             audits = []
             for _ in range(12):
                 batch = ex.fetch_ohlcv(row["symbol"], "1h", cursor, 500)
-                audits.append(ex.herdcall_audit)
+                audits.append(ex.neutralbasis_audit)
                 if not batch:
                     break
                 for x in batch:
@@ -573,7 +573,7 @@ class WideMarkets:
                 cursor = (start + 3600) * 1000
                 for _ in range(16):
                     batch = ex.fetch_funding_rate_history(row["symbol"], cursor, 200)
-                    audit = ex.herdcall_audit
+                    audit = ex.neutralbasis_audit
                     if not batch:
                         break
                     for r in batch:
@@ -604,7 +604,7 @@ class WideMarkets:
     def book(self, v, a, kind="perp"):
         with self.client_locks[v]:
             ex = self.client(v, kind == "spot" and v in SPOT_ADAPTERS)
-            ex.herdcall_live = True
+            ex.neutralbasis_live = True
             with self.lock:
                 row = next(
                     (
@@ -642,7 +642,7 @@ class WideMarkets:
                 or max(x[0] for x in bids) >= min(x[0] for x in asks)
             ):
                 raise ValueError("Boş/çapraz defter")
-            return dict(bids=bids, asks=asks, received=at, audit_id=ex.herdcall_audit)
+            return dict(bids=bids, asks=asks, received=at, audit_id=ex.neutralbasis_audit)
 
 
 def expanded_view(engine, base):

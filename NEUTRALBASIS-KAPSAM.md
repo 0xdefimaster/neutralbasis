@@ -1,4 +1,4 @@
-# Herdcall kapsam denetimi
+# Neutralbasis kapsam denetimi
 
 Önceki sürüm arb.sh’nin tam karşılığı değildi: yalnızca beş native DEX, seçili 15 varlık ve iki platformda funding paper modeli vardı.
 
@@ -36,7 +36,7 @@ Public veri için [CCXT](https://github.com/ccxt/ccxt) 4.5.90 ve mevcut native A
 
 Yerel uygulama: http://127.0.0.1:8765/#exchanges
 
-ZIP kurulumunda Kurulum.cmd bağımlılıkları yerel .venv ortamına yükler; Baslat.cmd motoru başlatır. Paket içindeki build-herdcall.cjs, JavaScript/CSS kaynakları değiştirildiğinde Node ile index.html dosyasını yeniden oluşturur. Çalıştırmak için Node gerekli değildir.
+ZIP kurulumunda Kurulum.cmd bağımlılıkları yerel .venv ortamına yükler; Baslat.cmd motoru başlatır. Paket içindeki build-neutralbasis.cjs, JavaScript/CSS kaynakları değiştirildiğinde Node ile index.html dosyasını yeniden oluşturur. Çalıştırmak için Node gerekli değildir.
 
 
 ## Yakınsama paper stratejisi — 25 Ekim 2026
