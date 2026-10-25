@@ -48,7 +48,7 @@ DEFAULTS = dict(
 )
 # A payment hour with no published rate after this wait is recorded as unverified
 # zero cash so it no longer blocks new entries. A later published rate replaces it.
-FUNDING_UNVERIFIED_AFTER = 6 * 3600
+FUNDING_UNVERIFIED_AFTER = 3600
 L = "https://mainnet.zklighter.elliot.ai/api/v1/"
 E = "https://api.starknet.extended.exchange/api/v1/"
 

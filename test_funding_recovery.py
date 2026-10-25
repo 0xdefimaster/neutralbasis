@@ -96,7 +96,7 @@ class FundingRecoveryTests(unittest.TestCase):
         for leg in position["legs"]:
             leg.update(closed=True, exited=payment + 20)
         self.feed.funding[("Extended", "BTC")] = []
-        self.clock = payment + 7200
+        self.clock = payment + bot.FUNDING_UNVERIFIED_AFTER - 1
         self.e.settle(position)
         self.assertTrue(position["pending_funding"])
         self.assertEqual(position["estimated_funding"], 0)
