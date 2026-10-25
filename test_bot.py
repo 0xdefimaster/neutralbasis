@@ -163,6 +163,37 @@ class PaperTests(unittest.TestCase):
             sum(self.e.wallet.values()), 1000 + self.e.closed[0]["net"]
         )
 
+    def assert_opened_within_reserve(self, c):
+        self.e.open(c)
+        self.assertFalse(
+            self.e.closed, self.e.closed and self.e.closed[0]["close_reason"]
+        )
+        p = self.e.positions[0]
+        self.assertEqual(p["status"], "OPEN")
+        for v, bal in self.e.balances().items():
+            self.assertGreaterEqual(bal["free"], bal["equity"] * self.e.cfg["reserve"])
+
+    def test_margin_bound_size_leaves_room_for_both_entry_fees(self):
+        # Capital 400 -> 140 USD margin headroom per venue -> 6.99 BTC at 5x.
+        self.e.update_config(dict(capital=400))
+        c = self.candidate()
+        self.assertTrue(c["eligible"], c["reasons"])
+        self.assert_opened_within_reserve(c)
+
+    def test_margin_bound_size_survives_fill_at_price_tolerance(self):
+        self.e.update_config(dict(capital=400))
+        c = self.candidate()
+        self.assertTrue(c["eligible"], c["reasons"])
+        orig = self.e.quote
+
+        def quote(v, a, q, buy):
+            px, b = orig(v, a, q, buy)
+            planned = c["entry_long"] if buy else c["entry_short"]
+            return planned * (1 + bot.FILL_TOLERANCE * 0.999), b
+
+        self.e.quote = quote
+        self.assert_opened_within_reserve(c)
+
     def test_second_leg_failure_unwinds_first(self):
         c = self.candidate()
         self.feed.broken = "Extended"

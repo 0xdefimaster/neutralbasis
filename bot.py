@@ -49,6 +49,8 @@ DEFAULTS = dict(
 # A payment hour with no published rate after this wait is recorded as unverified
 # zero cash so it no longer blocks new entries. A later published rate replaces it.
 FUNDING_UNVERIFIED_AFTER = 3600
+# Largest fill price move open() accepts versus the evaluated entry; sizing reserves for it.
+FILL_TOLERANCE = 0.001
 L = "https://mainnet.zklighter.elliot.ai/api/v1/"
 E = "https://api.starknet.extended.exchange/api/v1/"
 
@@ -696,13 +698,15 @@ class Engine:
         if self.daily_pnl() <= -cfg["daily_loss"]:
             raise ValueError("Günlük kayıp limiti doldu; yeni girişler engelli")
         budget = min(cfg["risk"], max(0, cfg["daily_loss"] + self.daily_pnl()))
-        allowed_margin = min(
-            max(0, bal[v]["free"] - max(0, bal[v]["equity"]) * cfg["reserve"])
-            for v in (lv, sv)
-        )
+        headroom = {v: self.entry_headroom(v) for v in (lv, sv)}
+
+        # Per unit: margin plus this leg's entry fee at the worst fill open() accepts.
+        def entry_need(v, px):
+            return px * (1 + FILL_TOLERANCE) * (1 / leverage + self.fee(v))
+
         size = min(
             cfg["size"],
-            allowed_margin * leverage,
+            *(headroom[v] / entry_need(v, 1) for v in (lv, sv)),
             budget / max(stress + 2 * fee + 4 * extra, 0.0001),
             sm.get("max_order", cfg["size"]),
         )
@@ -730,12 +734,17 @@ class Engine:
                 + (sc - ss)
                 + (la + ss) / 2 * stress
             )
-            if quoted_loss <= budget:
+            scale = min(
+                budget / quoted_loss if quoted_loss > 0 else math.inf,
+                headroom[lv] / (qty * entry_need(lv, la)),
+                headroom[sv] / (qty * entry_need(sv, ss)),
+            )
+            if scale >= 1:
                 break
             qty = float(
-                (
-                    Decimal(str(qty * budget / quoted_loss * 0.99)) / step
-                ).to_integral_value(rounding=ROUND_DOWN)
+                (Decimal(str(qty * scale * 0.99)) / step).to_integral_value(
+                    rounding=ROUND_DOWN
+                )
                 * step
             )
         if qty < max(lm["minimum"], sm["minimum"]) or qty * price < max(
@@ -792,6 +801,10 @@ class Engine:
             reasons.append("Funding geliri maliyet + spread stresini karşılamıyor")
         if loss > budget + 1e-6:
             reasons.append("İşlem kayıp bütçesi aşılıyor")
+        if any(qty * entry_need(v, px) > headroom[v] for v, px in ((lv, la), (sv, ss))):
+            reasons.append(
+                "Marjin + giriş ücreti rezerv sonrası kullanılabilir marjini aşıyor"
+            )
         if self.daily_pnl() <= -cfg["daily_loss"]:
             reasons.append("Günlük kayıp limiti doldu")
         if len(self.positions) >= cfg["max_positions"]:
@@ -835,6 +848,11 @@ class Engine:
     def fee(self, v):
         return self.cfg["lighter_fee"] if v == "Lighter" else self.cfg["extended_fee"]
 
+    def entry_headroom(self, v):
+        """Margin plus entry fee a new leg may use on a venue while keeping the reserve."""
+        bal = self.balances()[v]
+        return max(0, bal["free"] - max(0, bal["equity"]) * self.cfg["reserve"])
+
     def quote(self, v, asset, qty, buy):
         b = self.feed.book(v, asset)
         return (
@@ -870,12 +888,11 @@ class Engine:
                 time.sleep(self.cfg["latency_ms"] / 1000)
                 px, b = self.quote(venue, c["asset"], c["qty"], side == "long")
                 planned = c["entry_long"] if side == "long" else c["entry_short"]
-                if abs(px / planned - 1) > 0.001:
+                if abs(px / planned - 1) > FILL_TOLERANCE:
                     raise ValueError("Dolum öncesi fiyat %0,1 sınırını aştı")
                 fee = c["qty"] * px * self.fee(venue)
                 margin = c["qty"] * px / c["leverage"]
-                bal = self.balances()[venue]
-                if margin + fee > bal["free"] - bal["equity"] * self.cfg["reserve"]:
+                if margin + fee > self.entry_headroom(venue):
                     raise ValueError("Dolum öncesi marjin rezervi yetersiz")
                 leg = dict(
                     venue=venue,
@@ -1527,7 +1544,8 @@ def serve(engine, port):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
                 self.send_header(
-                    "Content-Disposition", 'attachment; filename="neutralbasis-paper.csv"'
+                    "Content-Disposition",
+                    'attachment; filename="neutralbasis-paper.csv"',
                 )
                 self.end_headers()
                 return self.wfile.write(raw)
