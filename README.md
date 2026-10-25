@@ -1,6 +1,6 @@
 # herdcall v2 — Windows paketi
 
-Funding kesintisi sonrası tahmini değerleme kurtarması ve 65 test; Python kaynakları Black ile biçimlendirildi. Ayrıntılar HERDCALL-KAPSAM.md son bölümündedir.
+Funding kesintisi sonrası tahmini değerleme kurtarması, yayımlanmayan funding saatinin girişleri kalıcı kilitlememesi ve 67 test; Python kaynakları Black ile biçimlendirildi. Ayrıntılar HERDCALL-KAPSAM.md son bölümündedir.
 
 1. ZIP dosyasını bir klasöre çıkarın.
 2. Python 3.11 veya üzeri kurulu olmalı. İlk kullanımda Kurulum.cmd dosyasına çift tıklayın. İnternet üzerinden requirements.txt bağımlılıkları yüklenir.

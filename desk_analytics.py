@@ -283,6 +283,7 @@ def report_csv(engine):
             "pending_funding",
             "close_reason",
             "funding_valuation_methods",
+            "funding_unverified_hours",
         ]
     )
     for p in engine.closed:
@@ -306,6 +307,7 @@ def report_csv(engine):
                 " | ".join(
                     sorted({x["method"] for x in p.get("funding_valuations", [])})
                 ),
+                len(p.get("funding_unverified", [])),
             ]
         )
     return out.getvalue()

@@ -46,6 +46,9 @@ DEFAULTS = dict(
         "ADA",
     ],
 )
+# A payment hour with no published rate after this wait is recorded as unverified
+# zero cash so it no longer blocks new entries. A later published rate replaces it.
+FUNDING_UNVERIFIED_AFTER = 6 * 3600
 L = "https://mainnet.zklighter.elliot.ai/api/v1/"
 E = "https://api.starknet.extended.exchange/api/v1/"
 
@@ -968,9 +971,10 @@ class Engine:
                 key = p["id"] + ":" + venue + ":" + str(hour(r["ts"]))
                 with self.store.lock:
                     exists = self.store.db.execute(
-                        "select 1 from payments where key=?", (key,)
+                        "select body from payments where key=?", (key,)
                     ).fetchone()
-                if exists:
+                late = bool(exists) and json.loads(exists[0]).get("unverified", False)
+                if exists and not late:
                     continue
                 estimated = False
                 valuation = None
@@ -1009,11 +1013,26 @@ class Engine:
                                 **valuation,
                             )
                         )
+                    if late:
+                        p["funding_unverified"] = [
+                            x
+                            for x in p.get("funding_unverified", [])
+                            if (x["venue"], x["payment_time"]) != (venue, hour(r["ts"]))
+                        ]
                     self.store.db.execute(
-                        "insert into payments values(?,?,?)",
+                        "insert or replace into payments values(?,?,?)",
                         (key, r["ts"], json.dumps(body)),
                     )
                     self.persist()
+                if late:
+                    self.events(
+                        "FUNDING_LATE",
+                        "Doğrulanmamış funding saati geç yayımlanan oranla uzlaştırıldı",
+                        position=p["id"],
+                        venue=venue,
+                        payment_time=r["ts"],
+                        cash=value,
+                    )
                 if valuation and valuation["method"] != "observed_mark":
                     self.events(
                         "FUNDING_ESTIMATE",
@@ -1022,7 +1041,42 @@ class Engine:
                         payment_time=r["ts"],
                         valuation=valuation,
                     )
-            if expected - seen:
+            missing = expected - seen
+            # No rate is invented: after a bounded wait the hour is kept as unverified
+            # zero cash, visible in the record, instead of blocking entries forever.
+            for t in sorted(
+                x for x in missing if now() - x >= FUNDING_UNVERIFIED_AFTER
+            ):
+                key = p["id"] + ":" + venue + ":" + str(t)
+                body = dict(
+                    position=p["id"],
+                    venue=venue,
+                    asset=p["asset"],
+                    rate=None,
+                    cash=0.0,
+                    valuation_estimated=False,
+                    audit_id=None,
+                    valuation=None,
+                    unverified=True,
+                )
+                with self.store.lock:
+                    p.setdefault("funding_unverified", []).append(
+                        dict(payment_time=t, venue=venue, recorded=now())
+                    )
+                    self.store.db.execute(
+                        "insert into payments values(?,?,?)",
+                        (key, t, json.dumps(body)),
+                    )
+                    self.persist()
+                missing.discard(t)
+                self.events(
+                    "FUNDING_UNVERIFIED",
+                    "Funding oranı yayımlanmadı; saat doğrulanmamış 0 tutarla kaydedildi, girişler açıldı",
+                    position=p["id"],
+                    venue=venue,
+                    payment_time=t,
+                )
+            if missing:
                 pending.append(venue + ": funding saatleri eksik")
         p["pending_funding"] = pending
 

@@ -101,6 +101,82 @@ class FundingRecoveryTests(unittest.TestCase):
         self.assertTrue(position["pending_funding"])
         self.assertEqual(position["estimated_funding"], 0)
 
+    def unpublished_hour_written_off(self):
+        position, payment = self.payment_gap()
+        for leg in position["legs"]:
+            leg.update(closed=True, exited=payment + 20)
+        position.update(status="CLOSED", closed_at=payment + 20, net=0)
+        self.e.positions.remove(position)
+        self.e.closed.append(position)
+        self.feed.funding[("Extended", "BTC")] = []
+        self.clock = payment + bot.FUNDING_UNVERIFIED_AFTER - 1
+        self.e.settle(position)
+        self.assertTrue(position["pending_funding"])
+        self.clock = payment + bot.FUNDING_UNVERIFIED_AFTER
+        before = dict(self.e.wallet)
+        self.e.settle(position)
+        return position, payment, before
+
+    def test_unpublished_rate_unblocks_entries_after_bounded_wait(self):
+        position, payment, before = self.unpublished_hour_written_off()
+        self.assertFalse(position["pending_funding"])
+        self.assertEqual(self.e.wallet, before)
+        self.assertEqual(position["estimated_funding"], 0)
+        self.assertEqual(
+            position["funding_unverified"],
+            [dict(payment_time=payment, venue="Extended", recorded=self.clock)],
+        )
+        record = next(
+            x["body"]
+            for x in self.e.store.recent("payments")
+            if x["body"]["venue"] == "Extended"
+        )
+        self.assertTrue(record["unverified"])
+        self.assertIsNone(record["rate"])
+        self.assertEqual(record["cash"], 0)
+        self.assertTrue(
+            any(
+                x["kind"] == "FUNDING_UNVERIFIED" for x in self.e.store.recent("events")
+            )
+        )
+
+    def test_late_published_rate_replaces_unverified_hour_once(self):
+        position, payment, before = self.unpublished_hour_written_off()
+        self.e.persist()
+        restarted = bot.Engine(Path(self.tmp.name) / "paper.db", fixtures.FixtureFeed())
+        try:
+            closed = restarted.closed[0]
+            restarted.settle(closed)
+            self.assertFalse(closed["pending_funding"])
+            self.assertEqual(restarted.wallet, before)
+            restarted.feed.funding[("Lighter", "BTC")] = [
+                dict(ts=payment, rate=0, value=0, audit_id=11)
+            ]
+            restarted.feed.funding[("Extended", "BTC")] = [
+                dict(ts=payment, rate=0.0005, value=None, audit_id=31)
+            ]
+            restarted.settle(closed)
+            short = closed["legs"][1]
+            expected = short["qty"] * short["entry"] * 0.0005
+            self.assertAlmostEqual(closed["funding"], expected)
+            self.assertAlmostEqual(
+                restarted.wallet["Extended"] - before["Extended"], expected
+            )
+            self.assertEqual(closed["funding_unverified"], [])
+            self.assertFalse(closed["pending_funding"])
+            records = [
+                x["body"]
+                for x in restarted.store.recent("payments")
+                if x["body"]["venue"] == "Extended"
+            ]
+            self.assertEqual(len(records), 1)
+            self.assertNotIn("unverified", records[0])
+            self.assertEqual(records[0]["audit_id"], 31)
+            restarted.settle(closed)
+            self.assertAlmostEqual(closed["funding"], expected)
+        finally:
+            restarted.store.db.close()
+
     def test_history_request_selects_exact_closed_candle_and_preserves_audit(self):
         feed = bot.Feed(self.e.store)
         payment = bot.hour(self.clock)
