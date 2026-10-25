@@ -1,7 +1,7 @@
 """Local-only paper execution. No wallet, private key or exchange write endpoint."""
 
 from __future__ import annotations
-import argparse, concurrent.futures, datetime as dt, email.utils, hashlib, json, math, os
+import argparse, base64, concurrent.futures, datetime as dt, email.utils, hashlib, hmac, json, math, os, signal
 from pathlib import Path
 import sqlite3, statistics, threading, time, traceback, urllib.parse, urllib.request, uuid, zlib
 from decimal import Decimal, ROUND_DOWN
@@ -1472,12 +1472,40 @@ class Engine:
         )
 
 
-def serve(engine, port):
+def serve(engine, port, host="127.0.0.1", password=None):
+    """Local by default. A non-loopback bind (hosted deploy) requires a dashboard password."""
     token = uuid.uuid4().hex
+    local = host in ("127.0.0.1", "localhost")
+    if not local and not password:
+        raise SystemExit("Uzak erişim için NB_DASHBOARD_PASSWORD ayarlanmalı")
+    expected = (
+        "Basic " + base64.b64encode(f"paper:{password}".encode()).decode()
+        if password
+        else None
+    )
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+
+        def allowed(self):
+            # Local mode guards against DNS rebinding by Host; hosted mode by HTTP Basic auth.
+            if expected:
+                return hmac.compare_digest(
+                    self.headers.get("Authorization", ""), expected
+                )
+            return self.headers.get("Host") in (
+                f"127.0.0.1:{port}",
+                f"localhost:{port}",
+            )
+
+        def challenge(self):
+            raw = json.dumps({"error": "Panel şifresi gerekli"}).encode()
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="neutralbasis"')
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(raw)
 
         def send(self, obj, status=200):
             raw = json.dumps(obj, ensure_ascii=False, allow_nan=False).encode()
@@ -1488,10 +1516,11 @@ def serve(engine, port):
             self.wfile.write(raw)
 
         def do_GET(self):
-            if self.headers.get("Host") not in (
-                f"127.0.0.1:{port}",
-                f"localhost:{port}",
-            ):
+            if self.path == "/healthz":
+                return self.send({"ok": True, "mode": "PAPER"})
+            if not self.allowed():
+                if expected:
+                    return self.challenge()
                 return self.send({"error": "Yerel host gerekli"}, 403)
             if self.path == "/api/state":
                 # A cycle performs HTTP I/O; read state only between atomic updates to avoid torn JSON.
@@ -1574,11 +1603,7 @@ def serve(engine, port):
             self.send({"error": "Bulunamadı"}, 404)
 
         def do_POST(self):
-            if (
-                self.headers.get("Host")
-                not in (f"127.0.0.1:{port}", f"localhost:{port}")
-                or self.headers.get("X-Paper-Token") != token
-            ):
+            if not self.allowed() or self.headers.get("X-Paper-Token") != token:
                 return self.send({"error": "Yerel panel doğrulaması gerekli"}, 403)
             length = int(self.headers.get("Content-Length", "0"))
             if length > 10000:
@@ -1657,10 +1682,17 @@ def serve(engine, port):
             except (ValueError, TypeError, KeyError) as ex:
                 self.send({"error": str(ex)}, 400)
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     engine.public_snapshot = json.loads(json.dumps(engine.snapshot()))
-    print(f"Funding Desk Paper: http://127.0.0.1:{port}", flush=True)
+    print(f"Funding Desk Paper: http://{host}:{port}", flush=True)
+
+    # Hosted platforms stop the process with SIGTERM; take the same path as Ctrl+C so state persists.
+    def stop(*_):
+        raise KeyboardInterrupt
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, stop)
     worker = threading.Thread(target=engine.loop, daemon=True)
     worker.start()
     try:

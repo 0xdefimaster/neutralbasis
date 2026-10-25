@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 data/
 data-five-rh/
+.env
+.env.*
+*.sqlite3
+!.env.example
+data-railway/
