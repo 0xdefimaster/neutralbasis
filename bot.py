@@ -1666,9 +1666,17 @@ def serve(engine, port, host="127.0.0.1", password=None):
                     ):
                         return self.send(engine.request_backtest(body))
                     elif self.path == "/api/close":
-                        if not any(p["id"] == body.get("id") for p in engine.positions):
+                        wide = getattr(engine, "wide_paper", None)
+                        if wide and any(
+                            p["id"] == body.get("id") for p in wide.positions
+                        ):
+                            wide.manual_close.add(body["id"])
+                        elif not any(
+                            p["id"] == body.get("id") for p in engine.positions
+                        ):
                             raise ValueError("Pozisyon bulunamadı")
-                        engine.manual_close.add(body["id"])
+                        else:
+                            engine.manual_close.add(body["id"])
                         engine.events(
                             "CLOSE_REQUEST",
                             "Sonraki taramada paper kapatma istendi",
