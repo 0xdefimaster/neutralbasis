@@ -5,13 +5,14 @@ stored realized funding over the last 7 days, given only when the stored payment
 the whole window; nothing is estimated or interpolated.
 """
 
-import threading
+import math, threading
 from bot import now
 from risk_scan import VENUES
 
 CACHE_SECONDS = 60
 FRESH_SECONDS = 300
 WEEK = 7 * 86400
+MAX_PRICE_GAP = 0.15
 
 
 def paid7(sums, v, a, interval):
@@ -22,6 +23,23 @@ def paid7(sums, v, a, interval):
     return total if count >= int(WEEK / interval) else None
 
 
+def price_spread(cells):
+    """Widest perp mark gap: long the cheapest venue, short the dearest. A gap above
+    MAX_PRICE_GAP is almost always two different tokens sharing a ticker, so the mark
+    farthest from the median is dropped until the rest agree."""
+    marks = sorted((c[4], v) for v, c in cells.items() if c[4])
+    while len(marks) > 1 and math.log(marks[-1][0] / marks[0][0]) > MAX_PRICE_GAP:
+        median = marks[len(marks) // 2][0]
+        marks.remove(max(marks, key=lambda m: abs(math.log(m[0] / median))))
+    if len(marks) < 2:
+        return dict(price_spread=None, price_long=None, price_short=None)
+    return dict(
+        price_spread=math.log(marks[-1][0] / marks[0][0]),
+        price_long=marks[0][1],
+        price_short=marks[-1][1],
+    )
+
+
 def build(native, rows, universe, sums, kinds, labels, at=None):
     """native/rows: lists of dicts with venue, asset, rate (hourly), interval, fee;
     universe: {venue: {asset: entry}}; sums: {(venue, asset): (sum, count)} over 7d.
@@ -30,12 +48,18 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
     at = at or now()
     cells = {}
 
-    def put(v, a, rate, interval, fee, received):
+    def put(v, a, rate, interval, fee, received, mark=None):
         if rate is None or not interval or at - (received or 0) > FRESH_SECONDS:
             return
         cells.setdefault(a, {}).setdefault(
             v,
-            [rate, interval, fee, paid7(sums, v, a, interval)],
+            [
+                rate,
+                interval,
+                fee,
+                paid7(sums, v, a, interval),
+                mark if mark and mark > 0 else None,
+            ],
         )
 
     for r in native:
@@ -46,6 +70,7 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
             r.get("interval"),
             r.get("fee"),
             r["received"],
+            r.get("mark"),
         )
     for r in rows:
         if r.get("kind", "perp") == "perp":
@@ -56,10 +81,19 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
                 r.get("interval"),
                 r.get("fee"),
                 r["received"],
+                r.get("mark"),
             )
     for v, entries in universe.items():
         for a, x in entries.items():
-            put(v, a, x["rate"], x["interval"], x.get("fee"), x["received"])
+            put(
+                v,
+                a,
+                x["rate"],
+                x["interval"],
+                x.get("fee"),
+                x["received"],
+                x.get("mark"),
+            )
     assets = []
     for a, cs in cells.items():
         rates = [c[0] for c in cs.values()]
@@ -68,6 +102,7 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
                 asset=a,
                 cells=cs,
                 max_spread=max(rates) - min(rates) if len(rates) > 1 else None,
+                **price_spread(cs),
             )
         )
     assets.sort(
@@ -151,6 +186,7 @@ class MatrixCache:
                         venue=v,
                         asset=a,
                         rate=m.get("rate"),
+                        mark=m.get("mark"),
                         interval=m.get("interval") or 3600,
                         fee=fee,
                         received=m.get("received"),

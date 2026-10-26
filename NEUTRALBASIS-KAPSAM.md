@@ -113,3 +113,7 @@ Adres çubuğunda sekme yoksa panel **Özet** ile açılır. Yalnızca masanın 
 - Derin kontrolde elenen çift 30 dakika kenara alınır (eksik geçmiş nedeniyle elendiyse 15 dakika). Sonraki turlar aynı ilk adayları tekrar kontrol etmek yerine listede sıradakilere geçer; süre dolunca çift yeniden sıraya girer.
 - Geçmiş kaydedici her 10 piyasada bir listeyi yeniden okur ve önce işlem yapılabilir adayların bacaklarını doldurur: eksik geçmiş yüzünden elenen çiftler en önde, ardından her stratejinin pozitif skorlu ilk 40 adayı.
 - Çoklu paper ekranındaki "Aday inceleme" kartı tur sayısını, derin kontrol sayısını, uygun ve atlanan adayları, elenme nedenlerinin dağılımını (toplam ve şu an bekleyen) ve son elenen çiftleri tekrar deneme saatiyle gösterir. Sayaçlar bellek içindedir; yeniden başlatınca sıfırlanır.
+
+## Ana sayfa fiyat farkları: tüm varlıklar
+
+"En geniş fiyat farkları" artık seçili 15 varlıkla sınırlı değil. Funding matrisinin toplu taramasından gelen mark fiyatlarını kullanır: her varlıkta en ucuz borsada long, en pahalıda short. Aynı ticker'ı taşıyan farklı tokenler sahte fark göstermesin diye, borsalar arası fark %15'i aşarsa medyandan en uzak fiyat atılır ve kalanlar uyuşana kadar devam edilir. Mark fiyatı anlık göstergedir; işlem kararı Fiyat arb ve çoklu paper masasındaki defter/geçmiş kontrolleriyle verilir.
