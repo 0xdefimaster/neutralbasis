@@ -298,9 +298,13 @@ def closing_times(series, level, target):
 
 
 def convergence_stats(left, right, at, gap, cfg):
-    """Regular, stable crossings over both 7 and 30 days, and the usual time to close.
+    """Regular, stable crossings of the pair's normal gap over both 7 and 30 days, and
+    the usual time to return to it.
 
-    Gap is log(short venue / long venue): the short venue is the dearer one now.
+    Gap is log(short venue / long venue): the short venue is the dearer one now. The
+    normal gap (baseline) is the median over the window, so two venues that always
+    differ a little (0.99 vs 0.98) still revert: crossings, closing times and the
+    target are measured around the baseline instead of zero.
     """
     days = history_days(left, right, at, cfg.get("wide_min_history_days", 30))
     times = matched(left, right, at, days * 24)
@@ -310,13 +314,17 @@ def convergence_stats(left, right, at, gap, cfg):
     xs7 = [x for t, x in week]
     mean30, sd30 = statistics.mean(xs30), statistics.pstdev(xs30)
     mean7, sd7 = statistics.mean(xs7), statistics.pstdev(xs7)
+    base30, base7 = statistics.median(xs30), statistics.median(xs7)
+    dev = [(t, x - base30) for t, x in series]
     deadband = max(0.00002, sd30 * 0.15)
-    cross7, days7 = crossings(week, deadband)
-    cross30, days30 = crossings(series, deadband)
+    cross7, days7 = crossings([x for x in dev if x[0] >= week[0][0]], deadband)
+    cross30, days30 = crossings(dev, deadband)
     target = cfg["wide_conv_exit_bps"] / 10000
-    level = max(gap * 0.5, target + 0.0003)
-    closes = closing_times(series, level, target)
+    level = max((gap - base30) * 0.5, target + 0.0003)
+    closes = closing_times(dev, level, target)
     return dict(
+        baseline=base30,
+        baseline7=base7,
         cross7=cross7,
         cross30=cross30,
         two_sided7=days7,
@@ -820,9 +828,12 @@ class WidePaper:
                     "%d günde istikrarlı kesişim yok (%d kesişim, %d çift yönlü gün)"
                     % (days, hist["cross30"], hist["two_sided30"])
                 )
-            if abs(hist["mean30"]) > max(0.0002, hist["sd30"] * 0.5):
+            # A constant basis is fine (it is the target); a drifting one is not.
+            if abs(hist["baseline7"] - hist["baseline"]) > max(
+                0.0002, hist["sd30"] * 0.5
+            ):
                 out["reasons"].append(
-                    "Kalıcı fiyat bazisi: fiyatlar sıfır çevresinde buluşmuyor"
+                    "Normal fiyat farkı kayıyor: 7g ve %dg medyanı uyuşmuyor" % days
                 )
             if hist["episodes"] < cfg["wide_conv_min_episodes"]:
                 raise ValueError(
@@ -856,8 +867,10 @@ class WidePaper:
             )
             # Funding is not the thesis: a cost over the expected hold is charged, income is not credited.
             funding_cost = min(0.0, funding)
-            target = max(hist["mean7"], 0.0)
-            # Expected capture: the gap narrowing back to its 7d mean (or zero), not beyond.
+            # Target: the pair's normal gap, the less favourable of the 7d and long-window
+            # medians. It may be below zero when the short venue is usually the cheaper one.
+            target = max(hist["baseline7"], hist["baseline"])
+            # Expected capture: the gap narrowing back to its normal level, not beyond.
             capture = (
                 q["qty"] * (q["entry_short"] - q["entry_long"]) - q["size"] * target
             )
@@ -888,13 +901,13 @@ class WidePaper:
                 target_gap=target,
                 net=net,
                 entry_reason=(
-                    "Yakınsama: long %s, short %s; boşluk %.1f bp (7g ort. %.1f, sd %.1f), "
+                    "Yakınsama: long %s, short %s; boşluk %.1f bp (normal %.1f, sd %.1f), "
                     "kesişim 7g %d / %dg %d, ortalama kapanma %d saat, net $%.2f"
                     % (
                         lv,
                         sv,
                         gap * 10000,
-                        hist["mean7"] * 10000,
+                        target * 10000,
                         hist["sd7"] * 10000,
                         hist["cross7"],
                         hist["history_days"],
@@ -904,7 +917,7 @@ class WidePaper:
                     )
                 ),
             )
-            if gap < max(0.0005, hist["mean7"] + hist["sd7"]):
+            if gap < max(target + 0.0005, hist["baseline7"] + hist["sd7"]):
                 out["reasons"].append(
                     "Fiyat boşluğu geçmiş dağılıma göre yeterli değil"
                 )
@@ -1284,13 +1297,14 @@ class WidePaper:
             }
             gap = math.log(mid[d["short"]] / mid[d["long"]])
             p["live_gap"] = gap
-            zone = max(d.get("target_gap", 0.0), cfg["wide_conv_exit_bps"] / 10000)
+            # Earlier positions targeted max(mean, 0); the baseline target may be negative.
+            zone = d.get("target_gap", 0.0) + cfg["wide_conv_exit_bps"] / 10000
             # No need to wait for an exact cross: in the mean/cross zone the
             # after-close net decides.
             if gap <= zone and p["net_if_closed"] >= cfg["wide_min_net"]:
                 return "Fark ortalama/kesişim bölgesine geldi; kapanış sonrası net hedef sağlandı"
-            if gap <= 0 and p["net_if_closed"] > 0:
-                return "Fiyatlar kesişti"
+            if gap <= d.get("target_gap", 0.0) and p["net_if_closed"] > 0:
+                return "Fiyat farkı normal seviyesine döndü"
             if p["net_if_closed"] >= d["net"] > 0:
                 return "Beklenen yakınsama kazancı alındı"
             if held > d["max_hold_hours"] * 3600:
@@ -1570,8 +1584,10 @@ class WidePaper:
                 "komisyon, kayma dolum fiyatlarında. Funding: 7g/30g korele ve farkı istikrarlı çiftler, "
                 "aralıkları eşitlenmiş short − long funding; ücret, kayma ve fark riski payını karşılarsa "
                 "açılır; zayıflık kalıcıysa, uyum bozulursa veya bacak marjini riske girerse çıkılır. "
-                "Yakınsama: 7g ve 30g düzenli kesişim ve kapanma süresi; ucuzda long, pahalıda short, eşit "
-                "miktar, en fazla 5x; ortalama/kesişim bölgesinde kapanış sonrası nete bakılarak kapanır. "
+                "Yakınsama: çiftin normal fiyat farkı (7g/30g medyanı; sıfır olması gerekmez) etrafında 7g ve "
+                "30g düzenli kesişim ve dönüş süresi; ucuzda long, pahalıda short, eşit miktar, en fazla 5x; "
+                "fark normal seviyesine dönünce kapanış sonrası nete bakılarak kapanır; normal fark "
+                "kayıyorsa girilmez. "
                 "Kaldıraç tavandır, her bacağın kendi marjinine göre küçülür. Gerçek emir ve API anahtarı yok."
             ),
         )

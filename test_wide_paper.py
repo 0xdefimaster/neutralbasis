@@ -335,7 +335,7 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.cfg["wide_min_history_days"], 30)
 
     # --- convergence strategy ----------------------------------------------------
-    def setup_convergence(self, basis=0.0, amplitude=0.0035, gap=0.006):
+    def setup_convergence(self, basis=0.0, amplitude=0.0035, gap=0.006, drift=0.0):
         end = bot.hour(T0)
         hours = list(range(end - 730 * 3600, end, 3600))
         base = {t: 100 * (1 + 0.03 * math.sin(i / 7)) for i, t in enumerate(hours)}
@@ -345,7 +345,11 @@ class WidePaperTests(unittest.TestCase):
             price_type="trade",
             prices={
                 t: base[t]
-                * math.exp(basis + amplitude * math.sin(2 * math.pi * i / 12))
+                * math.exp(
+                    basis
+                    + drift * i / len(hours)
+                    + amplitude * math.sin(2 * math.pi * i / 12)
+                )
                 for i, t in enumerate(hours)
             },
         )
@@ -400,19 +404,37 @@ class WidePaperTests(unittest.TestCase):
             self.desk.closed[-1]["close_reason"],
             (
                 "Fark ortalama/kesişim bölgesine geldi; kapanış sonrası net hedef sağlandı",
-                "Fiyatlar kesişti",
+                "Fiyat farkı normal seviyesine döndü",
                 "Beklenen yakınsama kazancı alındı",
             ),
         )
         self.assertGreater(self.desk.closed[-1]["net"], 0)
 
     def test_persistent_basis_never_qualifies(self):
-        # Dear venue always 30bp rich: prices never meet.
+        # Dear venue always 30bp rich and barely moves: today's 60bp has no history
+        # of excursions that came back.
         self.setup_convergence(basis=0.003, amplitude=0.0003)
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
         reasons = " ".join(self.desk.assessed[0]["reasons"])
-        self.assertIn("kesişim yok", reasons)
+        self.assertRegex(reasons, "kesişim yok|kapanışı yetersiz")
+
+    def test_constant_basis_reverts_to_its_normal_gap(self):
+        # 0.99 vs 0.98 style: the dear venue is normally 30bp rich and swings around
+        # that; today it is 90bp rich, so the trade targets ~30bp, not zero.
+        self.setup_convergence(basis=0.003, gap=0.009)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        d = self.desk.positions[0]["decision"]
+        self.assertAlmostEqual(d["convergence_history"]["baseline"], 0.003, places=3)
+        self.assertAlmostEqual(d["target_gap"], 0.003, places=3)
+
+    def test_drifting_basis_is_rejected(self):
+        self.setup_convergence(drift=0.006, gap=0.012)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        reasons = " ".join(self.desk.assessed[0]["reasons"])
+        self.assertIn("Normal fiyat farkı kayıyor", reasons)
 
     def test_convergence_charges_funding_paid_while_waiting(self):
         self.setup_convergence()
