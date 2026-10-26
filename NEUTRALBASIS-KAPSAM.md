@@ -69,3 +69,19 @@ En iyi adaylar (varsayılan 3, varlık başına bir tane) derin kontrolden geçe
 Funding her bacakta borsanın kendi ödeme zamanında gerçekleşmiş oranla uzlaştırılır; değerleme ödeme anındaki gözlenen mark, o yoksa 1 saat sonra giriş fiyatı (tahmini olarak işaretlenir). Yayımlanmayan ödeme 1 saat sonra doğrulanmamış 0 olarak kaydedilir. Çıkış: kullanıcı, pozisyon/günlük kayıp limiti, spread stres bütçesi, azami tutma süresi veya gelecek funding farkının tersine dönmesi.
 
 Sermaye ayrı ve tek ortak paper cüzdandır (varsayılan $1000); mevcut Lighter RH–Extended masasının bakiyelerine dokunmaz. Gerçekte her borsada ayrı teminat ve transfer gerekir; bu modellenmez. Gerçek emir ve API anahtarı yoktur. Spot–perp çiftleri ve pozisyon rotasyonu henüz bu masada yok. Testler: 88 (1 atlanan).
+
+
+## Çoklu borsa: iki strateji
+**Funding (korele çiftler).** Önceki sıralama korunur; derin kontrolde artık 7 gün ve 30 günlük 1h getiri korelasyonunun ikisi de eşik üstünde olmalıdır. Çıkış: kayıp/stres limitleri, funding farkının tersine dönmesi, ayrıca kâr kilidi. Pozisyonun kapatılırsa net değeri en az asgari net kadar zirve yaptıktan sonra zirvenin `wide_lock_trail` (varsayılan %50) kadarını geri verirse ve hâlâ pozitifse kapanır. Gelecek funding asgari netin altına inerse ve pozisyon kârdaysa kâr alınır. Giriş ücretleri peşin ödendiği için yeni pozisyon negatiften başlar; kayıp limitleri, stres ve funding dönüşü zararla kapatabilir. "Hiç zarar etmeden" garanti edilemez.
+
+**Fiyat yakınsaması (her borsa çifti).** Ucuz borsada long, pahalıda short; eşit miktar, 5x (borsa sınırı daha düşükse o). 30 günlük eşlenmiş 1h işlem mumlarında fiyat farkı: 7 günde en az 6 kesişim ve 4 çift yönlü gün, 30 günde en az 20 kesişim ve 15 çift yönlü gün; 30 günlük ortalama fark sıfıra yakın olmalı (kalıcı bazis yok). Bugünkü genişliğin yarısına ulaşan geçmiş açılmaların kaç saatte kapandığı ölçülür (en az 3 örnek); ortalama süre beklenen tutma, iki katı (en çok 72 saat) azami tutmadır. Net = giriş VWAP boşluğu − yarım defter kayması − 4 taker ücreti + beklenen sürede ödenecek/alınacak funding (gerçekleşmiş oran varsa kötü olanı). Fiyat boşluğu 7g ortalama + 1 standart sapmanın ve 5 bp'nin üstünde olmalı. Çıkış: fiyatlar kesişince, makas 2 bp altına inip net hedef sağlanınca, beklenen kazanç erken gelince veya azami süre dolunca; kayıp/stres limitleri her zaman önceliklidir.
+
+Her iki strateji aynı ortak paper cüzdanı kullanır, varlık başına bir pozisyon açılır ve her turda iki stratejinin en iyi adaylarından neti en yüksek olan seçilir. Testler: 95 (1 atlanan).
+
+
+## Son şartname uyumu
+- Ortak hesap: net = iki bacağın fiyat PnL'si + net funding − komisyon; kayma dolum fiyatlarında. Strateji bazlı ayrı rapor (açık, işlem, kârlı, fiyat PnL, funding, komisyon, net, doğrulanmamış/bekleyen ödeme) panelde.
+- Yakınsama: beklenen kazanç, farkın 7g ortalamasına (veya sıfıra) dönmesiyle hesaplanır; dört ücret, kayma, yalnızca funding gideri (gelir sayılmaz) ve 7g fark standart sapması kadar risk payı düşülür. Fark ortalama/kesişim bölgesine gelince kapanış sonrası net asgari netin üstündeyse kapanır; tam kesişim beklenmez.
+- Funding: ayrıca 7g fark standart sapması `wide_max_spread_sd_bps` (30 bp) altında olmalı; aynı risk payı nette düşülür. Funding dönüşü/zayıflığı `wide_weak_minutes` (30 dk) boyunca sürmezse çıkılmaz. Açık pozisyonda 7g/30g korelasyon düşerse veya z-skoru eşik+1'i aşarsa "Fiyat uyumu bozuldu". Kâr hedefi (beklenen net) ve kâr kilidi korunur.
+- Kaldıraç tavandır: bir bacağın tutma süresindeki 4 sigma hareketi tasfiye mesafesinin yarısını geçmeyecek şekilde düşürülür. Bir bacağın zararı kendi marjininin yarısına ulaşırsa "Bacak marjin riski" ile kapanır.
+- Her işlemde strateji, giriş gerekçesi ve kapanış nedeni kaydedilir. Bir bacak dolmazsa dolan bacak kapatılır. Funding API'si veya piyasa listesi bozuk olsa da defterden izleme ve kapatma sürer; bekleyen ödemeler sonradan uzlaştırılır. Testler: 102 (1 atlanan).
