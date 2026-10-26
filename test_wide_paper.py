@@ -513,6 +513,76 @@ class WidePaperTests(unittest.TestCase):
         self.assertLess(wild["leverage"], 1.5)
         self.assertGreaterEqual(wild["leverage"], 1.0)
 
+    # --- review fixes ----------------------------------------------------------------
+    def test_entry_refreshes_funding_and_skips_a_flip(self):
+        self.setup_pair()
+        first = [dict(r) for r in self.src.rows]
+        flipped = [
+            row("Hyperliquid", rate=0.001, interval=3600, fee=0.00045),
+            row("Binance", rate=-0.0005, interval=28800, fee=0.0005),
+        ]
+        calls = iter([first, flipped])
+        self.src.market_rows = lambda: [dict(r) for r in next(calls)]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn(
+            "Girişte funding yenilendi: avantaj kalmadı",
+            self.desk.assessed[0]["reasons"],
+        )
+
+    def test_entry_skips_stale_funding_quote(self):
+        self.setup_pair()
+        first = [dict(r) for r in self.src.rows]
+        stale = [dict(r, funding_received=T0 - 600) for r in first]
+        calls = iter([first, stale])
+        self.src.market_rows = lambda: [dict(r) for r in next(calls)]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn("Girişte funding verisi eski", self.desk.assessed[0]["reasons"])
+
+    def test_late_rate_after_close_replaces_unverified_hour(self):
+        self.setup_pair()
+        self.desk.cycle()
+        p = self.desk.positions[0]
+        qty = p["legs"][0]["qty"]
+        pay = T0 + 8 * 3600
+        # Binance never published its 8h payment; the trade closes after the wait.
+        self.clock = pay + bot.FUNDING_UNVERIFIED_AFTER + 60
+        self.desk.cache.clear()
+        for v in ("Hyperliquid", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.manual_close.add(p["id"])
+        self.desk.cycle(entries=False)
+        closed = self.desk.closed[-1]
+        self.assertIn("Binance", {x["venue"] for x in closed["funding_unverified"]})
+        self.assertFalse(
+            [x for x in closed.get("pending_funding", []) if x.startswith("Binance")]
+        )
+        before = closed["funding"]
+        # The rate is published late, after the close.
+        self.store.mark("Binance", "BTC", pay - 10, 100.0)
+        self.src.rates[("Binance", "BTC")].append(
+            dict(ts=pay, rate=0.0008, value=None, audit_id=None)
+        )
+        self.clock += 600
+        self.desk.cache.clear()
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.cycle(entries=False)
+        self.assertAlmostEqual(closed["funding"] - before, qty * 100 * 0.0008, places=6)
+        self.assertNotIn(
+            "Binance", {x["venue"] for x in closed.get("funding_unverified", [])}
+        )
+        self.assertAlmostEqual(
+            closed["net"], closed["price_pnl"] + closed["funding"] - closed["fees"]
+        )
+
+    def test_leverage_settings_capped_at_five(self):
+        for key in ("wide_leverage", "wide_conv_leverage"):
+            with self.assertRaises(ValueError):
+                self.desk.update_config({key: 6})
+        self.desk.update_config({"wide_leverage": 5, "wide_conv_leverage": 5})
+
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
 

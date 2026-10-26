@@ -875,10 +875,22 @@ class RiskEngine(Engine):
                 a = p["asset"]
                 vs = [x["venue"] for x in p["legs"] if not x["closed"]]
                 try:
+                    # A funding history outage must not stop marking or closing the legs.
                     for v in {x["venue"] for x in p["legs"]}:
-                        self.feed.funding_history(
-                            v, a, min(x["entered"] for x in p["legs"])
-                        )
+                        try:
+                            self.feed.funding_history(
+                                v,
+                                a,
+                                min((x["entered"] for x in p["legs"]), default=now()),
+                            )
+                        except Exception as ex:
+                            self.events(
+                                "FUNDING_WAIT",
+                                "Funding geçmişi alınamadı; fiyat izlemesi sürüyor",
+                                position=p["id"],
+                                venue=v,
+                                error=str(ex),
+                            )
                     self.settle(p)
                     books = {v: self.feed.book(v, a) for v in vs}
                     self.mark_position(p, books)
