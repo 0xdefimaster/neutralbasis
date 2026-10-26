@@ -582,6 +582,33 @@ class WidePaperTests(unittest.TestCase):
             self.desk.assessed[0]["reasons"],
         )
 
+    def test_entry_without_any_fill_is_not_a_trade(self):
+        self.setup_pair()
+
+        def moved(*a, **k):
+            raise ValueError("Dolum öncesi fiyat %0,1 sınırını aştı")
+
+        self.desk.quote = moved
+        self.desk.cycle()
+        self.assertEqual((self.desk.positions, self.desk.closed), ([], []))
+        self.assertEqual(self.desk.report()["funding"]["trades"], 0)
+        self.assertEqual(self.desk.wallet["cash"], self.desk.cfg["wide_capital"])
+        (r,) = self.desk.rejected.values()
+        self.assertIn("Giriş yapılmadı", r["reason"])
+
+    def test_old_no_fill_records_are_not_counted(self):
+        self.desk.closed.append(
+            dict(
+                strategy="funding",
+                legs=[],
+                net=0.0,
+                price_pnl=0.0,
+                funding=0.0,
+                fees=0.0,
+            )
+        )
+        self.assertEqual(self.desk.report()["funding"]["trades"], 0)
+
     def test_entry_skips_stale_funding_quote(self):
         self.setup_pair()
         first = [dict(r) for r in self.src.rows]

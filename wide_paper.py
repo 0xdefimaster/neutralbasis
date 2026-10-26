@@ -1072,6 +1072,18 @@ class WidePaper:
                 net=c["net"],
             )
         except Exception as ex:
+            if not p["legs"]:
+                # Nothing was filled: an entry that did not happen is not a trade.
+                self.positions.remove(p)
+                self.reject(c, ["Giriş yapılmadı: " + str(ex)], now())
+                self.persist()
+                self.events(
+                    "ENTRY_SKIP",
+                    "Giriş yapılmadı: " + str(ex),
+                    asset=c["asset"],
+                    strategy=p["strategy"],
+                )
+                return
             p["status"] = "RECOVERY"
             p["close_reason"] = "Bacak kurtarma: " + str(ex)
             self.persist()
@@ -1373,7 +1385,12 @@ class WidePaper:
         """Paper results per strategy; unverified and estimated funding kept apart."""
         out = {}
         for key in ("funding", "convergence"):
-            done = [p for p in self.closed if p.get("strategy", "funding") == key]
+            # Records from before entries without a fill were dropped have no legs.
+            done = [
+                p
+                for p in self.closed
+                if p.get("strategy", "funding") == key and p.get("legs")
+            ]
             settled = [p for p in done if not p.get("pending_funding")]
             out[key] = dict(
                 open=sum(p.get("strategy", "funding") == key for p in self.positions),
