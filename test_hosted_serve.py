@@ -27,6 +27,11 @@ class StubEngine:
     def pair_view(self, asset, long, short):
         return {"asset": asset, "long": long, "short": short}
 
+    def pair_books(self, body):
+        if body.get("long") == body.get("short"):
+            raise ValueError("aynı borsa")
+        return {"asset": body["asset"], "legs": {}}
+
     def request_pair_sync(self, body):
         return {"ok": True, "started": body["venues"]}
 
@@ -107,6 +112,11 @@ class HostedServeTests(unittest.TestCase):
         self.assertEqual(self.call("/api/pair-sync", "s3cret", body, "bad")[0], 403)
         status, raw = self.call("/api/pair-sync", "s3cret", body, self.token())
         self.assertEqual((status, json.loads(raw)["started"]), (200, ["A"]))
+        book = {"asset": "BTC", "long": "A", "short": "B"}
+        self.assertEqual(self.call("/api/pair-book", "s3cret", book, "bad")[0], 403)
+        self.assertEqual(self.call("/api/pair-book", "s3cret", book, self.token())[0], 200)
+        book["short"] = "A"
+        self.assertEqual(self.call("/api/pair-book", "s3cret", book, self.token())[0], 400)
 
 
 class BindGuardTests(unittest.TestCase):

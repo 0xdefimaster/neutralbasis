@@ -430,6 +430,9 @@ class DeskEngine(RiskEngine):
     def pair_view(self, asset, long, short):
         return self.pairs.pair_view(asset, long, short)
 
+    def pair_books(self, body):
+        return self.pairs.books(body.get("asset"), body.get("long"), body.get("short"))
+
     def request_pair_sync(self, body):
         return self.pairs.request_sync(
             body.get("asset"), list(body.get("venues") or [])

@@ -98,6 +98,56 @@ class UniverseTests(unittest.TestCase):
             self.assertEqual(self.wide.universe_snapshot()["Binance"], {})
 
 
+class LiquidExchange(FakeExchange):
+    has = {"fetchFundingRates": True, "fetchTickers": True, "fetchOpenInterests": True}
+
+    def fetch_funding_rates(self):
+        rates = super().fetch_funding_rates()
+        rates["BTC/USDT:USDT"]["markPrice"] = 50000.0
+        return rates
+
+    def fetch_tickers(self, symbols=None):
+        return {
+            "BTC/USDT:USDT": dict(quoteVolume=2.5e8),
+            "ZRO/USDT:USDT": dict(quoteVolume=None, baseVolume=1000.0, last=3.0),
+        }
+
+    def fetch_open_interests(self, symbols=None):
+        return {"BTC/USDT:USDT": dict(openInterestAmount=100.0)}
+
+
+class UniverseLiquidityTests(unittest.TestCase):
+    def setUp(self):
+        p = mock.patch.object(wide_markets, "now", lambda: T0)
+        p.start()
+        self.addCleanup(p.stop)
+        self.wide = WideMarkets(None, ["BTC"], threading.Event())
+
+    def test_bulk_volume_and_open_interest(self):
+        self.wide.scan_universe("Binance", LiquidExchange())
+        u = self.wide.universe_snapshot()["Binance"]
+        self.assertEqual(u["BTC"]["volume"], 2.5e8)
+        self.assertEqual(u["BTC"]["oi"], 100.0 * 50000.0)
+        self.assertEqual(u["ZRO"]["volume"], 3000.0)
+        self.assertIsNone(u["ZRO"]["oi"])
+
+    def test_venue_without_liquidity_calls_stays_unknown(self):
+        self.wide.scan_universe("Binance", FakeExchange())
+        u = self.wide.universe_snapshot()["Binance"]
+        self.assertIsNone(u["BTC"]["volume"])
+        self.assertIsNone(u["BTC"]["oi"])
+
+    def test_failing_ticker_call_does_not_drop_funding(self):
+        class Broken(LiquidExchange):
+            def fetch_tickers(self, symbols=None):
+                raise RuntimeError("rate limited")
+
+        self.wide.scan_universe("Binance", Broken())
+        u = self.wide.universe_snapshot()["Binance"]
+        self.assertEqual(set(u), {"BTC", "ZRO"})
+        self.assertIsNone(u["BTC"]["volume"])
+
+
 def row(v, a, rate, interval=3600, fee=0.0005, received=T0, mark=None):
     return dict(
         venue=v,
@@ -242,3 +292,19 @@ class PriceSpreadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiquidityCellTests(unittest.TestCase):
+    def test_cells_carry_volume_and_oi_and_native_is_curated(self):
+        native = [row("Lighter", "BTC", 0.0001)]
+        rows = [dict(row("OKX", "BTC", 0.0002), volume=5e6, oi=2e6)]
+        universe = {
+            "Gate": {"BTC": dict(rate=0.0003, interval=3600, received=T0, volume=7e5)}
+        }
+        m = build(native, rows, universe, {}, {}, {}, at=T0)
+        cells = m["assets"][0]["cells"]
+        self.assertEqual(cells["OKX"][5:], [5e6, 2e6])
+        self.assertEqual(cells["Gate"][5:], [7e5, None])
+        self.assertEqual(cells["Lighter"][5:], [None, None])
+        curated = {v["id"]: v["curated"] for v in m["venues"]}
+        self.assertEqual(curated, {"Lighter": True, "OKX": False, "Gate": False})

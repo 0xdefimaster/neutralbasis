@@ -146,9 +146,62 @@ def asset_detail(asset, legs, funding, at=None):
     )
 
 
-def pair_detail(asset, long, short, legs, funding, at=None):
-    """One pair: both legs, realized windows per leg and for the pair, and the cumulative
-    funding path over the stored 30 days."""
+def price_history(long_prices, short_prices, at):
+    """Hourly short/long gap on hours both legs closed, and its mean per window. A window
+    mean is given only when at least 90% of its hours have both closes."""
+    hours = sorted(set(long_prices) & set(short_prices))
+    points = [
+        dict(
+            ts=t,
+            long_price=long_prices[t],
+            short_price=short_prices[t],
+            gap=short_prices[t] / long_prices[t] - 1,
+        )
+        for t in hours
+        if long_prices[t] > 0 and short_prices[t] > 0
+    ]
+    # Same-ticker clashes would swamp the mean; such a pair has no usable gap history.
+    if any(abs(p["gap"]) > MAX_PRICE_GAP for p in points):
+        points = []
+    windows = {}
+    for key, span in WINDOWS:
+        picked = [p["gap"] for p in points if at - span < p["ts"] <= at]
+        expected = int(span / 3600)
+        complete = len(picked) >= expected * 0.9
+        windows[key] = dict(
+            mean=sum(picked) / len(picked) if complete else None,
+            low=min(picked) if complete else None,
+            high=max(picked) if complete else None,
+            count=len(picked),
+            expected=expected,
+        )
+    return points, windows
+
+
+def book_cost(book, usd, buy, fee):
+    """One-side entry cost from mid at a USD size: taker fee plus slippage, in bp.
+    `fits` is False when the visible book cannot fill the size."""
+    bid, ask = max(p for p, _ in book["bids"]), min(p for p, _ in book["asks"])
+    mid = (bid + ask) / 2
+    out = dict(usd=usd, half_spread_bp=(ask - bid) / 2 / mid * 1e4)
+    try:
+        from bot import walk
+
+        vwap = walk(book["asks"] if buy else book["bids"], usd / mid, buy)
+    except ValueError:
+        return dict(out, fits=False, bp=None, cost=None)
+    slip = vwap / mid - 1 if buy else 1 - vwap / mid
+    bp = (slip + (fee or 0)) * 1e4
+    return dict(out, fits=True, bp=bp, cost=bp / 1e4 * usd, fee_known=fee is not None)
+
+
+BOOK_SIZES = (10_000, 100_000, 1_000_000)
+
+
+def pair_detail(asset, long, short, legs, funding, at=None, prices=None):
+    """One pair: both legs, realized windows per leg and for the pair, the cumulative
+    funding path over the stored 30 days and, given stored closes, the price gap history.
+    """
     at = at or now()
     if long == short:
         raise ValueError("Long ve short aynı borsa olamaz")
@@ -175,9 +228,14 @@ def pair_detail(asset, long, short, legs, funding, at=None):
         if L["fee"] is not None and S["fee"] is not None
         else None
     )
+    points, price_windows = price_history(
+        (prices or {}).get(long, {}), (prices or {}).get(short, {}), at
+    )
     return dict(
         asset=asset,
         ts=at,
+        price_points=points,
+        price_windows=price_windows,
         long=dict(L, paid=lp),
         short=dict(S, paid=sp),
         funding_gap=S["rate"] - L["rate"],
@@ -257,10 +315,23 @@ class PairViews:
         out["syncing"] = self.sync_state(asset)
         return out
 
+    def prices(self, asset, venues):
+        start = now() - WINDOWS[-1][1] - 3600
+        return {
+            v: self.engine.history.db.candles(v, asset, "perp", start) for v in venues
+        }
+
     def pair_view(self, asset, long, short):
         asset = str(asset or "").upper()
         legs = self.legs(asset)
-        out = pair_detail(asset, long, short, legs, self.funding(asset, (long, short)))
+        out = pair_detail(
+            asset,
+            long,
+            short,
+            legs,
+            self.funding(asset, (long, short)),
+            prices=self.prices(asset, (long, short)),
+        )
         out["syncing"] = self.sync_state(asset)
         return out
 
@@ -290,6 +361,7 @@ class PairViews:
                     added = self.engine.history.sync(
                         v, asset, "perp", legs[v]["interval"]
                     )
+                    added += self.fill_candles(v, asset)
                     state = dict(status="done", ts=now(), added=added)
                 except Exception as ex:
                     state = dict(status="error", ts=now(), error=str(ex)[:200])
@@ -299,3 +371,50 @@ class PairViews:
         if started:
             threading.Thread(target=run, daemon=True, name="pair-sync").start()
         return dict(ok=True, started=started)
+
+    def fill_candles(self, v, asset):
+        """Closed 1h closes for a leg the background keeper skips (outside the selected
+        assets); stored next to the keeper's own rows."""
+        from risk_scan import VENUES
+        from bot import hour
+
+        e = self.engine
+        if v in VENUES or asset in e.cfg["symbols"]:
+            return 0
+        db = e.history.db
+        end = hour(now())
+        last = db.last_candle(v, asset, "perp")
+        start = max(end - WINDOWS[-1][1], (last + 3600) if last is not None else 0)
+        if start >= end:
+            return 0
+        prices = e.wide.candles_since(v, asset, "perp", start, end)
+        return db.add_candles(v, asset, "perp", prices)
+
+    def books(self, asset, long, short):
+        """Current books of both legs and the entry cost at the reference sizes."""
+        from risk_scan import VENUES
+
+        asset = str(asset or "").upper()
+        legs = self.legs(asset)
+        out = dict(asset=asset, ts=now(), legs={})
+        for v, buy in ((long, True), (short, False)):
+            if v not in legs:
+                raise ValueError(v + ": bu varlık için güncel piyasa yok")
+            try:
+                book = (
+                    self.engine.feed.book(v, asset)
+                    if v in VENUES
+                    else self.engine.wide.book(v, asset)
+                )
+                out["legs"][v] = dict(
+                    side="long" if buy else "short",
+                    fee=legs[v]["fee"],
+                    sizes=[
+                        book_cost(book, usd, buy, legs[v]["fee"]) for usd in BOOK_SIZES
+                    ],
+                )
+            except Exception as ex:
+                out["legs"][v] = dict(
+                    side="long" if buy else "short", error=str(ex)[:200]
+                )
+        return out

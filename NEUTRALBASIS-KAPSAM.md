@@ -127,3 +127,24 @@ Her perp–perp çifti için `#pair?asset=…&long=…&short=…` sayfası eklen
 "Geçmişi doldur" düğmesi seçilen bacakların 30 günlük gerçekleşmiş funding'ini arka planda kaydeder. Tek istekte en çok 4 bacak doldurulur ve aynı bacak 10 dakikada bir kez istenir. Fiyat farkı değişimi ve kayma bu sayfalardaki sonuçlara dahil değildir. Matristeki ve ana sayfadaki satırlar bu sayfalara bağlanır. Üst aramada varlık adı yazıp Enter'a basınca varlık sayfası açılır, `/` tuşu aramaya odaklar.
 
 Desteklenmeyenler: DEX hacim/OI/pazar payı geçmişi (Stats/Charts), OI hareketleri, haber, airdrop, farm, vault ve soru paneli. Tüm borsalarda kaldıraç, KYC ve trade bağlantıları da desteklenmiyor. Bunlar için toplu kaynak bağlı değildir.
+
+
+## En iyi funding çiftleri ve çift sayfası — arb.sh hizası
+Toplu tarama artık 24 saatlik hacmi okuyor; borsanın toplu çağrısı varsa OI ve kaldıraç sınırı da okunuyor. Ana sayfadaki en iyi funding çiftleri için en az bir DEX bacağı gerekiyor. İki bacakta da OI ≥ $1M olmalı; OI yayımlanmıyorsa 24 saatlik hacme bakılıyor. Fiyatları %15'ten fazla ayrışan bacaklar (aynı ticker'ı taşıyan farklı tokenler) eleniyor. Uç funding kartı OI ≥ $2M istiyor. Matrise likidite filtresi eklendi: hepsi, ≥ $1M ve ≥ $10M; varsayılan ≥ $1M. Yerel DEX beslemeleri (Lighter RH, Extended, TxFlow, RISEx, Arcus) hacim ya da OI yayımlamaz. Bu beslemeler yalnızca seçili varlıkları kapsadığı için filtreyi geçer.
+
+Çift sayfasına şunlar eklendi:
+- Ödemeler bacak başına "al/öde %/aralık" olarak gösteriliyor.
+- "Şimdi açsaydın" bölümü artık funding + fiyat − maliyet = sonuç şeklinde. Fiyat bileşeni, şu anki farkın pencere ortalamasına dönmesi varsayımıyla hesaplanıyor ve iki bacağın kayıtlı 1h kapanışlarıyla bulunuyor. Pencere saatlerinin en az %90'ı gerekiyor.
+- Anlık funding farkı son 7 günün ortalamasının iki katından fazlaysa uyarı çıkıyor.
+- Grafikte Fiyat farkı, Fiyatlar ve Funding sekmeleri var. Her biri 24S/3G/7G/14G/30G aralıklarıyla açılabiliyor.
+- "Defterleri oku" düğmesi iki bacağın güncel defterinden $10k, $100k ve $1M için tek yön giriş maliyetini hesaplıyor (taker ücreti + kayma, bp). Defter okunduysa sonuçtaki maliyet bu değerle (giriş + aynı tutarda çıkış) hesaplanıyor.
+- Kontrol listesine şunlar eklendi: defterlere sığma, azami kaldıraçta marjin, farklı ödeme aralıklarında 24 saatlik projeksiyon, ortalamadan dar fark ve ince bacak.
+
+"Geçmişi doldur" düğmesi seçili olmayan varlıklarda da iki bacağın 30 günlük 1h mumlarını kaydediyor; yerel DEX'ler hariç.
+
+Desteklenmeyenler:
+- Giriş/çıkış geçmişi grafiği. Bunun için geçmiş defter örnekleri gerekiyor.
+- Borsa trade bağlantıları.
+- Puan/airdrop rozeti.
+- KYC kontrolü.
+- MEXC. Toplu funding yok, bu yüzden seçili varlıklar dışındaki MEXC çiftleri görünmez.
