@@ -75,6 +75,12 @@ LIMITS = dict(
 # liquidation distance; the other venue's profit does not protect it.
 LEG_SAFETY = 0.5
 HISTORY_TTL = 1800
+# Rates for ranking may be a scan round old; entry refreshes them (ENTRY_FUNDING_MAX_AGE)
+# and prices every leg on a fresh book.
+ROW_MAX_AGE = 300
+# Assets outside the selected list join the desk from the bulk scan when a leg has at
+# least this much open interest (24h volume where OI is unpublished).
+UNIVERSE_MIN_USD = 1_000_000
 FUNDING_TTL = 120
 MIN_NOTIONAL = 10
 LATE_FUNDING_WINDOW = 7 * 86400
@@ -150,7 +156,7 @@ def usable_rows(rows, at):
             and r.get("fee") is not None
             and (r.get("mark") or 0) > 0
             and r.get("price_type") != "last_trade"
-            and at - r["received"] <= 180
+            and at - r["received"] <= ROW_MAX_AGE
         ):
             groups.setdefault(r["asset"], {}).setdefault(r["venue"], r)
     return groups
@@ -335,6 +341,45 @@ def realized_raw(rows, interval, at):
     return statistics.mean(recent)
 
 
+def universe_rows(universe, rows, held=()):
+    """Bulk-scan markets for every asset, as desk rows. Markets already covered by the
+    native feed or the selected scan are skipped; a leg must carry UNIVERSE_MIN_USD of
+    open interest (or volume) unless the desk already holds that asset."""
+    have = {(r["venue"], r["asset"]) for r in rows}
+    out = []
+    for v, entries in universe.items():
+        if v in NATIVE:
+            continue
+        for a, x in entries.items():
+            if (v, a) in have:
+                continue
+            depth = x.get("oi") if x.get("oi") is not None else x.get("volume")
+            if a not in held and (depth or 0) < UNIVERSE_MIN_USD:
+                continue
+            out.append(
+                dict(
+                    asset=a,
+                    venue=v,
+                    kind="perp",
+                    symbol=x["symbol"],
+                    mark=x.get("mark"),
+                    price_type="mark",
+                    rate=x["rate"],
+                    raw_rate=x["raw_rate"],
+                    interval=x["interval"],
+                    next=x.get("next"),
+                    received=x["received"],
+                    funding_received=x["received"],
+                    fee=x.get("fee"),
+                    leverage=x.get("leverage"),
+                    volume=x.get("volume"),
+                    oi=x.get("oi"),
+                    execution=False,
+                )
+            )
+    return out
+
+
 class EngineSource:
     """Routes market data to the native feed or the CCXT scanner."""
 
@@ -349,8 +394,7 @@ class EngineSource:
                 fee = e.fee(v)
             except ValueError:
                 continue
-            for a in e.cfg["symbols"]:
-                m = e.feed.meta.get(v, {}).get(a)
+            for a, m in list(e.feed.meta.get(v, {}).items()):
                 if not m or m.get("rate") is None:
                     continue
                 rows.append(
@@ -370,9 +414,11 @@ class EngineSource:
                     )
                 )
         extra, _ = e.wide.snapshot()
-        return rows + [
-            r for r in extra if r["kind"] == "perp" and r["venue"] not in NATIVE
-        ]
+        rows += [r for r in extra if r["kind"] == "perp" and r["venue"] not in NATIVE]
+        held = {
+            p["asset"] for p in getattr(getattr(e, "wide_paper", None), "positions", [])
+        }
+        return rows + universe_rows(e.wide.universe_snapshot(), rows, held)
 
     def book(self, v, a):
         if v in NATIVE:
@@ -407,6 +453,11 @@ class EngineSource:
         if kept and live.get("price_type") == "trade":
             live = dict(live, prices={**kept, **live["prices"]})
         return live
+
+    def current_funding(self, v, a):
+        if v in NATIVE:
+            raise ValueError(v + ": yerel besleme kendi tazeliğini tutar")
+        return self.engine.wide.current_funding(v, a)
 
     def funding(self, v, a, start):
         if v in NATIVE:
@@ -888,6 +939,19 @@ class WidePaper:
         l, s = fresh.get((c["long"], c["asset"])), fresh.get((c["short"], c["asset"]))
         if not l or not s or l.get("raw_rate") is None or s.get("raw_rate") is None:
             return "Girişte güncel funding oranı yok"
+        # A leg known only from the last bulk scan is re-read on its own.
+        refresh = getattr(self.source, "current_funding", None)
+        legs = []
+        for r in (l, s):
+            if refresh and at - r.get("funding_received", r["received"]) > (
+                ENTRY_FUNDING_MAX_AGE
+            ):
+                try:
+                    r = dict(r, **refresh(r["venue"], c["asset"]))
+                except Exception:
+                    pass
+            legs.append(r)
+        l, s = legs
         if any(
             at - r.get("funding_received", r["received"]) > ENTRY_FUNDING_MAX_AGE
             for r in (l, s)
@@ -1501,7 +1565,8 @@ class WidePaper:
             last_cycle=self.last_cycle,
             error=self.error,
             method=(
-                "İki strateji, taranan tüm borsa çiftleri; net = iki bacağın fiyat PnL'si + net funding − "
+                "İki strateji, taranan tüm borsa çiftleri ve tüm varlıklar (seçili liste dışındakiler OI veya "
+                "hacmi ≥ $1M bacaklarla); net = iki bacağın fiyat PnL'si + net funding − "
                 "komisyon, kayma dolum fiyatlarında. Funding: 7g/30g korele ve farkı istikrarlı çiftler, "
                 "aralıkları eşitlenmiş short − long funding; ücret, kayma ve fark riski payını karşılarsa "
                 "açılır; zayıflık kalıcıysa, uyum bozulursa veya bacak marjini riske girerse çıkılır. "

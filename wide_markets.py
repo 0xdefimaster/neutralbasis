@@ -727,6 +727,8 @@ class WideMarkets:
                     ),
                     None,
                 )
+                if not row and kind == "perp":
+                    row = self.universe.get(v, {}).get(a)
             if not row:
                 raise ValueError(v + ": seçili piyasanın güncel verisi yok")
             if not ex.has.get("fetchOHLCV"):
@@ -819,6 +821,42 @@ class WideMarkets:
                     break
                 cursor = nxt
             return prices
+
+    def current_funding(self, v, a):
+        """One market's funding read now (for the paper desk's entry check on assets
+        that only the bulk scan covers)."""
+        with self.client_locks[v]:
+            ex = self.client(v)
+            ex.neutralbasis_live = True
+            with self.lock:
+                row = next(
+                    (
+                        r
+                        for r in self.rows.get(v, [])
+                        if r["asset"] == a and r["kind"] == "perp"
+                    ),
+                    None,
+                ) or self.universe.get(v, {}).get(a)
+            if not row:
+                raise ValueError(v + ": seçili piyasanın güncel verisi yok")
+            m = ex.markets.get(row["symbol"], {})
+            if ex.has.get("fetchFundingRate"):
+                r = ex.fetch_funding_rate(row["symbol"])
+            else:
+                r = bulk_funding_rates(ex).get(row["symbol"]) or {}
+            received = now()
+            interval = funding_interval(r, m, row.get("interval"))
+            raw = finite(r.get("fundingRate"))
+            if raw is None or not interval:
+                raise ValueError(v + ": güncel funding okunamadı")
+            nxt = finite(r.get("nextFundingTimestamp") or r.get("fundingTimestamp"))
+            return dict(
+                raw_rate=raw,
+                rate=raw / (interval / 3600),
+                interval=interval,
+                next=nxt / 1000 if nxt else None,
+                funding_received=received,
+            )
 
     def funding_since(self, v, a, start):
         """Realized per-interval funding rates after start; used to settle paper legs."""

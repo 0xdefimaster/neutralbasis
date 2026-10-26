@@ -570,6 +570,31 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.positions, [])
         self.assertIn("Girişte funding verisi eski", self.desk.assessed[0]["reasons"])
 
+    def test_stale_bulk_quote_is_reread_at_entry(self):
+        self.setup_pair()
+        first = [dict(r) for r in self.src.rows]
+        stale = [dict(r, funding_received=T0 - 600) for r in first]
+        calls = iter([first, stale])
+        self.src.market_rows = lambda: [dict(r) for r in next(calls)]
+        current = {(r["venue"], r["asset"]): r for r in first}
+        asked = []
+
+        def current_funding(v, a):
+            asked.append(v)
+            r = current[(v, a)]
+            return dict(
+                raw_rate=r["raw_rate"],
+                rate=r["rate"],
+                interval=r["interval"],
+                next=r["next"],
+                funding_received=T0,
+            )
+
+        self.src.current_funding = current_funding
+        self.desk.cycle()
+        self.assertEqual(sorted(asked), ["Binance", "Hyperliquid"])
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+
     def test_late_rate_after_close_replaces_unverified_hour(self):
         self.setup_pair()
         self.desk.cycle()
@@ -643,6 +668,53 @@ class DeskIntegrationTests(unittest.TestCase):
                 self.assertEqual(snap["wide_paper"]["balance"]["cash"], 1000)
             finally:
                 e.store.db.close()
+
+
+class UniverseRowsTests(unittest.TestCase):
+    def entry(self, **kw):
+        x = dict(
+            symbol="IRYS/USDT:USDT",
+            rate=0.0001,
+            raw_rate=0.0004,
+            interval=14400,
+            next=T0 + 600,
+            received=T0,
+            fee=0.0005,
+            mark=1.0,
+            leverage=20,
+            volume=5e6,
+            oi=2e6,
+        )
+        x.update(kw)
+        return x
+
+    def test_liquid_markets_of_any_asset_become_desk_rows(self):
+        universe = {
+            "Bybit": {"IRYS": self.entry(), "DUST": self.entry(oi=5e4, volume=1e7)},
+            "Aster": {
+                "IRYS": self.entry(
+                    oi=None, volume=3e6, rate=-0.0001, raw_rate=-0.0001, interval=3600
+                ),
+                "BTC": self.entry(),
+            },
+            "Lighter": {"IRYS": self.entry()},
+        }
+        rows = [dict(venue="Aster", asset="BTC", kind="perp")]
+        out = wide_paper.universe_rows(universe, rows)
+        keys = sorted((r["venue"], r["asset"]) for r in out)
+        # OI decides when published; volume only where OI is unknown. Native venues
+        # and markets already in the selected scan are not duplicated.
+        self.assertEqual(keys, [("Aster", "IRYS"), ("Bybit", "IRYS")])
+        r = next(r for r in out if r["venue"] == "Bybit")
+        self.assertEqual(
+            (r["raw_rate"], r["interval"], r["price_type"]), (0.0004, 14400, "mark")
+        )
+        self.assertEqual(len(wide_paper.rank(out, wide_paper.WIDE_DEFAULTS, T0)), 1)
+
+    def test_held_asset_stays_even_when_thin(self):
+        universe = {"Bybit": {"DUST": self.entry(oi=5e4)}}
+        self.assertEqual(wide_paper.universe_rows(universe, []), [])
+        self.assertEqual(len(wide_paper.universe_rows(universe, [], {"DUST"})), 1)
 
 
 if __name__ == "__main__":
