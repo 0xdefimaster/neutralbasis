@@ -308,3 +308,35 @@ class LiquidityCellTests(unittest.TestCase):
         self.assertEqual(cells["Lighter"][5:], [None, None])
         curated = {v["id"]: v["curated"] for v in m["venues"]}
         self.assertEqual(curated, {"Lighter": True, "OKX": False, "Gate": False})
+
+
+class HourlySinceTests(unittest.TestCase):
+    def test_venue_ignoring_start_with_limit_is_retried_without_limit(self):
+        H = 3600000
+        latest = [[100 * H + i * H, 0, 0, 0, 1.0, 0] for i in range(500)]
+        from_start = [[10 * H + i * H, 0, 0, 0, 1.0, 0] for i in range(2000)]
+
+        class Htx:
+            calls = []
+
+            def fetch_ohlcv(self, symbol, tf, since, limit=None):
+                self.calls.append(limit)
+                return latest if limit else from_start
+
+        ex = Htx()
+        self.assertEqual(wide_markets.hourly_since(ex, "X", 10 * H)[0][0], 10 * H)
+        self.assertEqual(ex.calls, [500, None])
+
+    def test_normal_venue_makes_one_call(self):
+        H = 3600000
+
+        class Normal:
+            calls = 0
+
+            def fetch_ohlcv(self, symbol, tf, since, limit=None):
+                self.calls += 1
+                return [[since + i * H, 0, 0, 0, 1.0, 0] for i in range(limit or 10)]
+
+        ex = Normal()
+        self.assertEqual(wide_markets.hourly_since(ex, "X", 5 * H)[0][0], 5 * H)
+        self.assertEqual(ex.calls, 1)
