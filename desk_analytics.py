@@ -437,6 +437,9 @@ class DeskEngine(RiskEngine):
         from pair_view import PairViews
 
         self.pairs = PairViews(self)
+        from retention import Retention
+
+        self.retention = Retention(self.store, self.stop_event)
         self.read_lock = threading.RLock()
         self.read_jobs = {}
 
@@ -662,6 +665,7 @@ class DeskEngine(RiskEngine):
     def loop(self):
         self.wide.start()
         self.history.start()
+        self.retention.start()
         return super().loop()
 
     def update_config(self, changes):
@@ -681,6 +685,7 @@ class DeskEngine(RiskEngine):
         o["venue_labels"] = LABELS
         o["wide_paper"] = self.wide_paper.snapshot()
         o["history_status"] = self.history.status()
+        o["retention"] = self.retention.status
         o["deployment"] = (
             "Geniş public tarama: DEX + CEX. Lighter Core ve Robinhood ayrı kaynaklar. Paper yürütme: Lighter RH–Extended masası + tüm taranan borsalarda çoklu borsa funding masası."
         )
