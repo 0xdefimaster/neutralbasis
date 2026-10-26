@@ -415,11 +415,25 @@ class DeskEngine(RiskEngine):
         from funding_matrix import MatrixCache
 
         self.matrix = MatrixCache(self)
+        from pair_view import PairViews
+
+        self.pairs = PairViews(self)
         self.read_lock = threading.RLock()
         self.read_jobs = {}
 
     def funding_matrix(self):
         return self.matrix.get()
+
+    def asset_view(self, asset):
+        return self.pairs.asset_view(asset)
+
+    def pair_view(self, asset, long, short):
+        return self.pairs.pair_view(asset, long, short)
+
+    def request_pair_sync(self, body):
+        return self.pairs.request_sync(
+            body.get("asset"), list(body.get("venues") or [])
+        )
 
     def evaluate(self, asset, lv, sv, books, analysis):
         from convergence import qualify
