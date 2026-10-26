@@ -601,6 +601,41 @@ class WideMarkets:
                 )
             return result, sorted(rates, key=lambda r: r["ts"]), row
 
+    def candles_since(self, v, a, kind, start, end):
+        """Closed 1h closes in [start, end); used to append to stored history."""
+        with self.client_locks[v]:
+            ex = self.client(v, kind == "spot" and v in SPOT_ADAPTERS)
+            ex.neutralbasis_live = False
+            with self.lock:
+                row = next(
+                    (
+                        r
+                        for r in self.rows.get(v, [])
+                        if r["asset"] == a and r["kind"] == kind
+                    ),
+                    None,
+                )
+            if not row:
+                raise ValueError(v + ": seçili piyasanın güncel verisi yok")
+            if not ex.has.get("fetchOHLCV"):
+                raise ValueError(v + ": gerçek işlem mumları adaptörde yok")
+            cursor = int(start * 1000)
+            prices = {}
+            for _ in range(30):
+                batch = ex.fetch_ohlcv(row["symbol"], "1h", cursor, 500)
+                if not batch:
+                    break
+                for x in batch:
+                    t = int(x[0] / 1000)
+                    p = finite(x[4])
+                    if start <= t < end and p and p > 0:
+                        prices[t] = p
+                nxt = max(x[0] for x in batch) + 3600000
+                if nxt <= cursor or nxt >= end * 1000:
+                    break
+                cursor = nxt
+            return prices
+
     def funding_since(self, v, a, start):
         """Realized per-interval funding rates after start; used to settle paper legs."""
         with self.client_locks[v]:

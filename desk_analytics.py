@@ -313,6 +313,67 @@ def report_csv(engine):
     return out.getvalue()
 
 
+class DeskHistorySource:
+    """Market list, incremental fetchers and publishing for the background history keeper."""
+
+    def __init__(self, engine):
+        self.engine = engine
+
+    def markets(self):
+        e = self.engine
+        out = []
+        for v in VENUES:
+            for a in e.cfg["symbols"]:
+                m = e.feed.meta.get(v, {}).get(a)
+                if m:
+                    out.append((v, a, "perp", 3600, m.get("price_type", "trade")))
+        rows, _ = e.wide.snapshot()
+        seen = set()
+        for r in rows:
+            key = (r["venue"], r["asset"], r["kind"])
+            if r["venue"] in VENUES or key in seen:
+                continue
+            seen.add(key)
+            out.append(key + (r.get("interval") or None, "trade"))
+        return out
+
+    def candles(self, v, a, kind, start, end):
+        if v in VENUES:
+            return self.engine.feed.candles_range(v, a, start, end)["prices"]
+        return self.engine.wide.candles_since(v, a, kind, start, end)
+
+    def funding(self, v, a, start):
+        if v in VENUES:
+            return self.engine.feed.funding_range(v, a, start, now())
+        return self.engine.wide.funding_since(v, a, start)
+
+    def publish(self, v, a, kind, prices, rates, interval, price_type):
+        wide = self.engine.wide
+        with wide.lock:
+            old = wide.histories.get((v, a, kind)) or {}
+            wide.histories[(v, a, kind)] = dict(
+                prices=dict(
+                    prices=prices,
+                    price_type=price_type
+                    or (old.get("prices") or {}).get("price_type")
+                    or "trade",
+                    audit_ids=[],
+                    end=hour(now()),
+                ),
+                rates=rates,
+                interval=interval or old.get("interval") or 3600,
+                ts=now(),
+            )
+
+    def stored_prices(self, v, a, kind="perp"):
+        """Stored 30-day closes when they cover at least 95% of the window, else None."""
+        start = hour(now()) - 720 * 3600
+        prices = self.engine.history.db.candles(v, a, kind, start)
+        if len(prices) < 720 * 0.95:
+            return None
+        return dict(prices=prices, price_type="trade", audit_ids=[], end=hour(now()))
+
+
 class DeskEngine(RiskEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -325,6 +386,11 @@ class DeskEngine(RiskEngine):
 
         self.wide = WideMarkets(self.store, self.cfg["symbols"], self.stop_event)
         self.wide_paper = WidePaper(self.store, EngineSource(self))
+        from history_store import HistoryKeeper
+
+        self.history = HistoryKeeper(
+            self.store, DeskHistorySource(self), self.stop_event
+        )
         self.read_lock = threading.RLock()
         self.read_jobs = {}
 
@@ -532,6 +598,7 @@ class DeskEngine(RiskEngine):
 
     def loop(self):
         self.wide.start()
+        self.history.start()
         return super().loop()
 
     def update_config(self, changes):
@@ -550,6 +617,7 @@ class DeskEngine(RiskEngine):
         o["market_view"] = expanded_view(self, market_view(self))
         o["venue_labels"] = LABELS
         o["wide_paper"] = self.wide_paper.snapshot()
+        o["history_status"] = self.history.status()
         o["deployment"] = (
             "Geniş public tarama: DEX + CEX. Lighter Core ve Robinhood ayrı kaynaklar. Paper yürütme: Lighter RH–Extended masası + tüm taranan borsalarda çoklu borsa funding masası."
         )

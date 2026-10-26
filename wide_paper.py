@@ -359,6 +359,13 @@ class EngineSource:
         return self.engine.wide.book(v, a)
 
     def prices(self, v, a):
+        keeper = getattr(self.engine, "history", None)
+        if keeper is not None:
+            from desk_analytics import DeskHistorySource
+
+            stored = DeskHistorySource(self.engine).stored_prices(v, a)
+            if stored:
+                return stored
         if v in NATIVE:
             return {**self.engine.feed.candles(v, a), "price_type": "trade"}
         prices, _, _ = self.engine.wide.history(v, a, 30)
