@@ -94,3 +94,18 @@ class BindGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ExclusivePortTests(unittest.TestCase):
+    def test_second_server_on_same_port_is_refused(self):
+        from http.server import BaseHTTPRequestHandler
+        from bot import ExclusiveServer
+
+        first = ExclusiveServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        try:
+            with self.assertRaises(OSError):
+                ExclusiveServer(
+                    ("127.0.0.1", first.server_address[1]), BaseHTTPRequestHandler
+                )
+        finally:
+            first.server_close()
