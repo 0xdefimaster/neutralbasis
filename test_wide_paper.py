@@ -304,6 +304,36 @@ class WidePaperTests(unittest.TestCase):
         s = pair_stats(h, candles(T0, drift=0.001), T0, 24)
         self.assertGreater(s["corr"], 0.99)
 
+    def test_short_history_uses_the_longest_matched_window(self):
+        def recent(h, days):
+            cut = bot.hour(T0) - days * 86400
+            return dict(h, prices={t: p for t, p in h["prices"].items() if t >= cut})
+
+        a, b = recent(candles(T0), 10), recent(candles(T0, drift=0.001), 10)
+        self.assertEqual(pair_stats(a, b, T0, 24, 7)["history_days"], 10)
+        self.assertEqual(pair_stats(candles(T0), b, T0, 24, 7)["history_days"], 10)
+        self.assertEqual(
+            pair_stats(candles(T0), candles(T0, 0.001), T0, 24, 7)["history_days"], 30
+        )
+        with self.assertRaisesRegex(ValueError, "30 günlük eşlenmiş 1h mum eksik"):
+            pair_stats(a, b, T0, 24)
+        with self.assertRaisesRegex(ValueError, "7 günlük eşlenmiş 1h mum eksik"):
+            pair_stats(recent(a, 5), b, T0, 24, 7)
+
+    def test_convergence_on_ten_days_scales_the_thirty_day_thresholds(self):
+        self.setup_convergence()
+        cut = bot.hour(T0) - 10 * 86400
+        for k, h in self.src.history.items():
+            self.src.history[k] = dict(
+                h, prices={t: p for t, p in h["prices"].items() if t >= cut}
+            )
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        h = self.desk.positions[0]["decision"]["convergence_history"]
+        self.assertEqual(h["history_days"], 10)
+        self.desk.update_config({"wide_min_history_days": 30})
+        self.assertEqual(self.desk.cfg["wide_min_history_days"], 30)
+
     # --- convergence strategy ----------------------------------------------------
     def setup_convergence(self, basis=0.0, amplitude=0.0035, gap=0.006):
         end = bot.hour(T0)

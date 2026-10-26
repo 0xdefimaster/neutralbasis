@@ -11,6 +11,7 @@ class Source:
         self.calls = []
         self.published = {}
         self.fail = set()
+        self.since = {}
         self.list = [
             ("Binance", "BTC", "perp", 28800, "trade"),
             ("Lighter", "BTC", "perp", 3600, "trade"),
@@ -23,11 +24,13 @@ class Source:
         self.calls.append(("candles", v, start, end))
         if v in self.fail:
             raise ValueError("kapalı")
+        start = max(start, self.since.get(v, 0))
         return {t: 100.0 + (t % 7) for t in range(start, end, 3600)}
 
     def funding(self, v, a, start):
         self.calls.append(("funding", v, start))
         step = 28800 if v == "Binance" else 3600
+        start = max(start, self.since.get(v, 0))
         first = int(start) - int(start) % step + step
         return [
             dict(ts=t, rate=0.0001, value=None)
@@ -105,6 +108,49 @@ class HistoryTests(unittest.TestCase):
         self.keeper.run_once()
         self.assertTrue(any(c[1] == "Lighter" for c in self.src.calls))
         self.assertEqual(self.keeper.status()["failed"], 0)
+
+    def test_short_first_fill_is_completed_backwards_later(self):
+        # The first fill only reached three days back (a cut-short or failed page).
+        self.src.since["Binance"] = bot.hour(T0) - 3 * 86400
+        self.keeper.run_once()
+        key = ("Binance", "BTC", "perp")
+        self.assertEqual(len(self.src.published[key][0]), 3 * 24)
+        self.src.since.clear()
+        self.src.calls.clear()
+        # The regular refresh does not go back before BACKFILL_SECONDS.
+        self.clock = T0 + history_store.REFRESH_SECONDS
+        self.keeper.run_once()
+        back = [c for c in self.src.calls if c[1] == "Binance" and c[2] < bot.hour(T0)]
+        self.assertEqual(back, [])
+        self.clock = T0 + history_store.BACKFILL_SECONDS
+        self.keeper.run_once()
+        prices, rates, _, _ = self.src.published[key]
+        self.assertGreaterEqual(len(prices), 30 * 24 - 1)
+        self.assertGreaterEqual(len(rates), 30 * 3 - 1)
+        cov = self.keeper.coverage("Binance", "BTC")
+        self.assertLessEqual(
+            cov["candles_from"], bot.hour(self.clock) - 30 * 86400 + 3600
+        )
+
+    def test_venue_with_short_history_is_not_asked_back_every_pass(self):
+        self.src.since["Lighter"] = bot.hour(T0) - 3 * 86400
+        self.keeper.run_once()
+        for i in range(1, 31):
+            self.clock = T0 + i * history_store.REFRESH_SECONDS
+            self.keeper.run_once()
+        back = [
+            c
+            for c in self.src.calls
+            if c[0] == "candles"
+            and c[1] == "Lighter"
+            and c[2] < bot.hour(T0) - 3 * 86400
+        ]
+        # One full-window first fill and one backwards retry in 15 hours of passes.
+        self.assertEqual(len(back), 2)
+        self.assertEqual(
+            self.keeper.coverage("Lighter", "BTC")["candles_from"],
+            bot.hour(T0) - 3 * 86400,
+        )
 
     def test_old_rows_are_pruned(self):
         db = HistoryStore(self.store)
