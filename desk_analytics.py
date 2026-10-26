@@ -319,6 +319,10 @@ class DeskHistorySource:
     def __init__(self, engine):
         self.engine = engine
 
+    def priority(self):
+        """Legs of the paper desk's tradeable candidates, rejected-for-history first."""
+        return [(v, a, "perp") for v, a in self.engine.wide_paper.history_needs()]
+
     def markets(self):
         e = self.engine
         out = []
@@ -348,7 +352,9 @@ class DeskHistorySource:
                 continue
             seen.add(key)
             out.append(key + (interval, "trade"))
-        return out
+        # Candidate legs go first so missing history is filled where it can lead to a trade.
+        rank = {k: i for i, k in enumerate(self.priority())}
+        return sorted(out, key=lambda m: rank.get(m[:3], len(rank)))
 
     def candles(self, v, a, kind, start, end):
         if a not in self.engine.cfg["symbols"]:
