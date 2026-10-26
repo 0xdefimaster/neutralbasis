@@ -14,6 +14,9 @@ RETRY_SECONDS = 1800
 PAUSE_SECONDS = 1.0
 # Markets are re-listed after each batch so newly prioritized ones go next.
 BATCH = 10
+# A stored window that starts late (a failed or cut-short first fill) is retried
+# backwards at this pace; venues that publish less history simply stay partial.
+BACKFILL_SECONDS = 12 * 3600
 
 
 class HistoryStore:
@@ -53,6 +56,14 @@ class HistoryStore:
             r = self.store.db.execute(
                 "select max(ts) from hist_candles where venue=? and asset=? and kind=?",
                 (v, a, kind),
+            ).fetchone()
+        return r[0] if r and r[0] is not None else None
+
+    def first_candle(self, v, a, kind="perp", start=0):
+        with self.store.lock:
+            r = self.store.db.execute(
+                "select min(ts) from hist_candles where venue=? and asset=? and kind=? and ts>=?",
+                (v, a, kind, start),
             ).fetchone()
         return r[0] if r and r[0] is not None else None
 
@@ -98,6 +109,14 @@ class HistoryStore:
             ).fetchone()
         return r[0] if r and r[0] is not None else None
 
+    def first_funding(self, v, a, start=0):
+        with self.store.lock:
+            r = self.store.db.execute(
+                "select min(ts) from hist_funding where venue=? and asset=? and ts>=?",
+                (v, a, start),
+            ).fetchone()
+        return r[0] if r and r[0] is not None else None
+
     def markets(self):
         with self.store.lock:
             return self.store.db.execute(
@@ -119,6 +138,7 @@ class HistoryKeeper:
         self.stop = stop
         self.sleep = sleep
         self.state = {}
+        self.backfilled = {}
         self.thread = None
         self.lock = threading.RLock()
 
@@ -138,6 +158,9 @@ class HistoryKeeper:
         end = hour(now())
         last = self.db.last_candle(v, a, kind)
         start = max(end - FIRST_DAYS * 86400, (last + 3600) if last is not None else 0)
+        if last is None:
+            # A first fill already asks for the whole window; going back is for later.
+            self.backfilled[(v, a, kind)] = now()
         added = 0
         if start < end:
             prices = self.source.candles(v, a, kind, start, end)
@@ -149,8 +172,46 @@ class HistoryKeeper:
             fstart = max(now() - FIRST_DAYS * 86400, (lastf + 1) if lastf else 0)
             if now() - fstart > (interval or 3600) * 0.5:
                 added += self.db.add_funding(v, a, self.source.funding(v, a, fstart))
+        added += self.backfill(v, a, kind, interval)
         self.publish(v, a, kind, interval, price_type)
         return added
+
+    def backfill(self, v, a, kind, interval=None):
+        """Fetch the part of the 30-day window before the first stored row, when the
+        first fill came back short. Retried at most every BACKFILL_SECONDS."""
+        key = (v, a, kind)
+        if now() - self.backfilled.get(key, -BACKFILL_SECONDS) < BACKFILL_SECONDS:
+            return 0
+        added = 0
+        floor = hour(now()) - FIRST_DAYS * 86400
+        first = self.db.first_candle(v, a, kind, floor)
+        tried = False
+        if first is not None and first > floor + 2 * 3600:
+            tried = True
+            prices = self.source.candles(v, a, kind, floor, first)
+            added += self.db.add_candles(
+                v, a, kind, {t: p for t, p in prices.items() if floor <= t < first}
+            )
+        if kind == "perp":
+            ffloor = now() - FIRST_DAYS * 86400
+            firstf = self.db.first_funding(v, a, ffloor)
+            if firstf is not None and firstf > ffloor + 2 * (interval or 3600):
+                tried = True
+                rows = self.source.funding(v, a, ffloor)
+                added += self.db.add_funding(
+                    v, a, [r for r in rows if ffloor <= r["ts"] < firstf]
+                )
+        if tried:
+            self.backfilled[key] = now()
+        return added
+
+    def coverage(self, v, a, kind="perp"):
+        """Earliest stored hour and funding payment inside the 30-day window."""
+        floor = hour(now()) - FIRST_DAYS * 86400
+        return dict(
+            candles_from=self.db.first_candle(v, a, kind, floor),
+            funding_from=self.db.first_funding(v, a, now() - FIRST_DAYS * 86400),
+        )
 
     def due(self, key):
         s = self.state.get(key)
