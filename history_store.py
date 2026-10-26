@@ -80,6 +80,15 @@ class HistoryStore:
             ).fetchall()
         return [dict(ts=t, rate=r, value=x, audit_id=None) for t, r, x in rows]
 
+    def funding_sums(self, start):
+        """{(venue, asset): (sum of rates, payment count)} for payments after `start`."""
+        with self.store.lock:
+            rows = self.store.db.execute(
+                "select venue,asset,sum(rate),count(*) from hist_funding where ts>? group by venue,asset",
+                (start,),
+            ).fetchall()
+        return {(v, a): (s, n) for v, a, s, n in rows}
+
     def last_funding(self, v, a):
         with self.store.lock:
             r = self.store.db.execute(

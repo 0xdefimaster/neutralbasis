@@ -180,6 +180,7 @@ class WideMarkets:
         self.last_scan = None
         self.thread = None
         self.histories = {}
+        self.universe = {}
 
     def client(self, v, spot=False):
         key = v + ":spot" if spot else v
@@ -228,6 +229,62 @@ class WideMarkets:
         self.clients[key] = ex
         return ex
 
+    def scan_universe(self, v, ex):
+        """Every listed linear perp's funding from one bulk call; venues without a
+        bulk endpoint stay limited to the selected assets (no per-symbol storm)."""
+        if not ex.has.get("fetchFundingRates"):
+            return {}
+        markets = {}
+        for m in ex.markets.values():
+            if (
+                m.get("active") is False
+                or not m.get("swap")
+                or not m.get("linear")
+                or m.get("quote") not in ("USDT", "USDC", "USD", "USDG")
+            ):
+                continue
+            old = markets.get(m["base"])
+            if old is None or (m["quote"] == "USDT" and old["quote"] != "USDT"):
+                markets[m["base"]] = m
+        try:
+            rates = ex.fetch_funding_rates()
+        except Exception:
+            return {}
+        periods = {}
+        if ex.has.get("fetchFundingIntervals"):
+            try:
+                periods = ex.fetch_funding_intervals()
+            except Exception:
+                pass
+        received = now()
+        out = {}
+        for a, m in markets.items():
+            r = rates.get(m["symbol"])
+            if not r:
+                continue
+            interval = funding_interval(
+                r, m, funding_interval(periods.get(m["symbol"], {}), m)
+            )
+            raw = finite(r.get("fundingRate"))
+            nxt = finite(r.get("nextFundingTimestamp") or r.get("fundingTimestamp"))
+            if raw is None or not interval:
+                continue
+            if nxt and nxt / 1000 < received - interval:
+                continue
+            out[a] = dict(
+                symbol=m["symbol"],
+                raw_rate=raw,
+                rate=raw / (interval / 3600),
+                interval=interval,
+                next=nxt / 1000 if nxt else None,
+                fee=finite(m.get("taker")),
+                mark=finite(r.get("markPrice")),
+                received=received,
+            )
+        with self.lock:
+            self.universe[v] = out
+        return rates
+
     def scan_one(self, v):
         try:
             with self.client_locks[v]:
@@ -247,12 +304,15 @@ class WideMarkets:
                     old = selected.get(a)
                     if old is None or (m["quote"] == "USDT" and old["quote"] != "USDT"):
                         selected[a] = m
+                all_rates = self.scan_universe(v, ex)
                 if not selected:
                     raise ValueError(
                         "Seçili varlıklarda doğrulanmış lineer perpetual yok"
                     )
                 symbols = [m["symbol"] for m in selected.values()]
-                if ex.has.get("fetchFundingRates"):
+                if all_rates and all(s in all_rates for s in symbols):
+                    rates = {s: all_rates[s] for s in symbols}
+                elif ex.has.get("fetchFundingRates"):
                     try:
                         rates = ex.fetch_funding_rates(symbols)
                     except ccxt.NotSupported:
@@ -530,6 +590,13 @@ class WideMarkets:
                 if now() - r["received"] <= 180
             ], {v: dict(s) for v, s in self.status.items()}
 
+    def universe_snapshot(self):
+        with self.lock:
+            return {
+                v: {a: dict(x) for a, x in rows.items() if now() - x["received"] <= 300}
+                for v, rows in self.universe.items()
+            }
+
     def history(self, v, a, days, kind="perp", at=None):
         with self.client_locks[v]:
             ex = self.client(v, kind == "spot" and v in SPOT_ADAPTERS)
@@ -649,7 +716,7 @@ class WideMarkets:
                         if r["asset"] == a and r["kind"] == "perp"
                     ),
                     None,
-                )
+                ) or self.universe.get(v, {}).get(a)
             if not row:
                 raise ValueError(v + ": seçili piyasanın güncel verisi yok")
             if not ex.has.get("fetchFundingRateHistory"):

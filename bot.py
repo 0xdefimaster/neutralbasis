@@ -1574,6 +1574,8 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 return self.send(engine.connections.view())
             if self.path == "/api/backtest" and hasattr(engine, "backtest_status"):
                 return self.send(engine.backtest_status())
+            if self.path == "/api/funding-matrix" and hasattr(engine, "funding_matrix"):
+                return self.send(engine.funding_matrix())
             if self.path == "/api/read-jobs" and hasattr(engine, "read_status"):
                 return self.send(engine.read_status())
             if self.path == "/api/report.csv":

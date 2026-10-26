@@ -335,9 +335,24 @@ class DeskHistorySource:
                 continue
             seen.add(key)
             out.append(key + (r.get("interval") or None, "trade"))
+        # Funding-only history for the widest matrix spreads outside the selected assets.
+        from funding_matrix import top_pairs
+
+        try:
+            extra = top_pairs(e.matrix.get())
+        except Exception:
+            extra = []
+        for v, a, interval in extra:
+            key = (v, a, "perp")
+            if v in VENUES or a in e.cfg["symbols"] or key in seen:
+                continue
+            seen.add(key)
+            out.append(key + (interval, "trade"))
         return out
 
     def candles(self, v, a, kind, start, end):
+        if a not in self.engine.cfg["symbols"]:
+            return {}
         if v in VENUES:
             return self.engine.feed.candles_range(v, a, start, end)["prices"]
         return self.engine.wide.candles_since(v, a, kind, start, end)
@@ -391,8 +406,14 @@ class DeskEngine(RiskEngine):
         self.history = HistoryKeeper(
             self.store, DeskHistorySource(self), self.stop_event
         )
+        from funding_matrix import MatrixCache
+
+        self.matrix = MatrixCache(self)
         self.read_lock = threading.RLock()
         self.read_jobs = {}
+
+    def funding_matrix(self):
+        return self.matrix.get()
 
     def evaluate(self, asset, lv, sv, books, analysis):
         from convergence import qualify
