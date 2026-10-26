@@ -204,6 +204,19 @@ def universe_liquidity(ex, symbols):
     return ticks or {}, interest or {}
 
 
+def hourly_since(ex, symbol, cursor):
+    """1h candles from `cursor` (ms). Some venues (HTX contracts) drop the start time when
+    a limit is given and return only the latest candles, which leaves the start of a
+    30-day window empty forever; when the first candle lands well after the cursor, the
+    call is repeated without a limit so the venue's own start-time window applies."""
+    batch = ex.fetch_ohlcv(symbol, "1h", cursor, 500)
+    if batch and batch[0][0] > cursor + 2 * 3600000:
+        retry = ex.fetch_ohlcv(symbol, "1h", cursor)
+        if retry and retry[0][0] < batch[0][0]:
+            return retry
+    return batch
+
+
 def public_error(ex):
     # No user credentials are configured in any scan client.
     return (type(ex).__name__ + ": " + str(ex)).replace("\n", " ")[:350]
@@ -668,7 +681,7 @@ class WideMarkets:
             prices = {}
             audits = []
             for _ in range(30):
-                batch = ex.fetch_ohlcv(row["symbol"], "1h", cursor, 500)
+                batch = hourly_since(ex, row["symbol"], cursor)
                 audits.append(ex.neutralbasis_audit)
                 if not batch:
                     break
@@ -739,7 +752,7 @@ class WideMarkets:
             cursor = int(start * 1000)
             prices = {}
             for _ in range(30):
-                batch = ex.fetch_ohlcv(row["symbol"], "1h", cursor, 500)
+                batch = hourly_since(ex, row["symbol"], cursor)
                 if not batch:
                     break
                 for x in batch:
