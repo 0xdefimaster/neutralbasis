@@ -144,6 +144,15 @@ class HistoryStore:
             ).fetchall()
         return {(v, a): (s, n) for v, a, s, n in rows}
 
+    def closes_at(self, ts, kind="perp"):
+        """{(venue, asset): close} of every stored market's candle at hour `ts`."""
+        with self.store.lock:
+            rows = self.store.db.execute(
+                "select venue,asset,price from hist_candles where kind=? and ts=?",
+                (kind, int(ts)),
+            ).fetchall()
+        return {(v, a): p for v, a, p in rows}
+
     def last_funding(self, v, a):
         with self.store.lock:
             r = self.store.db.execute(
