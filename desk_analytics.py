@@ -321,7 +321,10 @@ class DeskEngine(RiskEngine):
         self.backtest_thread = None
         from wide_markets import WideMarkets
 
+        from wide_paper import WidePaper, EngineSource
+
         self.wide = WideMarkets(self.store, self.cfg["symbols"], self.stop_event)
+        self.wide_paper = WidePaper(self.store, EngineSource(self))
         self.read_lock = threading.RLock()
         self.read_jobs = {}
 
@@ -520,12 +523,24 @@ class DeskEngine(RiskEngine):
         threading.Thread(target=run, daemon=True).start()
         return dict(ok=True, message="Public veri analizi sıraya alındı.")
 
+    def cycle(self):
+        super().cycle()
+        # Multi-venue desk: open positions are always monitored; entries only while running.
+        self.wide_paper.latency_ms = self.cfg["latency_ms"]
+        self.wide_paper.extra_slippage = self.cfg["extra_slippage_bps"] / 10000
+        self.wide_paper.cycle(entries=self.running)
+
     def loop(self):
         self.wide.start()
         return super().loop()
 
     def update_config(self, changes):
-        super().update_config(changes)
+        wide = {k: v for k, v in changes.items() if k.startswith("wide_")}
+        rest = {k: v for k, v in changes.items() if k not in wide}
+        if wide:
+            self.wide_paper.update_config(wide)
+        if rest or not wide:
+            super().update_config(rest)
         self.wide.symbols = list(self.cfg["symbols"])
 
     def snapshot(self):
@@ -534,8 +549,9 @@ class DeskEngine(RiskEngine):
         o = super().snapshot()
         o["market_view"] = expanded_view(self, market_view(self))
         o["venue_labels"] = LABELS
+        o["wide_paper"] = self.wide_paper.snapshot()
         o["deployment"] = (
-            "Geniş public tarama: DEX + CEX. Lighter Core ve Robinhood ayrı kaynaklar. Paper yürütme: yalnızca Robinhood Lighter ve Extended."
+            "Geniş public tarama: DEX + CEX. Lighter Core ve Robinhood ayrı kaynaklar. Paper yürütme: Lighter RH–Extended masası + tüm taranan borsalarda çoklu borsa funding masası."
         )
         return o
 

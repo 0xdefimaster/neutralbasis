@@ -1,12 +1,19 @@
-import argparse, json
+import argparse, json, os
 from pathlib import Path
 import bot
 from desk_analytics import DeskEngine as RiskEngine
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--data", default=str(bot.ROOT / "data-five-rh"))
+    # Hosted deploys (Railway) configure through env; local defaults are unchanged.
+    p.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8765)))
+    p.add_argument("--host", default=os.environ.get("NB_HOST", "127.0.0.1"))
+    p.add_argument(
+        "--data",
+        default=os.environ.get("NB_DATA_DIR")
+        or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+        or str(bot.ROOT / "data-five-rh"),
+    )
     p.add_argument("--autostart", action="store_true")
     p.add_argument("--once", action="store_true")
     a = p.parse_args()
@@ -22,4 +29,6 @@ if __name__ == "__main__":
         )
         print("Risk taraması kaydedildi:", d / "last-scan.json")
     else:
-        bot.serve(engine, a.port)
+        bot.serve(
+            engine, a.port, a.host, os.environ.get("NB_DASHBOARD_PASSWORD") or None
+        )

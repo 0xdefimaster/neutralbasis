@@ -601,6 +601,45 @@ class WideMarkets:
                 )
             return result, sorted(rates, key=lambda r: r["ts"]), row
 
+    def funding_since(self, v, a, start):
+        """Realized per-interval funding rates after start; used to settle paper legs."""
+        with self.client_locks[v]:
+            ex = self.client(v)
+            ex.neutralbasis_live = False
+            with self.lock:
+                row = next(
+                    (
+                        r
+                        for r in self.rows.get(v, [])
+                        if r["asset"] == a and r["kind"] == "perp"
+                    ),
+                    None,
+                )
+            if not row:
+                raise ValueError(v + ": seçili piyasanın güncel verisi yok")
+            if not ex.has.get("fetchFundingRateHistory"):
+                raise ValueError(v + ": gerçekleşmiş funding geçmişi adaptörde yok")
+            cursor = int(start * 1000)
+            rates = []
+            for _ in range(8):
+                batch = ex.fetch_funding_rate_history(row["symbol"], cursor, 200)
+                audit = ex.neutralbasis_audit
+                if not batch:
+                    break
+                for r in batch:
+                    t = finite(r.get("timestamp"))
+                    value = finite(r.get("fundingRate"))
+                    if t is not None and value is not None and t >= cursor:
+                        rates.append(
+                            dict(ts=t / 1000, rate=value, value=None, audit_id=audit)
+                        )
+                nxt = max((r.get("timestamp") or 0) for r in batch) + 1
+                if nxt <= cursor or nxt >= now() * 1000:
+                    break
+                cursor = nxt
+            rates = {r["ts"]: r for r in rates if r["ts"] <= now()}
+            return sorted(rates.values(), key=lambda r: r["ts"])
+
     def book(self, v, a, kind="perp"):
         with self.client_locks[v]:
             ex = self.client(v, kind == "spot" and v in SPOT_ADAPTERS)
@@ -642,7 +681,9 @@ class WideMarkets:
                 or max(x[0] for x in bids) >= min(x[0] for x in asks)
             ):
                 raise ValueError("Boş/çapraz defter")
-            return dict(bids=bids, asks=asks, received=at, audit_id=ex.neutralbasis_audit)
+            return dict(
+                bids=bids, asks=asks, received=at, audit_id=ex.neutralbasis_audit
+            )
 
 
 def expanded_view(engine, base):
