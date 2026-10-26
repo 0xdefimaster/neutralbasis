@@ -42,13 +42,14 @@ def price_spread(cells):
 
 def build(native, rows, universe, sums, kinds, labels, at=None):
     """native/rows: lists of dicts with venue, asset, rate (hourly), interval, fee;
+    cells are [rate, interval, fee, paid7, mark, volume 24h, open interest] (USD);
     universe: {venue: {asset: entry}}; sums: {(venue, asset): (sum, count)} over 7d.
     Earlier sources win for the same cell (native feed, selected scan, bulk universe).
     """
     at = at or now()
     cells = {}
 
-    def put(v, a, rate, interval, fee, received, mark=None):
+    def put(v, a, rate, interval, fee, received, mark=None, volume=None, oi=None):
         if rate is None or not interval or at - (received or 0) > FRESH_SECONDS:
             return
         cells.setdefault(a, {}).setdefault(
@@ -59,6 +60,8 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
                 fee,
                 paid7(sums, v, a, interval),
                 mark if mark and mark > 0 else None,
+                volume,
+                oi,
             ],
         )
 
@@ -82,6 +85,8 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
                 r.get("fee"),
                 r["received"],
                 r.get("mark"),
+                r.get("volume"),
+                r.get("oi"),
             )
     for v, entries in universe.items():
         for a, x in entries.items():
@@ -93,6 +98,8 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
                 x.get("fee"),
                 x["received"],
                 x.get("mark"),
+                x.get("volume"),
+                x.get("oi"),
             )
     assets = []
     for a, cs in cells.items():
@@ -110,8 +117,17 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
     )
     used = {v for x in assets for v in x["cells"]}
     count = {v: sum(v in x["cells"] for x in assets) for v in used}
+    # Native-feed venues publish no volume or OI here; the panel treats their unknown
+    # liquidity as curated (selected assets only) instead of illiquid.
+    curated = {r["venue"] for r in native}
     venues = [
-        dict(id=v, label=labels.get(v, v), kind=kinds.get(v, "DEX"), assets=count[v])
+        dict(
+            id=v,
+            label=labels.get(v, v),
+            kind=kinds.get(v, "DEX"),
+            assets=count[v],
+            curated=v in curated,
+        )
         for v in sorted(used, key=lambda v: (-count[v], v))
     ]
     return dict(ts=at, venues=venues, assets=assets)

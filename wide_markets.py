@@ -162,6 +162,48 @@ def funding_interval(rate, market, previous=None):
     return previous
 
 
+def quote_volume(t):
+    """24h quote volume from a ticker; base volume times last price when only that exists."""
+    if not t:
+        return None
+    q = finite(t.get("quoteVolume"))
+    if q is not None:
+        return q
+    b, last = finite(t.get("baseVolume")), finite(t.get("last"))
+    return b * last if b is not None and last else None
+
+
+def interest_value(x, mark=None):
+    """Open interest in USD; contracts times mark when the venue gives only an amount."""
+    if not x:
+        return None
+    v = finite(x.get("openInterestValue"))
+    if v is not None:
+        return v
+    amount, price = finite(x.get("openInterestAmount")), finite(mark)
+    return amount * price if amount is not None and price else None
+
+
+def universe_liquidity(ex, symbols):
+    """Bulk tickers (24h volume) and, where the venue has a bulk call, open interest.
+    Either may be empty; a missing value stays unknown rather than zero."""
+    ticks, interest = {}, {}
+    if ex.has.get("fetchTickers"):
+        try:
+            ticks = ex.fetch_tickers(symbols)
+        except Exception:
+            try:
+                ticks = ex.fetch_tickers()
+            except Exception:
+                pass
+    if ex.has.get("fetchOpenInterests"):
+        try:
+            interest = ex.fetch_open_interests(symbols)
+        except Exception:
+            pass
+    return ticks or {}, interest or {}
+
+
 def public_error(ex):
     # No user credentials are configured in any scan client.
     return (type(ex).__name__ + ": " + str(ex)).replace("\n", " ")[:350]
@@ -256,6 +298,9 @@ class WideMarkets:
                 periods = ex.fetch_funding_intervals()
             except Exception:
                 pass
+        ticks, interest = universe_liquidity(
+            ex, [m["symbol"] for m in markets.values()]
+        )
         received = now()
         out = {}
         for a, m in markets.items():
@@ -279,6 +324,9 @@ class WideMarkets:
                 next=nxt / 1000 if nxt else None,
                 fee=finite(m.get("taker")),
                 mark=finite(r.get("markPrice")),
+                leverage=finite(m.get("limits", {}).get("leverage", {}).get("max")),
+                volume=quote_volume(ticks.get(m["symbol"])),
+                oi=interest_value(interest.get(m["symbol"]), r.get("markPrice")),
                 received=received,
             )
         with self.lock:
