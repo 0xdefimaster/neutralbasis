@@ -117,3 +117,13 @@ Adres çubuğunda sekme yoksa panel **Özet** ile açılır. Yalnızca masanın 
 ## Ana sayfa fiyat farkları: tüm varlıklar
 
 "En geniş fiyat farkları" artık seçili 15 varlıkla sınırlı değil. Funding matrisinin toplu taramasından gelen mark fiyatlarını kullanır: her varlıkta en ucuz borsada long, en pahalıda short. Aynı ticker'ı taşıyan farklı tokenler sahte fark göstermesin diye, borsalar arası fark %15'i aşarsa medyandan en uzak fiyat atılır ve kalanlar uyuşana kadar devam edilir. Mark fiyatı anlık göstergedir; işlem kararı Fiyat arb ve çoklu paper masasındaki defter/geçmiş kontrolleriyle verilir.
+
+
+## Varlık ve çift sayfaları
+Funding matrisindeki her varlık için `#asset?asset=BTC` sayfası eklendi. Varlığın tüm borsalardaki güncel oranı, ödeme aralığı, sonraki ödemeye kalan süre, mark fiyatı ve taker ücreti burada görünür. Sayfada ayrıca kayıtlı gerçekleşmiş funding'in 24s/7g/30g toplamları, en iyi funding çifti ve en geniş makul fiyat farkı (%15'ten geniş fark farklı token sayılır) bulunur. Seçili olmayan varlıklarda OI, hacim ve kaldıraç okunmaz.
+
+Her perp–perp çifti için `#pair?asset=…&long=…&short=…` sayfası eklendi. Sayfada long/short seçicileri, ⇄ ve favori düğmeleri ile bacak tablosu (ödeme başına $, aralık, geri sayım, ücret) var. "Şimdi açsaydın" bölümü 24S/3G/7G/14G/30G pencereleri için gerçekleşen funding'den dört taker ücretini düşer. Pencere yalnızca iki bacağın tüm ödemeleri kayıtlıysa hesaplanır, eksik pencere ölçeklenmez. Kâr hesaplayıcı anlık oranla ya da tam 7 günlük ortalamayla çalışır ve başa baş süresini verir. "Açmadan önce" listesi ücretleri, aralıkları ve 24 saatlik ödeme projeksiyonunu gösterir. Aynı listede funding yönü, son 7 gün, fiyat farkı, likidite ve marjin kontrolleri de var. Kümülatif funding grafiği yalnızca iki bacağın da kayıtlı olduğu aralığı çizer. Varlığın tüm borsalardaki oranları da sayfada listelenir.
+
+"Geçmişi doldur" düğmesi seçilen bacakların 30 günlük gerçekleşmiş funding'ini arka planda kaydeder. Tek istekte en çok 4 bacak doldurulur ve aynı bacak 10 dakikada bir kez istenir. Fiyat farkı değişimi ve kayma bu sayfalardaki sonuçlara dahil değildir. Matristeki ve ana sayfadaki satırlar bu sayfalara bağlanır. Üst aramada varlık adı yazıp Enter'a basınca varlık sayfası açılır, `/` tuşu aramaya odaklar.
+
+Desteklenmeyenler: DEX hacim/OI/pazar payı geçmişi (Stats/Charts), OI hareketleri, haber, airdrop, farm, vault ve soru paneli. Tüm borsalarda kaldıraç, KYC ve trade bağlantıları da desteklenmiyor. Bunlar için toplu kaynak bağlı değildir.

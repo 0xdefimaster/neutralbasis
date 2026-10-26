@@ -1576,6 +1576,19 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 return self.send(engine.backtest_status())
             if self.path == "/api/funding-matrix" and hasattr(engine, "funding_matrix"):
                 return self.send(engine.funding_matrix())
+            if self.path.startswith(("/api/asset?", "/api/pair?")) and hasattr(
+                engine, "pair_view"
+            ):
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                arg = lambda k: q.get(k, [""])[0]
+                try:
+                    if self.path.startswith("/api/asset?"):
+                        return self.send(engine.asset_view(arg("asset")))
+                    return self.send(
+                        engine.pair_view(arg("asset"), arg("long"), arg("short"))
+                    )
+                except ValueError as ex:
+                    return self.send({"error": str(ex)}, 404)
             if self.path == "/api/read-jobs" and hasattr(engine, "read_status"):
                 return self.send(engine.read_status())
             if self.path == "/api/report.csv":
@@ -1645,6 +1658,10 @@ def serve(engine, port, host="127.0.0.1", password=None):
                     return self.send(
                         engine.request_read(self.path.split("/")[-1], body)
                     )
+                if self.path == "/api/pair-sync" and hasattr(
+                    engine, "request_pair_sync"
+                ):
+                    return self.send(engine.request_pair_sync(body))
                 if self.path == "/api/shutdown":
                     engine.running = False
                     engine.stop_event.set()
