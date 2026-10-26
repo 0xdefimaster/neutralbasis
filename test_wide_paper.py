@@ -256,6 +256,13 @@ class WidePaperTests(unittest.TestCase):
         for v in ("Hyperliquid", "Binance"):
             self.src.books[(v, "BTC")] = book(100.0, self.clock)
         self.desk.cycle(entries=False)
+        # One adverse quote is not enough: the flip must persist.
+        self.assertEqual(len(self.desk.positions), 1)
+        self.clock = T0 + 60 + 31 * 60
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        for v in ("Hyperliquid", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.desk.cycle(entries=False)
         self.assertEqual(self.desk.positions, [])
         self.assertEqual(
             self.desk.closed[0]["close_reason"], "Funding avantajı tersine döndü"
@@ -298,7 +305,7 @@ class WidePaperTests(unittest.TestCase):
         self.assertGreater(s["corr"], 0.99)
 
     # --- convergence strategy ----------------------------------------------------
-    def setup_convergence(self, basis=0.0, amplitude=0.002, gap=0.003):
+    def setup_convergence(self, basis=0.0, amplitude=0.0035, gap=0.006):
         end = bot.hour(T0)
         hours = list(range(end - 730 * 3600, end, 3600))
         base = {t: 100 * (1 + 0.03 * math.sin(i / 7)) for i, t in enumerate(hours)}
@@ -361,7 +368,11 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.positions, [])
         self.assertIn(
             self.desk.closed[-1]["close_reason"],
-            ("Fiyatlar kesişti", "Beklenen yakınsama kazancı alındı"),
+            (
+                "Fark ortalama/kesişim bölgesine geldi; kapanış sonrası net hedef sağlandı",
+                "Fiyatlar kesişti",
+                "Beklenen yakınsama kazancı alındı",
+            ),
         )
         self.assertGreater(self.desk.closed[-1]["net"], 0)
 
@@ -388,6 +399,7 @@ class WidePaperTests(unittest.TestCase):
         self.desk.cycle()
         p = self.desk.positions[0]
         p["peak_net"] = 5.0
+        p["decision"]["net"] = 100.0  # isolate the lock from the profit target
         p["funding"] += 3.0
         self.desk.wallet["cash"] += 3.0
         self.desk.cycle(entries=False)
@@ -403,6 +415,103 @@ class WidePaperTests(unittest.TestCase):
         self.desk.cycle()
         self.desk.cycle(entries=False)
         self.assertEqual(len(self.desk.positions), 1)
+
+    # --- final spec guards ---------------------------------------------------------
+    def test_entry_reason_and_strategy_recorded(self):
+        self.setup_pair()
+        self.desk.cycle()
+        p = self.desk.positions[0]
+        self.assertEqual(p["strategy"], "funding")
+        self.assertIn("Funding: short Binance", p["entry_reason"])
+        self.desk.manual_close.add(p["id"])
+        self.desk.cycle(entries=False)
+        closed = self.desk.closed[-1]
+        self.assertEqual(closed["close_reason"], "Kullanıcı paper kapatma talebi")
+        self.assertTrue(closed["entry_reason"])
+
+    def test_report_keeps_strategies_apart(self):
+        self.setup_pair()
+        self.desk.cycle()
+        self.desk.manual_close.add(self.desk.positions[0]["id"])
+        self.desk.cycle(entries=False)
+        r = self.desk.report()
+        self.assertEqual(r["funding"]["trades"], 1)
+        self.assertEqual(r["convergence"]["trades"], 0)
+        closed = self.desk.closed[-1]
+        self.assertAlmostEqual(
+            r["funding"]["net"],
+            closed["price_pnl"] + closed["funding"] - closed["fees"],
+        )
+
+    def test_funding_api_down_still_monitors_and_closes(self):
+        self.setup_pair()
+        self.desk.cycle()
+        p = self.desk.positions[0]
+
+        def broken(*a):
+            raise ValueError("funding API kapalı")
+
+        self.src.funding = broken
+        self.desk.cache.clear()
+        self.clock = T0 + 120
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        for v in ("Hyperliquid", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.desk.manual_close.add(p["id"])
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertTrue(self.desk.closed[-1]["pending_funding"])
+
+    def test_market_list_failure_keeps_monitoring(self):
+        self.setup_pair()
+        self.desk.cycle()
+        pid = self.desk.positions[0]["id"]
+
+        def broken():
+            raise ValueError("tarayıcı kapalı")
+
+        self.src.market_rows = broken
+        self.desk.manual_close.add(pid)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn("Piyasa listesi alınamadı", self.desk.error)
+
+    def test_leg_margin_alarm_closes_alone(self):
+        self.setup_pair()
+        self.desk.cycle()
+        p = self.desk.positions[0]
+        short = next(l for l in p["legs"] if l["side"] == "short")
+        # Short venue rallies; the long venue's gain does not protect this leg's margin.
+        self.desk.update_config({"wide_risk": 10000, "wide_daily_loss": 100000})
+        p["decision"]["stress_loss"] = 1e9
+        self.src.books[("Binance", "BTC")] = book(100.0 * 1.2, T0)
+        self.src.books[("Hyperliquid", "BTC")] = book(100.0 * 1.2, T0)
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(
+            self.desk.closed[-1]["close_reason"], "Bacak marjin riski: Binance"
+        )
+
+    def test_unstable_spread_blocks_funding_entry(self):
+        self.setup_pair()
+        self.desk.update_config({"wide_max_spread_sd_bps": 1})
+        self.src.history[("Binance", "BTC")] = candles(T0, noise=0.5)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertTrue(
+            any("istikrarlı değil" in r for r in self.desk.assessed[0]["reasons"])
+        )
+
+    def test_leverage_is_a_ceiling_cut_by_leg_volatility(self):
+        self.setup_pair()
+        self.desk.cycle(entries=False)
+        c = self.desk.candidates[0]
+        calm = self.desk.priced(c, 5.0, 0.001, 500, vol=0.0005, hold=8)
+        self.assertEqual(calm["leverage"], 5.0)
+        # 2% hourly legs: a 4-sigma move over 24h would eat a 5x leg's margin.
+        wild = self.desk.priced(c, 5.0, 0.001, 500, vol=0.02, hold=24)
+        self.assertLess(wild["leverage"], 1.5)
+        self.assertGreaterEqual(wild["leverage"], 1.0)
 
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER

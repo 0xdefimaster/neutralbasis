@@ -39,6 +39,8 @@ WIDE_DEFAULTS = dict(
     wide_conv_min_episodes=3,
     wide_conv_max_hold_hours=72,
     wide_conv_exit_bps=2.0,
+    wide_max_spread_sd_bps=30.0,
+    wide_weak_minutes=30,
 )
 BOOLS = ("wide_enabled", "wide_funding_enabled", "wide_conv_enabled")
 LIMITS = dict(
@@ -63,7 +65,12 @@ LIMITS = dict(
     wide_conv_min_episodes=(1, 100),
     wide_conv_max_hold_hours=(1, 720),
     wide_conv_exit_bps=(0, 50),
+    wide_max_spread_sd_bps=(1, 500),
+    wide_weak_minutes=(0, 1440),
 )
+# A single leg's adverse move over the hold may use at most this share of its own
+# liquidation distance; the other venue's profit does not protect it.
+LEG_SAFETY = 0.5
 HISTORY_TTL = 1800
 FUNDING_TTL = 120
 MIN_NOTIONAL = 10
@@ -222,6 +229,7 @@ def pair_stats(left, right, at, horizon):
         mean, sd = statistics.mean(spread), statistics.pstdev(spread)
         residual = statistics.pstdev([x - y for x, y in zip(ra, rb)])
         out.update(
+            vol=max(statistics.pstdev(ra), statistics.pstdev(rb)),
             beta=beta,
             mean=mean,
             sd=sd,
@@ -494,7 +502,7 @@ class WidePaper:
             reasons.append("Kapanış sonrası bekleme süresi")
         return reasons
 
-    def priced(self, c, leverage_cap, stress, size):
+    def priced(self, c, leverage_cap, stress, size, vol=0.0, hold=24):
         """Size against margin, reserve and loss budget; VWAP all four fills on fresh books."""
         cfg = self.cfg
         a, lv, sv = c["asset"], c["long"], c["short"]
@@ -508,9 +516,15 @@ class WidePaper:
             v: (max(p for p, q in b["bids"]) + min(p for p, q in b["asks"])) / 2
             for v, b in ((lv, lb), (sv, sb))
         }
-        leverage = min(
-            [leverage_cap]
-            + [x for x in (c.get("leverage_long"), c.get("leverage_short")) if x]
+        # Leverage is a ceiling: each leg stands alone on its venue, so a 4-sigma single
+        # leg move over the hold must stay inside half of its liquidation distance.
+        move = 4 * vol * math.sqrt(max(1, hold))
+        leverage = max(
+            1.0,
+            min(
+                [leverage_cap, LEG_SAFETY / move if move > 0 else leverage_cap]
+                + [x for x in (c.get("leverage_long"), c.get("leverage_short")) if x]
+            ),
         )
         fee_l, fee_s = c["fee_long"], c["fee_short"]
         extra = self.extra_slippage
@@ -591,7 +605,12 @@ class WidePaper:
             out["stats"] = stats
             raw = self.conservative_raw(c, at)
             q = self.priced(
-                c, cfg["wide_leverage"], stats["stress_fraction"], cfg["wide_size"]
+                c,
+                cfg["wide_leverage"],
+                stats["stress_fraction"],
+                cfg["wide_size"],
+                stats["vol"],
+                cfg["wide_horizon"],
             )
             counts = c["payment_counts"]
             funding = (
@@ -601,19 +620,37 @@ class WidePaper:
             )
             # Short the rich leg: reverting to the 7d mean only costs when we enter below it.
             reversion = q["size"] * min(0.0, q["live_spread"] - stats["mean"])
+            # Risk reserve: one 7d standard deviation of the price gap widening.
+            risk_reserve = q["size"] * stats["sd"]
             net = (
                 funding
                 - q["entry_fee"]
                 - q["exit_fee"]
                 - q["execution_drag"]
                 + reversion
+                - risk_reserve
             )
             out.update(
                 q,
                 conservative_funding=funding,
                 conservative_raw=raw,
                 reversion_cost=reversion,
+                risk_reserve=risk_reserve,
                 net=net,
+                entry_reason=(
+                    "Funding: short %s, long %s; muhafazakâr %s saatlik funding $%.2f, "
+                    "korelasyon 7g %.3f / 30g %.3f, fark sd %.1f bp, net $%.2f"
+                    % (
+                        sv,
+                        lv,
+                        cfg["wide_horizon"],
+                        funding,
+                        stats["corr"],
+                        stats["corr30"],
+                        stats["sd"] * 10000,
+                        net,
+                    )
+                ),
             )
             if min(stats["corr"], stats["corr30"]) < cfg["wide_min_corr"]:
                 out["reasons"].append("7g / 30g getiri korelasyonu sınır altında")
@@ -621,11 +658,15 @@ class WidePaper:
                 out["reasons"].append("Hedge beta uyumsuz")
             if abs(stats["z"]) > cfg["wide_max_z"]:
                 out["reasons"].append("Spread z-score sınırı aşıldı")
+            if stats["sd"] > cfg["wide_max_spread_sd_bps"] / 10000:
+                out["reasons"].append(
+                    "Fiyat farkı istikrarlı değil (7g sd sınır üstünde)"
+                )
             if funding <= 0:
                 out["reasons"].append("Gerçekleşmiş funding ile kalıcı avantaj yok")
             if net < cfg["wide_min_net"]:
                 out["reasons"].append(
-                    "Funding geliri ücret + kayma + spread maliyetini karşılamıyor"
+                    "Funding geliri ücret + kayma + spread riski payını karşılamıyor"
                 )
             if (
                 q["entry_fee"] + q["exit_fee"] + q["execution_drag"] + q["stress_loss"]
@@ -679,7 +720,14 @@ class WidePaper:
             )
             # Stress over the usual closing time, from 7d return residuals.
             stress = pair_stats(left, right, at, expected)["stress_fraction"]
-            q = self.priced(c, cfg["wide_conv_leverage"], stress, cfg["wide_size"])
+            q = self.priced(
+                c,
+                cfg["wide_conv_leverage"],
+                stress,
+                cfg["wide_size"],
+                stats["vol"],
+                max_hold,
+            )
             raw = self.conservative_raw(c, at, required=False)
             window = at + expected * 3600
             rl = dict(interval=c["interval_long"], next=c["next_long"])
@@ -688,21 +736,54 @@ class WidePaper:
                 raw["short"] * payments_within(rs, at, window)
                 - raw["long"] * payments_within(rl, at, window)
             )
-            capture = q["qty"] * (q["entry_short"] - q["entry_long"])
-            # Zero-gap target; the exit crosses half of today's round-trip book spread.
+            # Funding is not the thesis: a cost over the expected hold is charged, income is not credited.
+            funding_cost = min(0.0, funding)
+            target = max(hist["mean7"], 0.0)
+            # Expected capture: the gap narrowing back to its 7d mean (or zero), not beyond.
+            capture = (
+                q["qty"] * (q["entry_short"] - q["entry_long"]) - q["size"] * target
+            )
+            # The exit crosses half of today's round-trip book spread.
             exit_drag = q["execution_drag"] / 2
-            net = capture - exit_drag - q["entry_fee"] - q["exit_fee"] + funding
+            # Risk reserve: one 7d standard deviation of the gap widening further.
+            risk_reserve = q["size"] * hist["sd7"]
+            net = (
+                capture
+                - exit_drag
+                - q["entry_fee"]
+                - q["exit_fee"]
+                + funding_cost
+                - risk_reserve
+            )
             gap = math.log(q["entry_short"] / q["entry_long"])
             out.update(
                 q,
                 entry_capture=capture,
                 exit_drag_proxy=exit_drag,
                 conservative_funding=funding,
+                funding_cost_reserve=funding_cost,
                 conservative_raw=raw,
+                risk_reserve=risk_reserve,
                 expected_hours=expected,
                 max_hold_hours=max_hold,
                 entry_gap=gap,
+                target_gap=target,
                 net=net,
+                entry_reason=(
+                    "Yakınsama: long %s, short %s; boşluk %.1f bp (7g ort. %.1f, sd %.1f), "
+                    "kesişim 7g %d / 30g %d, ortalama kapanma %d saat, net $%.2f"
+                    % (
+                        lv,
+                        sv,
+                        gap * 10000,
+                        hist["mean7"] * 10000,
+                        hist["sd7"] * 10000,
+                        hist["cross7"],
+                        hist["cross30"],
+                        expected,
+                        net,
+                    )
+                ),
             )
             if gap < max(0.0005, hist["mean7"] + hist["sd7"]):
                 out["reasons"].append(
@@ -712,7 +793,7 @@ class WidePaper:
                 out["reasons"].append("7g / 30g getiri korelasyonu sınır altında")
             if net < cfg["wide_min_net"]:
                 out["reasons"].append(
-                    "Yakınsama kazancı 4 emir ücreti, kayma ve beklenen funding sonrası yetersiz"
+                    "Yakınsama kazancı 4 emir ücreti, kayma, funding gideri ve risk payı sonrası yetersiz"
                 )
             if (
                 q["entry_fee"] + q["exit_fee"] + q["execution_drag"] + q["stress_loss"]
@@ -744,6 +825,7 @@ class WidePaper:
             decision={k: v for k, v in c.items() if k != "stats"},
             close_reason=None,
             strategy=c.get("strategy", "funding"),
+            entry_reason=c.get("entry_reason"),
             peak_net=None,
         )
         self.positions.append(p)
@@ -1011,6 +1093,13 @@ class WidePaper:
             return "Günlük kayıp limiti"
         if p["price_pnl_open"] + d["execution_drag"] < -d["stress_loss"]:
             return "Spread stres bütçesi aşıldı"
+        # Each venue holds its own collateral: one leg's loss is not covered by the other.
+        for leg in p["legs"]:
+            if (
+                not leg["closed"]
+                and -leg.get("price_pnl", 0) >= LEG_SAFETY * leg["margin"]
+            ):
+                return "Bacak marjin riski: " + leg["venue"]
         held = now() - p["opened"]
         if p.get("strategy") == "convergence":
             mid = {
@@ -1019,19 +1108,22 @@ class WidePaper:
             }
             gap = math.log(mid[d["short"]] / mid[d["long"]])
             p["live_gap"] = gap
-            if gap <= 0:
+            zone = max(d.get("target_gap", 0.0), cfg["wide_conv_exit_bps"] / 10000)
+            # No need to wait for an exact cross: in the mean/cross zone the
+            # after-close net decides.
+            if gap <= zone and p["net_if_closed"] >= cfg["wide_min_net"]:
+                return "Fark ortalama/kesişim bölgesine geldi; kapanış sonrası net hedef sağlandı"
+            if gap <= 0 and p["net_if_closed"] > 0:
                 return "Fiyatlar kesişti"
-            if gap <= cfg["wide_conv_exit_bps"] / 10000 and (
-                p["net_if_closed"] >= cfg["wide_min_net"]
-            ):
-                return "Makas kapandı; net hedef sağlandı"
-            if p["net_if_closed"] >= d["net"]:
+            if p["net_if_closed"] >= d["net"] > 0:
                 return "Beklenen yakınsama kazancı alındı"
             if held > d["max_hold_hours"] * 3600:
                 return "Yakınsama azami bekleme süresi"
             return None
         if held > cfg["wide_max_hold_hours"] * 3600:
             return "Azami tutma süresi"
+        if p["net_if_closed"] >= d["net"] > 0:
+            return "Kâr hedefi alındı"
         peak = max(p.get("peak_net") or p["net_if_closed"], p["net_if_closed"])
         p["peak_net"] = peak
         # Profit lock: once a real gain exists, a pullback of the trail fraction closes it
@@ -1040,6 +1132,22 @@ class WidePaper:
             1 - cfg["wide_lock_trail"]
         ):
             return "Kâr kilitlendi: kazanç geri verilmeye başladı"
+        try:
+            stats = pair_stats(
+                self.price_history(d["long"], p["asset"]),
+                self.price_history(d["short"], p["asset"]),
+                now(),
+                cfg["wide_horizon"],
+            )
+        except Exception:
+            stats = None
+        if stats:
+            p["live_stats"] = {k: stats[k] for k in ("corr", "corr30", "z", "sd")}
+            if (
+                min(stats["corr"], stats["corr30"]) < cfg["wide_min_corr"]
+                or abs(stats["z"]) > cfg["wide_max_z"] + 1
+            ):
+                return "Fiyat uyumu bozuldu"
         l, s = self.rows.get((d["long"], p["asset"])), self.rows.get(
             (d["short"], p["asset"])
         )
@@ -1049,25 +1157,62 @@ class WidePaper:
                 "raw_rate"
             ] * payments_within(l, now(), end)
             p["remaining_funding_fraction"] = ahead
-            # Exit fees are owed either way; leave once future carry turns negative.
-            if ahead < 0:
-                return "Funding avantajı tersine döndü"
-            if (
+            flipped = ahead < 0
+            weak = flipped or (
                 p["net_if_closed"] >= cfg["wide_min_net"]
                 and ahead * d["size"] < cfg["wide_min_net"]
-            ):
-                return "Funding zayıfladı; kâr alındı"
+            )
+            # A single quote does not trigger an exit: the weakness must persist.
+            if not weak:
+                p["weak_since"] = None
+            else:
+                p["weak_since"] = p.get("weak_since") or now()
+                if now() - p["weak_since"] >= cfg["wide_weak_minutes"] * 60:
+                    return (
+                        "Funding avantajı tersine döndü"
+                        if flipped
+                        else "Funding zayıfladı; kâr alındı"
+                    )
         return None
+
+    def report(self):
+        """Paper results per strategy; unverified and estimated funding kept apart."""
+        out = {}
+        for key in ("funding", "convergence"):
+            done = [p for p in self.closed if p.get("strategy", "funding") == key]
+            settled = [p for p in done if not p.get("pending_funding")]
+            out[key] = dict(
+                open=sum(p.get("strategy", "funding") == key for p in self.positions),
+                trades=len(done),
+                settled=len(settled),
+                wins=sum(p["net"] > 0 for p in settled),
+                net=sum(p["net"] for p in settled),
+                price_pnl=sum(p["price_pnl"] for p in settled),
+                funding=sum(p["funding"] for p in settled),
+                estimated_funding=sum(p.get("estimated_funding", 0) for p in settled),
+                fees=sum(p["fees"] for p in settled),
+                unverified_payments=sum(
+                    len(p.get("funding_unverified", [])) for p in done
+                ),
+                pending=len(done) - len(settled),
+            )
+        return out
 
     def cycle(self, entries=True):
         self.error = None
         try:
-            rows = self.source.market_rows()
-            self.rows = {
-                (r["venue"], r["asset"]): r
-                for r in rows
-                if r.get("kind", "perp") == "perp"
-            }
+            try:
+                rows = self.source.market_rows()
+            except Exception as ex:
+                # Open positions are still marked and closed from the books.
+                rows = None
+                self.error = "Piyasa listesi alınamadı: " + str(ex)
+            if rows is not None:
+                self.rows = {
+                    (r["venue"], r["asset"]): r
+                    for r in rows
+                    if r.get("kind", "perp") == "perp"
+                }
             open_keys = {
                 (l["venue"], p["asset"]) for p in self.positions for l in p["legs"]
             }
@@ -1104,14 +1249,19 @@ class WidePaper:
                     p["net"] = p["price_pnl"] + p["funding"] - p["fees"]
             at = now()
             self.candidates = (
-                rank(rows, self.cfg, at) if self.cfg["wide_funding_enabled"] else []
+                rank(rows, self.cfg, at)
+                if rows is not None and self.cfg["wide_funding_enabled"]
+                else []
             )
             self.conv_candidates = (
-                rank_spreads(rows, at) if self.cfg["wide_conv_enabled"] else []
+                rank_spreads(rows, at)
+                if rows is not None and self.cfg["wide_conv_enabled"]
+                else []
             )
             self.assessed = []
             if (
                 entries
+                and rows is not None
                 and self.cfg["wide_enabled"]
                 and len(self.positions) < self.cfg["wide_max_positions"]
                 and not any(p["status"] != "OPEN" for p in self.positions)
@@ -1148,6 +1298,7 @@ class WidePaper:
             daily_pnl=self.daily_pnl(),
             positions=self.positions,
             closed=self.closed[-100:],
+            report=self.report(),
             candidates=self.candidates[:40],
             candidate_count=len(self.candidates),
             conv_candidates=self.conv_candidates[:40],
@@ -1157,12 +1308,12 @@ class WidePaper:
             last_cycle=self.last_cycle,
             error=self.error,
             method=(
-                "İki strateji, taranan tüm borsa çiftleri. Funding: her borsanın kendi aralığıyla "
-                "horizon funding'i − 4 taker ücreti; 7g ve 30g korelasyon/beta/z, 24s gerçekleşmiş "
-                "funding (kötü olan) ve defter VWAP'ı kontrol edilir. Kazanç geri verilmeye başlarsa "
-                "kâr kilitlenir, funding dönerse çıkılır. Yakınsama: ucuzda long, pahalıda short, eşit "
-                "miktar, 5x; 7g ve 30g düzenli kesişim, ortalama kapanma süresi ve bu sürede ödenecek "
-                "funding hesaba katılır; fiyatlar kesişince kapanır. Tek ortak paper cüzdan; gerçek "
-                "emir ve API anahtarı yok."
+                "İki strateji, taranan tüm borsa çiftleri; net = iki bacağın fiyat PnL'si + net funding − "
+                "komisyon, kayma dolum fiyatlarında. Funding: 7g/30g korele ve farkı istikrarlı çiftler, "
+                "aralıkları eşitlenmiş short − long funding; ücret, kayma ve fark riski payını karşılarsa "
+                "açılır; zayıflık kalıcıysa, uyum bozulursa veya bacak marjini riske girerse çıkılır. "
+                "Yakınsama: 7g ve 30g düzenli kesişim ve kapanma süresi; ucuzda long, pahalıda short, eşit "
+                "miktar, en fazla 5x; ortalama/kesişim bölgesinde kapanış sonrası nete bakılarak kapanır. "
+                "Kaldıraç tavandır, her bacağın kendi marjinine göre küçülür. Gerçek emir ve API anahtarı yok."
             ),
         )
