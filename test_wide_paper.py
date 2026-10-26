@@ -2,7 +2,16 @@ import json, math, os, tempfile, unittest
 from unittest import mock
 import bot
 import wide_paper
-from wide_paper import WidePaper, rank, payments_within, next_payment, pair_stats
+from wide_paper import (
+    WidePaper,
+    rank,
+    rank_spreads,
+    payments_within,
+    next_payment,
+    pair_stats,
+    crossings,
+    closing_times,
+)
 
 T0 = 1_000 * 86400  # aligned to the hour and to 8h
 
@@ -63,7 +72,7 @@ def candles(at, drift=0.0, noise=0.0):
         price_type="trade",
         prices={
             t: 100 * (1 + 0.001 * math.sin(i / 3)) * (1 + drift) + noise * (i % 2)
-            for i, t in enumerate(range(end - 170 * 3600, end, 3600))
+            for i, t in enumerate(range(end - 730 * 3600, end, 3600))
         },
     )
 
@@ -186,7 +195,7 @@ class WidePaperTests(unittest.TestCase):
             price_type="trade",
             prices={
                 t: 100 + (i * 7919 % 13)
-                for i, t in enumerate(range(end - 170 * 3600, end, 3600))
+                for i, t in enumerate(range(end - 730 * 3600, end, 3600))
             },
         )
         self.desk.cycle()
@@ -288,11 +297,115 @@ class WidePaperTests(unittest.TestCase):
         s = pair_stats(h, candles(T0, drift=0.001), T0, 24)
         self.assertGreater(s["corr"], 0.99)
 
+    # --- convergence strategy ----------------------------------------------------
+    def setup_convergence(self, basis=0.0, amplitude=0.002, gap=0.003):
+        end = bot.hour(T0)
+        hours = list(range(end - 730 * 3600, end, 3600))
+        base = {t: 100 * (1 + 0.03 * math.sin(i / 7)) for i, t in enumerate(hours)}
+        # Short venue oscillates around the long venue: crosses every 6h.
+        self.src.history[("Hyperliquid", "BTC")] = dict(price_type="trade", prices=base)
+        self.src.history[("Binance", "BTC")] = dict(
+            price_type="trade",
+            prices={
+                t: base[t]
+                * math.exp(basis + amplitude * math.sin(2 * math.pi * i / 12))
+                for i, t in enumerate(hours)
+            },
+        )
+        dear = 100 * math.exp(gap)
+        self.src.rows = [
+            row("Hyperliquid", rate=0.0, fee=0.0002, mark=100.0),
+            row("Binance", rate=0.0, fee=0.0002, mark=dear, interval=28800),
+        ]
+        self.src.books[("Hyperliquid", "BTC")] = book(100.0, T0)
+        self.src.books[("Binance", "BTC")] = book(dear, T0)
+        self.desk.update_config({"wide_funding_enabled": False})
+
+    def test_crossing_helpers(self):
+        series = [
+            (i * 3600, x) for i, x in enumerate([0.001, -0.001, 0.001, 0, -0.001])
+        ]
+        self.assertEqual(crossings(series, 0.0001)[0], 3)
+        self.assertEqual(
+            closing_times(
+                [(0, 0.0), (3600, 0.003), (7200, 0.001), (10800, 0.0)], 0.002, 0.0002
+            ),
+            [2.0],
+        )
+
+    def test_convergence_opens_long_cheap_short_dear_5x(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        p = self.desk.positions[0]
+        d = p["decision"]
+        self.assertEqual(p["strategy"], "convergence")
+        self.assertEqual((d["long"], d["short"]), ("Hyperliquid", "Binance"))
+        self.assertEqual(d["leverage"], 5.0)
+        legs = {l["side"]: l for l in p["legs"]}
+        self.assertEqual(legs["long"]["qty"], legs["short"]["qty"])
+        h = d["convergence_history"]
+        self.assertGreaterEqual(h["cross7"], 6)
+        self.assertGreaterEqual(h["cross30"], 20)
+        self.assertLessEqual(d["expected_hours"], 6)
+        self.assertGreaterEqual(d["max_hold_hours"], d["expected_hours"])
+
+    def test_convergence_closes_when_prices_cross(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        self.clock = T0 + 3600
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        for v in ("Hyperliquid", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn(
+            self.desk.closed[-1]["close_reason"],
+            ("Fiyatlar kesişti", "Beklenen yakınsama kazancı alındı"),
+        )
+        self.assertGreater(self.desk.closed[-1]["net"], 0)
+
+    def test_persistent_basis_never_qualifies(self):
+        # Dear venue always 30bp rich: prices never meet.
+        self.setup_convergence(basis=0.003, amplitude=0.0003)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        reasons = " ".join(self.desk.assessed[0]["reasons"])
+        self.assertIn("kesişim yok", reasons)
+
+    def test_convergence_charges_funding_paid_while_waiting(self):
+        self.setup_convergence()
+        # Long venue charges heavy hourly funding during the expected hold.
+        self.src.rows[0] = row("Hyperliquid", rate=0.002, fee=0.0002, mark=100.0)
+        self.desk.cycle()
+        c = self.desk.assessed[0]
+        self.assertLess(c["conservative_funding"], 0)
+        self.assertEqual(self.desk.positions, [])
+
+    # --- funding profit lock -------------------------------------------------------
+    def test_profit_lock_closes_positive_after_pullback(self):
+        self.setup_pair()
+        self.desk.cycle()
+        p = self.desk.positions[0]
+        p["peak_net"] = 5.0
+        p["funding"] += 3.0
+        self.desk.wallet["cash"] += 3.0
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        closed = self.desk.closed[-1]
+        self.assertEqual(
+            closed["close_reason"], "Kâr kilitlendi: kazanç geri verilmeye başladı"
+        )
+        self.assertGreater(closed["net"], 0)
+
+    def test_no_lock_before_any_gain(self):
+        self.setup_pair()
+        self.desk.cycle()
+        self.desk.cycle(entries=False)
+        self.assertEqual(len(self.desk.positions), 1)
+
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class DeskIntegrationTests(unittest.TestCase):
@@ -321,3 +434,7 @@ class DeskIntegrationTests(unittest.TestCase):
                 self.assertEqual(snap["wide_paper"]["balance"]["cash"], 1000)
             finally:
                 e.store.db.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
