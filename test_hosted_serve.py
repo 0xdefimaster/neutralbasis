@@ -19,6 +19,17 @@ class StubEngine:
     def persist(self):
         pass
 
+    def asset_view(self, asset):
+        if asset != "BTC":
+            raise ValueError(asset + ": yok")
+        return {"asset": asset}
+
+    def pair_view(self, asset, long, short):
+        return {"asset": asset, "long": long, "short": short}
+
+    def request_pair_sync(self, body):
+        return {"ok": True, "started": body["venues"]}
+
     def events(self, kind, message, **extra):
         self.events_seen.append(kind)
 
@@ -84,6 +95,18 @@ class HostedServeTests(unittest.TestCase):
         self.assertEqual(self.call("/api/start", "s3cret", {}, "bad")[0], 403)
         self.assertEqual(self.call("/api/start", "s3cret", {}, token)[0], 200)
         self.assertTrue(self.engine.running)
+
+    def test_asset_and_pair_pages_read_query_and_sync_needs_token(self):
+        status, body = self.call("/api/pair?asset=BTC&long=A&short=B%20C", "s3cret")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["short"], "B C")
+        self.assertEqual(self.call("/api/asset?asset=BTC", "s3cret")[0], 200)
+        self.assertEqual(self.call("/api/asset?asset=NOPE", "s3cret")[0], 404)
+        self.assertEqual(self.call("/api/asset?asset=BTC")[0], 401)
+        body = {"asset": "BTC", "venues": ["A"]}
+        self.assertEqual(self.call("/api/pair-sync", "s3cret", body, "bad")[0], 403)
+        status, raw = self.call("/api/pair-sync", "s3cret", body, self.token())
+        self.assertEqual((status, json.loads(raw)["started"]), (200, ["A"]))
 
 
 class BindGuardTests(unittest.TestCase):
