@@ -249,4 +249,8 @@ function reviewCard(w){const r=w.review;if(!r)return '';const hs=state.history_s
  return `<div class="card"><div class="card-head"><h2>Aday inceleme · ${r.rounds} tur · ${r.examined} derin kontrol · ${r.eligible} uygun · ${r.skipped} atlandı</h2></div><p class="tooltip" style="padding:0 16px">Elenen çift ${Math.round(r.cooldown/60)} dk (geçmiş eksikse ${Math.round(r.history_retry/60)} dk) kenara alınır; sonraki turlar sıradaki adaylara geçer. Geçmiş kaydedici önce bu adayların bacaklarını doldurur${hs.priority!=null?` · öncelikli piyasa ${hs.priority}, bekleyen ${hs.priority_missing}`:''}.</p>
  <div class="table-wrap"><table><thead><tr><th>Elenme nedeni</th><th class="num">Toplam</th><th class="num">Şu an bekleyen</th></tr></thead><tbody>${reasons}</tbody></table></div>${recent?`<div class="table-wrap"><table><thead><tr><th>Son elenen</th><th>Bacaklar</th><th>Neden</th><th class="num">Tekrar denenir</th></tr></thead><tbody>${recent}</tbody></table></div>`:''}</div>`}
 const reviewBaseMulti=multiScreen;multiScreen=function(){const html=reviewBaseMulti(),w=state.wide_paper;if(!w?.review)return html;const at=html.indexOf('<div class="card"><div class="card-head"><h2>Funding fırsatları');return at<0?html+reviewCard(w):html.slice(0,at)+reviewCard(w)+html.slice(at)};
+
+// Keep the scroll position across the periodic refresh. Screen wrappers above render the
+// base page first, which can be shorter, so the browser clamps scrollY before they read it.
+const scrollKeepRender=render;let scrollKeepTab=null;render=function(){const y=window.scrollY,same=scrollKeepTab===tab;scrollKeepRender();scrollKeepTab=tab;if(same&&Math.abs(window.scrollY-y)>1)window.scrollTo(0,y)};
 </script></body></html>
