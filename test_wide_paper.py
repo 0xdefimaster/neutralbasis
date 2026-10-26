@@ -739,5 +739,78 @@ class UniverseRowsTests(unittest.TestCase):
         self.assertEqual(len(wide_paper.universe_rows(universe, [], {"DUST"})), 1)
 
 
+class RfqSplitTests(unittest.TestCase):
+    """RFQ markets leave candidate selection before any deep check."""
+
+    setUp = WidePaperTests.setUp
+    tearDown = WidePaperTests.tearDown
+    fund_history = WidePaperTests.fund_history
+
+    def setup_btw(self):
+        # Extended (RFQ) offers the widest carry; Aster–Binance is the executable pair.
+        self.src.rows = [
+            row("Extended", rate=-0.0005, fee=0.00025, rfq=True),
+            row("Aster", rate=-0.0001, fee=0.00035),
+            row("Binance", rate=0.0008, interval=28800, fee=0.0005),
+        ]
+        for v in ("Aster", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, T0)
+            self.src.history[(v, "BTC")] = candles(T0)
+        self.fund_history("Aster", -0.0001, 3600)
+        self.fund_history("Binance", 0.0008, 28800)
+        seen = []
+        real = self.src.book
+
+        def tracked(v, a):
+            seen.append(v)
+            if v == "Extended":
+                raise AssertionError("RFQ gösterge defteri okunmamalı")
+            return real(v, a)
+
+        self.src.book = tracked
+        return seen
+
+    def test_rfq_pair_goes_to_review_and_other_combination_opens(self):
+        seen = self.setup_btw()
+        self.desk.cfg["wide_deep_top"] = 1
+        self.desk.cycle()
+        self.assertNotIn("Extended", seen)
+        self.assertTrue(
+            all("Extended" not in (c["long"], c["short"]) for c in self.desk.candidates)
+        )
+        self.assertTrue(self.desk.rfq_review)
+        for c in self.desk.rfq_review:
+            self.assertIn("Extended", (c["long"], c["short"]))
+            self.assertEqual(c["reasons"], [wide_paper.RFQ_UNSUPPORTED])
+            self.assertFalse(c["eligible"])
+        # The single deep-check slot went to the executable pair, which opened.
+        self.assertEqual(
+            [
+                (x["long"], x["short"])
+                for x in self.desk.assessed
+                if x["strategy"] == "funding"
+            ],
+            [("Aster", "Binance")],
+        )
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        self.assertFalse(
+            any(k[2] == "Extended" or k[3] == "Extended" for k in self.desk.rejected)
+        )
+        snap = json.loads(json.dumps(self.desk.snapshot()))
+        self.assertEqual(snap["rfq_review_count"], len(self.desk.rfq_review))
+
+    def test_split_keeps_normal_order(self):
+        rows = [
+            row("Extended", rate=-0.0005, rfq=True),
+            row("Aster", rate=-0.0001),
+            row("Binance", rate=0.0008),
+        ]
+        normal, rfq = wide_paper.split_rfq(rank(rows, wide_paper.WIDE_DEFAULTS, T0))
+        self.assertEqual(
+            [(c["long"], c["short"]) for c in normal], [("Aster", "Binance")]
+        )
+        self.assertEqual(len(rfq), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -179,7 +179,28 @@ def pair_fields(a, l, s):
         fee_short=s["fee"],
         leverage_long=l.get("leverage"),
         leverage_short=s.get("leverage"),
+        rfq_long=bool(l.get("rfq")),
+        rfq_short=bool(s.get("rfq")),
     )
+
+
+RFQ_UNSUPPORTED = "RFQ yürütmesi henüz desteklenmiyor"
+
+
+def split_rfq(ranked):
+    """Separate pairs with an RFQ leg before any deep check.
+
+    An RFQ market's public book is indicative, so it cannot be priced like a normal
+    order book. Those pairs go to their own review queue, labelled, and never take a
+    deep-check slot or block the asset's other venue combinations.
+    """
+    normal, rfq = [], []
+    for c in ranked:
+        if c.get("rfq_long") or c.get("rfq_short"):
+            rfq.append(dict(c, eligible=False, reasons=[RFQ_UNSUPPORTED], net=None))
+        else:
+            normal.append(c)
+    return normal, rfq
 
 
 def rank_spreads(rows, at):
@@ -422,6 +443,7 @@ class EngineSource:
                         fee=fee,
                         leverage=m.get("max_leverage"),
                         price_type="mark",
+                        rfq=bool(m.get("rfq")),
                     )
                 )
         extra, _ = e.wide.snapshot()
@@ -502,6 +524,7 @@ class WidePaper:
         self.candidates = []
         self.assessed = []
         self.conv_candidates = []
+        self.rfq_review = []
         self.rejected = {}
         self.review = dict(rounds=0, examined=0, eligible=0, skipped=0, reasons={})
         self.rows = {}
@@ -1456,6 +1479,10 @@ class WidePaper:
                 if rows is not None and self.cfg["wide_conv_enabled"]
                 else []
             )
+            # RFQ pairs leave before selection so they cannot use up deep-check slots.
+            self.candidates, rfq_funding = split_rfq(self.candidates)
+            self.conv_candidates, rfq_conv = split_rfq(self.conv_candidates)
+            self.rfq_review = rfq_funding + rfq_conv
             self.assessed = []
             if (
                 entries
@@ -1576,6 +1603,8 @@ class WidePaper:
             candidate_count=len(self.candidates),
             conv_candidates=self.conv_candidates[:40],
             conv_candidate_count=len(self.conv_candidates),
+            rfq_review=self.rfq_review[:40],
+            rfq_review_count=len(self.rfq_review),
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
             review=self.review_snapshot(),
             venues=venues,
