@@ -122,7 +122,9 @@ class KeeperBatchTests(unittest.TestCase):
             self.assertEqual(src.calls, ["X"])
             k.run_once(1)
             st = k.status()
-        self.assertEqual((st["priority"], st["priority_missing"]), (1, 0))
+        # Synced without error but the source returned nothing: still missing.
+        self.assertEqual((st["priority"], st["priority_missing"]), (1, 1))
+        self.assertEqual((st["synced"], st["complete"]), (2, 0))
 
 
 if __name__ == "__main__":

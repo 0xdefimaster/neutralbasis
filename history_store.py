@@ -17,6 +17,48 @@ BATCH = 10
 # A stored window that starts late (a failed or cut-short first fill) is retried
 # backwards at this pace; venues that publish less history simply stay partial.
 BACKFILL_SECONDS = 12 * 3600
+# Candle holes refetched per market and retry, longest first.
+MAX_SPANS = 6
+
+
+def missing_spans(stored, start, end):
+    """Contiguous [from, to) runs of missing hours in [start, end), longest first."""
+    spans, run = [], None
+    for t in range(start, end, 3600):
+        if t in stored:
+            if run is not None:
+                spans.append((run, t))
+                run = None
+        elif run is None:
+            run = t
+    if run is not None:
+        spans.append((run, end))
+    return sorted(spans, key=lambda s: s[0] - s[1])
+
+
+def funding_gaps(times, start, interval):
+    """[from, to) windows where at least one scheduled payment is missing: the head
+    before the first stored payment and any spacing over 1.5 intervals."""
+    if not times or not interval:
+        return []
+    times = sorted(times)
+    gaps = []
+    if times[0] - start > 2 * interval:
+        gaps.append((start, times[0]))
+    for x, y in zip(times, times[1:]):
+        if y - x > 1.5 * interval:
+            gaps.append((x + 1, y))
+    return gaps
+
+
+def complete(cov):
+    """At least 95% of the 30-day window's candles and scheduled funding payments."""
+    if cov["candles"] < cov["candle_hours"] * 0.95:
+        return False
+    expected = cov.get("funding_expected")
+    if "funding" in cov and expected and cov["funding"] < expected * 0.95:
+        return False
+    return True
 
 
 class HistoryStore:
@@ -155,63 +197,108 @@ class HistoryKeeper:
         self.source.publish(v, a, kind, prices, rates, interval, price_type)
 
     def sync(self, v, a, kind, interval=None, price_type="trade"):
+        """Append new candles and funding, then repair holes. Each part runs on its own:
+        a failing candle call does not stop funding, and whatever was stored is
+        published either way. Errors are raised together after publishing."""
+        key = (v, a, kind)
+        if self.db.last_candle(v, a, kind) is None:
+            # A first fill already asks for the whole window; repairs are for later.
+            self.backfilled[key] = now()
+        added, errors = 0, []
+        try:
+            added += self.sync_candles(v, a, kind)
+        except Exception as ex:
+            errors.append("Mum: " + str(ex)[:160])
+        if kind == "perp":
+            try:
+                added += self.sync_funding(v, a, interval)
+            except Exception as ex:
+                errors.append("Funding: " + str(ex)[:160])
+        try:
+            added += self.repair(v, a, kind, interval)
+        except Exception as ex:
+            errors.append("Onarım: " + str(ex)[:160])
+        self.publish(v, a, kind, interval, price_type)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return added
+
+    def sync_candles(self, v, a, kind):
         end = hour(now())
         last = self.db.last_candle(v, a, kind)
         start = max(end - FIRST_DAYS * 86400, (last + 3600) if last is not None else 0)
-        if last is None:
-            # A first fill already asks for the whole window; going back is for later.
-            self.backfilled[(v, a, kind)] = now()
-        added = 0
-        if start < end:
-            prices = self.source.candles(v, a, kind, start, end)
-            added += self.db.add_candles(
-                v, a, kind, {t: p for t, p in prices.items() if start <= t < end}
-            )
-        if kind == "perp":
-            lastf = self.db.last_funding(v, a)
-            fstart = max(now() - FIRST_DAYS * 86400, (lastf + 1) if lastf else 0)
-            if now() - fstart > (interval or 3600) * 0.5:
-                added += self.db.add_funding(v, a, self.source.funding(v, a, fstart))
-        added += self.backfill(v, a, kind, interval)
-        self.publish(v, a, kind, interval, price_type)
-        return added
+        if start >= end:
+            return 0
+        prices = self.source.candles(v, a, kind, start, end)
+        return self.db.add_candles(
+            v, a, kind, {t: p for t, p in prices.items() if start <= t < end}
+        )
 
-    def backfill(self, v, a, kind, interval=None):
-        """Fetch the part of the 30-day window before the first stored row, when the
-        first fill came back short. Retried at most every BACKFILL_SECONDS."""
+    def sync_funding(self, v, a, interval=None):
+        lastf = self.db.last_funding(v, a)
+        fstart = max(now() - FIRST_DAYS * 86400, (lastf + 1) if lastf else 0)
+        if now() - fstart <= (interval or 3600) * 0.5:
+            return 0
+        return self.db.add_funding(v, a, self.source.funding(v, a, fstart))
+
+    def repair(self, v, a, kind, interval=None):
+        """Refetch holes in the 30-day window: the head before the first stored row and
+        gaps between stored rows (an outage, a cut-short page). Retried at most every
+        BACKFILL_SECONDS while holes remain; venues that never publish an hour (no
+        trades) only cost one call per span per retry."""
         key = (v, a, kind)
         if now() - self.backfilled.get(key, -BACKFILL_SECONDS) < BACKFILL_SECONDS:
             return 0
         added = 0
-        floor = hour(now()) - FIRST_DAYS * 86400
-        first = self.db.first_candle(v, a, kind, floor)
         tried = False
-        if first is not None and first > floor + 2 * 3600:
-            tried = True
-            prices = self.source.candles(v, a, kind, floor, first)
-            added += self.db.add_candles(
-                v, a, kind, {t: p for t, p in prices.items() if floor <= t < first}
-            )
+        end = hour(now())
+        floor = end - FIRST_DAYS * 86400
+        stored = self.db.candles(v, a, kind, floor)
+        if stored:
+            for start, stop in missing_spans(stored, floor, max(stored) + 3600)[
+                :MAX_SPANS
+            ]:
+                tried = True
+                prices = self.source.candles(v, a, kind, start, stop)
+                added += self.db.add_candles(
+                    v, a, kind, {t: p for t, p in prices.items() if start <= t < stop}
+                )
         if kind == "perp":
             ffloor = now() - FIRST_DAYS * 86400
-            firstf = self.db.first_funding(v, a, ffloor)
-            if firstf is not None and firstf > ffloor + 2 * (interval or 3600):
+            times = [r["ts"] for r in self.db.funding(v, a, ffloor)]
+            gaps = funding_gaps(times, ffloor, interval)
+            if gaps:
                 tried = True
-                rows = self.source.funding(v, a, ffloor)
+                rows = self.source.funding(v, a, gaps[0][0])
                 added += self.db.add_funding(
-                    v, a, [r for r in rows if ffloor <= r["ts"] < firstf]
+                    v,
+                    a,
+                    [r for r in rows if any(s <= r["ts"] < e for s, e in gaps)],
                 )
         if tried:
             self.backfilled[key] = now()
         return added
 
-    def coverage(self, v, a, kind="perp"):
-        """Earliest stored hour and funding payment inside the 30-day window."""
-        floor = hour(now()) - FIRST_DAYS * 86400
-        return dict(
-            candles_from=self.db.first_candle(v, a, kind, floor),
-            funding_from=self.db.first_funding(v, a, now() - FIRST_DAYS * 86400),
+    def coverage(self, v, a, kind="perp", interval=None):
+        """Stored rows against what a complete 30-day window holds."""
+        end = hour(now())
+        floor = end - FIRST_DAYS * 86400
+        candles = self.db.candles(v, a, kind, floor)
+        out = dict(
+            candles=len(candles),
+            candle_hours=FIRST_DAYS * 24,
+            candles_from=min(candles) if candles else None,
         )
+        if kind == "perp":
+            rates = self.db.funding(v, a, now() - FIRST_DAYS * 86400)
+            out.update(
+                funding=len(rates),
+                funding_expected=(
+                    int(FIRST_DAYS * 86400 // interval) if interval else None
+                ),
+                funding_from=rates[0]["ts"] if rates else None,
+            )
+        return out
 
     def due(self, key):
         s = self.state.get(key)
@@ -232,11 +319,16 @@ class HistoryKeeper:
                 continue
             try:
                 added = self.sync(v, a, kind, interval, price_type)
-                with self.lock:
-                    self.state[key] = dict(ok=True, ts=now(), added=added)
+                state = dict(ok=True, ts=now(), added=added)
             except Exception as ex:
-                with self.lock:
-                    self.state[key] = dict(ok=False, ts=now(), error=str(ex)[:200])
+                state = dict(ok=False, ts=now(), error=str(ex)[:400])
+            try:
+                cov = self.coverage(v, a, kind, interval)
+                state.update(coverage=cov, complete=complete(cov))
+            except Exception:
+                pass
+            with self.lock:
+                self.state[key] = state
             done += 1
             self.sleep(PAUSE_SECONDS)
         return done
@@ -257,6 +349,10 @@ class HistoryKeeper:
         self.thread = threading.Thread(target=loop, daemon=True, name="history")
         self.thread.start()
 
+    def market_state(self, v, a, kind="perp"):
+        with self.lock:
+            return dict(self.state.get((v, a, kind)) or {})
+
     def status(self):
         with self.lock:
             states = list(self.state.values())
@@ -269,12 +365,13 @@ class HistoryKeeper:
         except Exception:
             needs = []
         with self.lock:
-            missing = sum(not (self.state.get(k) or {}).get("ok") for k in needs)
+            missing = sum(not (self.state.get(k) or {}).get("complete") for k in needs)
         return dict(
             priority=len(needs),
             priority_missing=missing,
             markets=listed,
             synced=sum(s["ok"] for s in states),
+            complete=sum(bool(s.get("complete")) for s in states),
             failed=sum(not s["ok"] for s in states),
             stored=len(self.db.markets()),
             refresh_seconds=REFRESH_SECONDS,
