@@ -36,6 +36,8 @@ WIDE_DEFAULTS = dict(
     wide_conv_leverage=5.0,
     wide_conv_min_cross_7=6,
     wide_conv_min_cross_30=20,
+    # Days of matched candles the desk needs; 30 are used whenever they exist.
+    wide_min_history_days=7,
     wide_conv_min_episodes=3,
     wide_conv_max_hold_hours=72,
     wide_conv_exit_bps=2.0,
@@ -62,6 +64,7 @@ LIMITS = dict(
     wide_conv_leverage=(1, 5),
     wide_conv_min_cross_7=(1, 168),
     wide_conv_min_cross_30=(1, 720),
+    wide_min_history_days=(7, 30),
     wide_conv_min_episodes=(1, 100),
     wide_conv_max_hold_hours=(1, 720),
     wide_conv_exit_bps=(0, 50),
@@ -215,19 +218,35 @@ def matched(left, right, at, hours):
     return times
 
 
-def pair_stats(left, right, at, horizon):
-    """Hedge quality on matched closed 1h trade candles over 7 and 30 days."""
-    out = {}
-    for days in (30, 7):
+def history_days(left, right, at, minimum=30):
+    """Longest whole-day window, from 30 down to `minimum`, with matched candles."""
+    matched(left, right, at, minimum * 24)
+    for days in range(30, minimum, -1):
+        try:
+            matched(left, right, at, days * 24)
+            return days
+        except ValueError:
+            continue
+    return minimum
+
+
+def pair_stats(left, right, at, horizon, minimum=30):
+    """Hedge quality on matched closed 1h trade candles over 7 days and the longest
+    window available up to 30 days (reported as corr30 / history_days)."""
+    long = history_days(left, right, at, minimum)
+    out = dict(history_days=long)
+    for days in (long, 7):
         times = matched(left, right, at, days * 24)
         a = [left["prices"][t] for t in times]
         b = [right["prices"][t] for t in times]
         ra = [math.log(a[i] / a[i - 1]) for i in range(1, len(a))]
         rb = [math.log(b[i] / b[i - 1]) for i in range(1, len(b))]
         c, beta = corr(ra, rb)
-        out["corr" if days == 7 else "corr30"] = c
-        if days == 30:
+        if days == long:
+            out["corr30"] = c
+        if days != 7:
             continue
+        out["corr"] = c
         spread = [math.log(y / x) for x, y in zip(a, b)]
         mean, sd = statistics.mean(spread), statistics.pstdev(spread)
         residual = statistics.pstdev([x - y for x, y in zip(ra, rb)])
@@ -277,7 +296,8 @@ def convergence_stats(left, right, at, gap, cfg):
 
     Gap is log(short venue / long venue): the short venue is the dearer one now.
     """
-    times = matched(left, right, at, 30 * 24)
+    days = history_days(left, right, at, cfg.get("wide_min_history_days", 30))
+    times = matched(left, right, at, days * 24)
     series = [(t, math.log(right["prices"][t] / left["prices"][t])) for t in times]
     week = [x for x in series if x[0] >= hour(at) - 7 * 86400]
     xs30 = [x for t, x in series]
@@ -299,6 +319,7 @@ def convergence_stats(left, right, at, gap, cfg):
         sd7=sd7,
         mean30=mean30,
         sd30=sd30,
+        history_days=days,
         episodes=len(closes),
         avg_close_hours=statistics.mean(closes) if closes else None,
         max_close_hours=max(closes) if closes else None,
@@ -366,10 +387,26 @@ class EngineSource:
             stored = DeskHistorySource(self.engine).stored_prices(v, a)
             if stored:
                 return stored
-        if v in NATIVE:
-            return {**self.engine.feed.candles(v, a), "price_type": "trade"}
-        prices, _, _ = self.engine.wide.history(v, a, 30)
-        return prices
+        try:
+            if v in NATIVE:
+                live = {**self.engine.feed.candles(v, a), "price_type": "trade"}
+            else:
+                live, _, _ = self.engine.wide.history(v, a, 30)
+        except Exception as ex:
+            live, error = None, ex
+        # A venue with a short public history still has what the keeper recorded.
+        kept = (
+            keeper.db.candles(v, a, "perp", hour(now()) - 720 * 3600)
+            if keeper is not None
+            else {}
+        )
+        if live is None:
+            if not kept:
+                raise error
+            return dict(prices=kept, price_type="trade", audit_ids=[], end=hour(now()))
+        if kept and live.get("price_type") == "trade":
+            live = dict(live, prices={**kept, **live["prices"]})
+        return live
 
     def funding(self, v, a, start):
         if v in NATIVE:
@@ -626,6 +663,7 @@ class WidePaper:
                 self.price_history(sv, a),
                 at,
                 cfg["wide_horizon"],
+                cfg["wide_min_history_days"],
             )
             out["stats"] = stats
             raw = self.conservative_raw(c, at)
@@ -664,13 +702,14 @@ class WidePaper:
                 net=net,
                 entry_reason=(
                     "Funding: short %s, long %s; muhafazakâr %s saatlik funding $%.2f, "
-                    "korelasyon 7g %.3f / 30g %.3f, fark sd %.1f bp, net $%.2f"
+                    "korelasyon 7g %.3f / %dg %.3f, fark sd %.1f bp, net $%.2f"
                     % (
                         sv,
                         lv,
                         cfg["wide_horizon"],
                         funding,
                         stats["corr"],
+                        stats["history_days"],
                         stats["corr30"],
                         stats["sd"] * 10000,
                         net,
@@ -712,7 +751,7 @@ class WidePaper:
         try:
             at = now()
             left, right = self.price_history(lv, a), self.price_history(sv, a)
-            stats = pair_stats(left, right, at, 1)
+            stats = pair_stats(left, right, at, 1, cfg["wide_min_history_days"])
             hist = convergence_stats(left, right, at, c["spread"], cfg)
             out["stats"] = stats
             out["convergence_history"] = hist
@@ -721,13 +760,14 @@ class WidePaper:
                     "7 günde istikrarlı kesişim yok (%d kesişim, %d çift yönlü gün)"
                     % (hist["cross7"], hist["two_sided7"])
                 )
-            if (
-                hist["cross30"] < cfg["wide_conv_min_cross_30"]
-                or hist["two_sided30"] < 15
-            ):
+            # The 30-day thresholds scale down when only a shorter window exists.
+            days = hist["history_days"]
+            if hist["cross30"] < math.ceil(
+                cfg["wide_conv_min_cross_30"] * days / 30
+            ) or hist["two_sided30"] < math.ceil(15 * days / 30):
                 out["reasons"].append(
-                    "30 günde istikrarlı kesişim yok (%d kesişim, %d çift yönlü gün)"
-                    % (hist["cross30"], hist["two_sided30"])
+                    "%d günde istikrarlı kesişim yok (%d kesişim, %d çift yönlü gün)"
+                    % (days, hist["cross30"], hist["two_sided30"])
                 )
             if abs(hist["mean30"]) > max(0.0002, hist["sd30"] * 0.5):
                 out["reasons"].append(
@@ -744,7 +784,9 @@ class WidePaper:
                 max(2 * expected, math.ceil(hist["max_close_hours"])),
             )
             # Stress over the usual closing time, from 7d return residuals.
-            stress = pair_stats(left, right, at, expected)["stress_fraction"]
+            stress = pair_stats(
+                left, right, at, expected, cfg["wide_min_history_days"]
+            )["stress_fraction"]
             q = self.priced(
                 c,
                 cfg["wide_conv_leverage"],
@@ -796,7 +838,7 @@ class WidePaper:
                 net=net,
                 entry_reason=(
                     "Yakınsama: long %s, short %s; boşluk %.1f bp (7g ort. %.1f, sd %.1f), "
-                    "kesişim 7g %d / 30g %d, ortalama kapanma %d saat, net $%.2f"
+                    "kesişim 7g %d / %dg %d, ortalama kapanma %d saat, net $%.2f"
                     % (
                         lv,
                         sv,
@@ -804,6 +846,7 @@ class WidePaper:
                         hist["mean7"] * 10000,
                         hist["sd7"] * 10000,
                         hist["cross7"],
+                        hist["history_days"],
                         hist["cross30"],
                         expected,
                         net,
@@ -1207,6 +1250,7 @@ class WidePaper:
                 self.price_history(d["short"], p["asset"]),
                 now(),
                 cfg["wide_horizon"],
+                cfg["wide_min_history_days"],
             )
         except Exception:
             stats = None
