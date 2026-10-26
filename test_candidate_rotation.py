@@ -45,23 +45,24 @@ class RotationTests(unittest.TestCase):
     def test_rejected_pairs_give_way_to_the_next_ones(self):
         self.reasons["B"] = "30 günlük eşlenmiş 1h mum eksik"
         self.desk.cycle()
-        self.assertEqual(self.seen, ["A", "B", "C"])
+        # B fails on missing history and does not use up one of the three slots.
+        self.assertEqual(self.seen, ["A", "B", "C", "D"])
         self.clock += 60
         self.desk.cycle()
-        self.assertEqual(self.seen[3:], ["D", "E", "F"])
+        self.assertEqual(self.seen[4:], ["E", "F", "G"])
         r = self.desk.review_snapshot()
-        self.assertEqual((r["rounds"], r["examined"], r["eligible"]), (2, 6, 0))
+        self.assertEqual((r["rounds"], r["examined"], r["eligible"]), (2, 7, 0))
         self.assertEqual(r["reasons"]["Geçmiş eksik"], 1)
-        self.assertEqual(r["reasons"]["7g / 30g getiri korelasyonu sınır altında"], 5)
+        self.assertEqual(r["reasons"]["7g / 30g getiri korelasyonu sınır altında"], 6)
         self.assertEqual(r["waiting"]["Geçmiş eksik"], 1)
         # History retry comes back sooner than an ordinary rejection.
         self.clock = T0 + wide_paper.HISTORY_RETRY + 1
         del self.reasons["B"]
         self.desk.cycle()
-        self.assertEqual(self.seen[6:], ["B", "G"])
+        self.assertEqual(self.seen[7:], ["B"])
         self.clock = T0 + wide_paper.REJECT_COOLDOWN + 1
         self.desk.cycle()
-        self.assertEqual(self.seen[8:], ["A", "C"])
+        self.assertEqual(self.seen[8:], ["A", "C", "D"])
 
     def test_history_needs_put_history_rejections_first(self):
         self.reasons["C"] = "B: 24 saat gerçekleşmiş funding geçmişi eksik"
