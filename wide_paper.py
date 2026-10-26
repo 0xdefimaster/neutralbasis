@@ -672,6 +672,27 @@ class WidePaper:
             reasons.append("Kapanış sonrası bekleme süresi")
         return reasons
 
+    def entry_halt(self):
+        """Why no new position may open now, or None."""
+        busy = [p["status"] for p in self.positions if p["status"] != "OPEN"]
+        if busy:
+            return "açık pozisyon " + busy[0] + " durumunda"
+        if len(self.positions) >= self.cfg["wide_max_positions"]:
+            return "pozisyon sınırı dolu"
+        if self.daily_pnl() <= -self.cfg["wide_daily_loss"]:
+            return "günlük kayıp limiti doldu"
+        return None
+
+    def risk_budget(self):
+        """Loss one new trade may risk: the per-trade limit or what is left of the day's."""
+        return min(
+            self.cfg["wide_risk"], self.cfg["wide_daily_loss"] + self.daily_pnl()
+        )
+
+    @staticmethod
+    def worst_loss(c):
+        return c["entry_fee"] + c["exit_fee"] + c["execution_drag"] + c["stress_loss"]
+
     def priced(self, c, leverage_cap, stress, size, vol=0.0, hold=24):
         """Size against margin, reserve and loss budget; VWAP all four fills on fresh books."""
         cfg = self.cfg
@@ -698,10 +719,9 @@ class WidePaper:
         )
         fee_l, fee_s = c["fee_long"], c["fee_short"]
         extra = self.extra_slippage
-        daily = self.daily_pnl()
-        if daily <= -cfg["wide_daily_loss"]:
+        if self.daily_pnl() <= -cfg["wide_daily_loss"]:
             raise ValueError("Günlük kayıp limiti doldu")
-        budget = min(cfg["wide_risk"], cfg["wide_daily_loss"] + daily)
+        budget = self.risk_budget()
         # Margin plus entry fee of both legs per $1 notional, at the worst accepted fill.
         per_dollar = (1 + FILL_TOLERANCE) * (2 / leverage + fee_l + fee_s)
         notional = min(
@@ -1565,7 +1585,11 @@ class WidePaper:
                     (x for x in self.assessed if x["eligible"]),
                     key=lambda x: -x["net"],
                 ):
-                    if len(self.positions) >= self.cfg["wide_max_positions"]:
+                    # An earlier entry this round may have left a leg in recovery or
+                    # used up the day's loss budget: check again before every entry.
+                    halt = self.entry_halt()
+                    if halt:
+                        self.events("ENTRY_HALT", "Yeni girişler durduruldu: " + halt)
                         break
                     if self.blocked(best):
                         continue
@@ -1574,6 +1598,8 @@ class WidePaper:
                         2 * best["size"] / best["leverage"] + best["entry_fee"]
                     )
                     if need > self.headroom():
+                        continue
+                    if self.worst_loss(best) > self.risk_budget() + 1e-6:
                         continue
                     stale = self.entry_funding_check(best)
                     if stale:
