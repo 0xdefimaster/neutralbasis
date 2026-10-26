@@ -12,6 +12,8 @@ FIRST_DAYS = 30
 REFRESH_SECONDS = 1800
 RETRY_SECONDS = 1800
 PAUSE_SECONDS = 1.0
+# Markets are re-listed after each batch so newly prioritized ones go next.
+BATCH = 10
 
 
 class HistoryStore:
@@ -157,11 +159,12 @@ class HistoryKeeper:
         wait = REFRESH_SECONDS if s["ok"] else RETRY_SECONDS
         return now() - s["ts"] >= wait
 
-    def run_once(self):
-        """One pass over the due markets; returns how many were synced."""
+    def run_once(self, limit=None):
+        """One pass over the due markets, in the source's priority order; returns how
+        many were synced (at most `limit`)."""
         done = 0
         for v, a, kind, interval, price_type in self.source.markets():
-            if self.stop.is_set():
+            if self.stop.is_set() or (limit and done >= limit):
                 break
             key = (v, a, kind)
             if not self.due(key):
@@ -187,7 +190,7 @@ class HistoryKeeper:
             except Exception:
                 pass
             while not self.stop.is_set():
-                if not self.run_once():
+                if not self.run_once(BATCH):
                     self.stop.wait(60)
 
         self.thread = threading.Thread(target=loop, daemon=True, name="history")
@@ -200,7 +203,15 @@ class HistoryKeeper:
             listed = len(self.source.markets())
         except Exception:
             listed = None
+        try:
+            needs = [tuple(k) for k in self.source.priority()]
+        except Exception:
+            needs = []
+        with self.lock:
+            missing = sum(not (self.state.get(k) or {}).get("ok") for k in needs)
         return dict(
+            priority=len(needs),
+            priority_missing=missing,
             markets=listed,
             synced=sum(s["ok"] for s in states),
             failed=sum(not s["ok"] for s in states),

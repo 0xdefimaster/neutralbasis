@@ -377,6 +377,19 @@ class EngineSource:
         return self.engine.wide.funding_since(v, a, start)
 
 
+# A rejected pair waits this long before it is deep-checked again, so the next ranked
+# pairs get their turn; missing history is retried sooner since the keeper fills it.
+REJECT_COOLDOWN = 1800
+HISTORY_RETRY = 900
+HISTORY_MARKERS = ("mum eksik", "işlem mumu yok", "geçmişi eksik")
+
+
+def reason_group(reason):
+    if any(m in reason for m in HISTORY_MARKERS):
+        return "Geçmiş eksik"
+    return reason
+
+
 class WidePaper:
     def __init__(self, store, source, sleep=time.sleep):
         self.store = store
@@ -390,6 +403,8 @@ class WidePaper:
         self.candidates = []
         self.assessed = []
         self.conv_candidates = []
+        self.rejected = {}
+        self.review = dict(rounds=0, examined=0, eligible=0, skipped=0, reasons={})
         self.rows = {}
         self.last_cycle = None
         self.error = None
@@ -1324,17 +1339,26 @@ class WidePaper:
                 and len(self.positions) < self.cfg["wide_max_positions"]
                 and not any(p["status"] != "OPEN" for p in self.positions)
             ):
+                self.rejected = {
+                    k: x for k, x in self.rejected.items() if x["until"] > at
+                }
+                self.review["rounds"] += 1
                 for ranked in (self.candidates, self.conv_candidates):
                     picked = []
                     for c in ranked:
                         if len(picked) >= self.cfg["wide_deep_top"] or c["score"] <= 0:
                             break
-                        if self.blocked(c) or any(
-                            x["asset"] == c["asset"] for x in picked
+                        if (
+                            self.blocked(c)
+                            or any(x["asset"] == c["asset"] for x in picked)
+                            or self.pair_key(c) in self.rejected
                         ):
+                            self.review["skipped"] += 1
                             continue
                         picked.append(self.assess(c))
                     self.assessed += picked
+                for x in self.assessed:
+                    self.note_review(x, at)
                 best = max(
                     (x for x in self.assessed if x["eligible"]),
                     key=lambda x: x["net"],
@@ -1345,6 +1369,8 @@ class WidePaper:
                     if stale:
                         best["eligible"] = False
                         best["reasons"].append(stale)
+                        self.review["eligible"] -= 1
+                        self.reject(best, [stale], at)
                         self.events(
                             "ENTRY_SKIP",
                             stale,
@@ -1358,6 +1384,59 @@ class WidePaper:
         except Exception as ex:
             self.error = str(ex)
             self.events("ERROR", str(ex))
+
+    @staticmethod
+    def pair_key(c):
+        return (c.get("strategy") or "funding", c["asset"], c["long"], c["short"])
+
+    def note_review(self, x, at):
+        """Count a deep check; a rejected pair is set aside so later rounds move down the list."""
+        r = self.review
+        r["examined"] += 1
+        r["eligible"] += bool(x["eligible"])
+        if not x["eligible"]:
+            self.reject(x, x["reasons"] or ["Bilinmeyen"], at)
+
+    def reject(self, x, reasons, at):
+        groups = list(dict.fromkeys(reason_group(t) for t in reasons))
+        for g in groups:
+            self.review["reasons"][g] = self.review["reasons"].get(g, 0) + 1
+        self.rejected[self.pair_key(x)] = dict(
+            strategy=x.get("strategy") or "funding",
+            asset=x["asset"],
+            long=x["long"],
+            short=x["short"],
+            reason=reasons[0],
+            group=groups[0],
+            at=at,
+            until=at
+            + (HISTORY_RETRY if groups[0] == "Geçmiş eksik" else REJECT_COOLDOWN),
+        )
+
+    def review_snapshot(self):
+        waiting = {}
+        for x in self.rejected.values():
+            waiting[x["group"]] = waiting.get(x["group"], 0) + 1
+        return dict(
+            self.review,
+            reasons=dict(sorted(self.review["reasons"].items(), key=lambda kv: -kv[1])),
+            waiting=dict(sorted(waiting.items(), key=lambda kv: -kv[1])),
+            rejected=sorted(self.rejected.values(), key=lambda x: -x["at"])[:40],
+            cooldown=REJECT_COOLDOWN,
+            history_retry=HISTORY_RETRY,
+        )
+
+    def history_needs(self, limit=40):
+        """(venue, asset) legs of tradeable candidates, rejected-for-history first."""
+        out = []
+        for x in sorted(self.rejected.values(), key=lambda x: -x["at"]):
+            if x["group"] == "Geçmiş eksik":
+                out += [(x["long"], x["asset"]), (x["short"], x["asset"])]
+        for ranked in (self.candidates, self.conv_candidates):
+            for c in ranked[:limit]:
+                if c["score"] > 0:
+                    out += [(c["long"], c["asset"]), (c["short"], c["asset"])]
+        return list(dict.fromkeys(out))
 
     def snapshot(self):
         venues = sorted({v for v, a in self.rows})
@@ -1373,6 +1452,7 @@ class WidePaper:
             conv_candidates=self.conv_candidates[:40],
             conv_candidate_count=len(self.conv_candidates),
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
+            review=self.review_snapshot(),
             venues=venues,
             last_cycle=self.last_cycle,
             error=self.error,

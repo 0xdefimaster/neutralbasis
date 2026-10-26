@@ -1,0 +1,129 @@
+import os, tempfile, threading, unittest
+from unittest import mock
+import bot, history_store, wide_paper
+from wide_paper import WidePaper, reason_group
+from history_store import HistoryKeeper
+from test_wide_paper import FakeSource, T0
+
+
+def cand(asset, score=1.0, strategy="funding"):
+    return dict(asset=asset, long="A", short="B", score=score, strategy=strategy)
+
+
+class RotationTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.store = bot.Store(os.path.join(self.dir.name, "p.sqlite3"))
+        self.clock = T0
+        self.cands = [cand(a, 10 - i) for i, a in enumerate("ABCDEFG")]
+        self.reasons = {}
+        for p in (
+            mock.patch.object(bot, "now", lambda: self.clock),
+            mock.patch.object(wide_paper, "now", lambda: self.clock),
+            mock.patch.object(wide_paper, "rank", lambda rows, cfg, at: self.cands),
+            mock.patch.object(wide_paper, "rank_spreads", lambda rows, at: []),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.desk = WidePaper(self.store, FakeSource(), sleep=lambda s: None)
+        self.desk.cfg.update(wide_enabled=True, wide_deep_top=3)
+        self.seen = []
+
+        def assess(c):
+            self.seen.append(c["asset"])
+            reason = self.reasons.get(
+                c["asset"], "7g / 30g getiri korelasyonu sınır altında"
+            )
+            return dict(c, reasons=[reason], eligible=False, net=None)
+
+        self.desk.assess = assess
+
+    def tearDown(self):
+        self.store.db.close()
+        self.dir.cleanup()
+
+    def test_rejected_pairs_give_way_to_the_next_ones(self):
+        self.reasons["B"] = "30 günlük eşlenmiş 1h mum eksik"
+        self.desk.cycle()
+        self.assertEqual(self.seen, ["A", "B", "C"])
+        self.clock += 60
+        self.desk.cycle()
+        self.assertEqual(self.seen[3:], ["D", "E", "F"])
+        r = self.desk.review_snapshot()
+        self.assertEqual((r["rounds"], r["examined"], r["eligible"]), (2, 6, 0))
+        self.assertEqual(r["reasons"]["Geçmiş eksik"], 1)
+        self.assertEqual(r["reasons"]["7g / 30g getiri korelasyonu sınır altında"], 5)
+        self.assertEqual(r["waiting"]["Geçmiş eksik"], 1)
+        # History retry comes back sooner than an ordinary rejection.
+        self.clock = T0 + wide_paper.HISTORY_RETRY + 1
+        del self.reasons["B"]
+        self.desk.cycle()
+        self.assertEqual(self.seen[6:], ["B", "G"])
+        self.clock = T0 + wide_paper.REJECT_COOLDOWN + 1
+        self.desk.cycle()
+        self.assertEqual(self.seen[8:], ["A", "C"])
+
+    def test_history_needs_put_history_rejections_first(self):
+        self.reasons["C"] = "B: 24 saat gerçekleşmiş funding geçmişi eksik"
+        self.desk.cycle()
+        needs = self.desk.history_needs()
+        self.assertEqual(needs[:2], [("A", "C"), ("B", "C")])
+        self.assertIn(("A", "G"), needs)
+
+    def test_reason_groups(self):
+        self.assertEqual(
+            reason_group("Gerçek işlem mumu yok; oracle/eksik seri ile giriş yapılmaz"),
+            "Geçmiş eksik",
+        )
+        self.assertEqual(
+            reason_group("Bu genişlikte geçmiş makas kapanışı yetersiz (2)"),
+            "Bu genişlikte geçmiş makas kapanışı yetersiz (2)",
+        )
+
+
+class PrioritySource:
+    def __init__(self):
+        self.list = [
+            ("X", "BTC", "perp", 3600, "trade"),
+            ("Y", "ETH", "perp", 3600, "trade"),
+        ]
+        self.calls = []
+
+    def markets(self):
+        return list(self.list)
+
+    def candles(self, v, a, kind, start, end):
+        self.calls.append(v)
+        return {}
+
+    def funding(self, v, a, start):
+        return []
+
+    def publish(self, *a):
+        pass
+
+    def priority(self):
+        return [("Y", "ETH", "perp")]
+
+
+class KeeperBatchTests(unittest.TestCase):
+    def test_batch_limit_and_priority_status(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        store = bot.Store(os.path.join(d.name, "h.db"))
+        self.addCleanup(store.db.close)
+        with mock.patch.object(history_store, "now", lambda: T0), mock.patch.object(
+            bot, "now", lambda: T0
+        ):
+            src = PrioritySource()
+            k = HistoryKeeper(store, src, threading.Event(), sleep=lambda s: None)
+            self.assertEqual(k.status()["priority_missing"], 1)
+            self.assertEqual(k.run_once(1), 1)
+            self.assertEqual(src.calls, ["X"])
+            k.run_once(1)
+            st = k.status()
+        self.assertEqual((st["priority"], st["priority_missing"]), (1, 0))
+
+
+if __name__ == "__main__":
+    unittest.main()

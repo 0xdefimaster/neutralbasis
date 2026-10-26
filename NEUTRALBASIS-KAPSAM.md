@@ -107,3 +107,9 @@ Adres çubuğunda sekme yoksa panel **Özet** ile açılır. Yalnızca masanın 
 - Tablolar: en iyi funding çiftleri (fark ve APR), en geniş fiyat farkları (seçili varlıklar), uç funding (tek piyasa), yeni listelemeler.
 - Yeni listelemeler: bir borsanın ilk taraması mevcut listeyi yalnızca kaydeder; sonrasında hiçbir borsada görülmemiş bir perp çıkarsa listelenir, 7 gün boyunca ekleyen borsalar eklenir (`kv: matrix_listings`).
 - DEX hacmi/OI, haberler ve soru kutusu için veri kaynağımız olmadığından eklenmedi.
+
+## Aday döndürme, öncelikli geçmiş ve inceleme paneli
+
+- Derin kontrolde elenen çift 30 dakika kenara alınır (eksik geçmiş nedeniyle elendiyse 15 dakika). Sonraki turlar aynı ilk adayları tekrar kontrol etmek yerine listede sıradakilere geçer; süre dolunca çift yeniden sıraya girer.
+- Geçmiş kaydedici her 10 piyasada bir listeyi yeniden okur ve önce işlem yapılabilir adayların bacaklarını doldurur: eksik geçmiş yüzünden elenen çiftler en önde, ardından her stratejinin pozitif skorlu ilk 40 adayı.
+- Çoklu paper ekranındaki "Aday inceleme" kartı tur sayısını, derin kontrol sayısını, uygun ve atlanan adayları, elenme nedenlerinin dağılımını (toplam ve şu an bekleyen) ve son elenen çiftleri tekrar deneme saatiyle gösterir. Sayaçlar bellek içindedir; yeniden başlatınca sıfırlanır.
