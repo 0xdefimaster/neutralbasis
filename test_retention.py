@@ -51,20 +51,50 @@ class RetentionTests(unittest.TestCase):
         ).fetchone()
         self.assertTrue(sha[0])
 
-    def test_space_is_given_back(self):
+    def test_offline_maintenance_then_background_never_full_vacuums(self):
+        for i in range(300):
+            self.store.audit("u", os.urandom(4000), T0 - 10 * 86400, {})
+        self.store.db.close()
+        path = os.path.join(self.dir.name, "r.db")
+        before = os.path.getsize(path)
+        with unittest.mock.patch.object(retention, "now", lambda: T0):
+            self.assertTrue(retention.maintain(path, log=lambda m: None))
+            self.assertFalse(retention.maintain(path, log=lambda m: None))
+        self.assertLess(os.path.getsize(path), before / 3)
+        self.store = bot.Store(path)
+        self.assertTrue(retention.incremental(self.store))
         for i in range(300):
             self.store.audit("u", os.urandom(4000), T0 - 10 * 86400, {})
         r = retention.Retention(self.store, None)
-        before = retention.size(self.store)
+        grown = retention.size(self.store)
         with unittest.mock.patch.object(retention, "now", lambda: T0):
             st = r.run_once()
-        self.assertTrue(st["vacuumed"])
-        self.assertLess(st["bytes"], before / 3)
-        mode = self.store.db.execute("pragma auto_vacuum").fetchone()[0]
-        self.assertEqual(mode, 2)
-        # Second run: already incremental, no full vacuum.
+        self.assertTrue(st["done"])
+        self.assertFalse(st["vacuum_pending"])
+        self.assertLess(st["bytes"], grown / 3)
+
+    def test_background_run_without_maintenance_does_not_vacuum(self):
+        self.audit(T0 - 10 * 86400)
+        r = retention.Retention(self.store, None)
         with unittest.mock.patch.object(retention, "now", lambda: T0):
-            self.assertFalse(r.run_once()["vacuumed"])
+            st = r.run_once()
+        self.assertTrue(st["vacuum_pending"])
+        self.assertEqual(st["audit_dropped"], 0)
+        self.assertEqual(self.raw(1), "gone")
+
+    def test_deadline_stops_in_batches(self):
+        for i in range(12):
+            self.audit(T0 - 5 * 86400)
+        clock = iter(range(100))
+        with unittest.mock.patch.object(
+            retention, "BATCH", 5
+        ), unittest.mock.patch.object(retention.time, "monotonic", lambda: next(clock)):
+            out = retention.prune(self.store, T0, deadline=0.5)
+        self.assertFalse(out["done"])
+        self.assertEqual(out["audit_stripped"], 5)
+        out = retention.prune(self.store, T0)
+        self.assertTrue(out["done"])
+        self.assertEqual(out["audit_stripped"], 7)
 
 
 import unittest.mock
