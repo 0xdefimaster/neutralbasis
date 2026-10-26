@@ -178,6 +178,124 @@ class SyncTests(unittest.TestCase):
             views.request_sync("BTC", ["Z"])
 
 
+class PriceHistoryTests(unittest.TestCase):
+    def test_gap_and_window_mean_need_coverage(self):
+        hours = [AT - i * 3600 for i in range(24 * 7)]
+        long = {t: 100.0 for t in hours}
+        short = {t: 100.2 for t in hours}
+        points, w = pv.price_history(long, short, AT)
+        self.assertEqual(len(points), 24 * 7)
+        self.assertAlmostEqual(w["7d"]["mean"], 0.002)
+        self.assertAlmostEqual(w["1d"]["mean"], 0.002)
+        self.assertIsNone(w["14d"]["mean"])
+        self.assertEqual(w["14d"]["count"], 24 * 7)
+
+    def test_only_hours_both_legs_closed(self):
+        long = {AT: 100.0, AT - 3600: 100.0}
+        short = {AT: 101.0}
+        points, _ = pv.price_history(long, short, AT)
+        self.assertEqual([p["ts"] for p in points], [AT])
+
+    def test_ticker_clash_has_no_history(self):
+        points, w = pv.price_history({AT: 1.0}, {AT: 2.0}, AT)
+        self.assertEqual(points, [])
+        self.assertIsNone(w["1d"]["mean"])
+
+    def test_pair_detail_carries_price_windows(self):
+        legs = PairDetailTests().legs()
+        hours = [AT - i * 3600 for i in range(24)]
+        prices = {"L": {t: 100.0 for t in hours}, "S": {t: 99.9 for t in hours}}
+        d = pv.pair_detail("BTC", "L", "S", legs, {}, AT, prices=prices)
+        self.assertAlmostEqual(d["price_windows"]["1d"]["mean"], -0.001)
+        self.assertEqual(len(d["price_points"]), 24)
+
+
+class BookCostTests(unittest.TestCase):
+    book = dict(
+        bids=[(99.0, 50.0), (98.0, 1000.0)], asks=[(101.0, 50.0), (102.0, 1000.0)]
+    )
+
+    def test_buy_walks_asks_and_adds_fee(self):
+        c = pv.book_cost(self.book, 1000.0, True, 0.0005)
+        # 10 units at 101 from a 100 mid: 1% slippage + 5 bp fee.
+        self.assertTrue(c["fits"])
+        self.assertAlmostEqual(c["bp"], 105.0)
+        self.assertAlmostEqual(c["cost"], 10.5)
+        self.assertAlmostEqual(c["half_spread_bp"], 100.0)
+
+    def test_sell_walks_bids_and_too_large_does_not_fit(self):
+        c = pv.book_cost(self.book, 10000.0, False, None)
+        # 50 at 99 + 50 at 98 = 98.5 average: 150 bp, fee unknown.
+        self.assertAlmostEqual(c["bp"], 150.0)
+        self.assertFalse(c["fee_known"])
+        self.assertFalse(pv.book_cost(self.book, 1e7, False, 0.0)["fits"])
+
+
+class EngineLegTests(unittest.TestCase):
+    def engine(self, book_error=None):
+        test = self
+
+        class Wide:
+            def __init__(self):
+                self.calls = []
+
+            def book(self, v, a):
+                if book_error:
+                    raise ValueError(book_error)
+                return BookCostTests.book
+
+            def candles_since(self, v, a, kind, start, end):
+                self.calls.append((v, a, kind, start, end))
+                return {end - 3600: 1.0}
+
+        class DB:
+            def __init__(self):
+                self.added = []
+
+            def last_candle(self, v, a, kind):
+                return None
+
+            def add_candles(self, v, a, kind, prices):
+                self.added.append((v, a, kind, prices))
+                return len(prices)
+
+        e = type("E", (), {})()
+        e.wide = Wide()
+        e.cfg = {"symbols": ["BTC"]}
+        e.history = type("H", (), {"db": DB()})()
+        e.feed = type("F", (), {"book": lambda self, v, a: BookCostTests.book})()
+        return e
+
+    def views(self, engine):
+        class Views(pv.PairViews):
+            def legs(self, asset):
+                base = dict(fee=0.0005, interval=3600)
+                return {"A": dict(base), "B": dict(base, fee=None)}
+
+        return Views(engine)
+
+    def test_books_cost_both_legs_at_reference_sizes(self):
+        out = self.views(self.engine()).books("eth", "A", "B")
+        self.assertEqual(out["asset"], "ETH")
+        self.assertEqual(out["legs"]["A"]["side"], "long")
+        self.assertEqual(
+            [s["usd"] for s in out["legs"]["B"]["sizes"]], list(pv.BOOK_SIZES)
+        )
+
+    def test_book_error_is_reported_per_leg(self):
+        out = self.views(self.engine("Defter eski")).books("ETH", "A", "B")
+        self.assertEqual(out["legs"]["A"]["error"], "Defter eski")
+        with self.assertRaises(ValueError):
+            self.views(self.engine()).books("ETH", "A", "Z")
+
+    def test_candles_filled_only_outside_selected_assets(self):
+        e = self.engine()
+        v = self.views(e)
+        self.assertEqual(v.fill_candles("A", "BTC"), 0)
+        self.assertEqual(v.fill_candles("A", "ETH"), 1)
+        self.assertEqual(e.history.db.added[0][:3], ("A", "ETH", "perp"))
+
+
 def threading_wait(t):
     import threading
 

@@ -730,6 +730,8 @@ class WideMarkets:
                     ),
                     None,
                 )
+                if not row and kind == "perp":
+                    row = self.universe.get(v, {}).get(a)
             if not row:
                 raise ValueError(v + ": seçili piyasanın güncel verisi yok")
             if not ex.has.get("fetchOHLCV"):
@@ -803,6 +805,8 @@ class WideMarkets:
                     ),
                     None,
                 )
+                if not row and kind == "perp":
+                    row = self.universe.get(v, {}).get(a)
             if not row:
                 raise ValueError("Güncel piyasa kimliği yok")
             book = ex.fetch_order_book(row["symbol"], 100)

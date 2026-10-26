@@ -1658,6 +1658,8 @@ def serve(engine, port, host="127.0.0.1", password=None):
                     return self.send(
                         engine.request_read(self.path.split("/")[-1], body)
                     )
+                if self.path == "/api/pair-book" and hasattr(engine, "pair_books"):
+                    return self.send(engine.pair_books(body))
                 if self.path == "/api/pair-sync" and hasattr(
                     engine, "request_pair_sync"
                 ):
