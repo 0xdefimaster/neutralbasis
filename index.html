@@ -229,13 +229,13 @@ function homeScreen(){loadMatrix();const d=mxData;if(!d)return head('Perp borsa 
  const h=homeStats(),prices=(state.market_view?.pairs||[]).filter(p=>p.pair_type==='perp-perp'),priced=prices.filter(p=>p.history),priceWins=priced.filter(p=>(netEstimate(p,true)??-1)>0).length,w=state.wide_paper,time=new Date(d.ts*1000).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul',hour:'2-digit',minute:'2-digit'});
  const tiles=[[`BTC funding · DEX ortalaması /${periodLabel()}`,rate(h.btcDex),`CEX ${rate(h.btcCex)}${h.btcTop?' · en yüksek '+esc(name(h.btcTop[0]))+' '+rate(h.btcTop[1][0]):''}`],[`Kârda funding çiftleri · ${money(hc.size)}`,h.paidWins.toLocaleString(),`${h.paidPairs.toLocaleString()} çiftten, son 7 gün gerçekleşen, ücret sonrası`],[`Kârda fiyat farkları · ${money(hc.size)}`,priceWins.toLocaleString(),`${priced.length.toLocaleString()} çiftten, fark 7g ortalamasına dönerse`],['Kapsam',d.assets.length.toLocaleString(),`varlık · ${d.venues.length} borsa (${d.venues.filter(v=>v.kind==='DEX').length} DEX)`],...(w?[['Çoklu paper özsermaye',money(w.balance.equity),`${w.positions.length} açık pozisyon · ${w.closed.length} kapanan`]]:[])];
  const best=h.best.slice(0,8).map(p=>`<tr><td><b>${esc(p.asset)}</b></td><td>${legs(p.long,p.short)}</td><td class="num mono good">${rate(p.spread)}</td><td class="num mono good">+${(p.spread*8760*100).toFixed(1)}%</td></tr>`);
- const spreads=[...prices].sort((a,b)=>b.spread-a.spread).slice(0,8).map(p=>`<tr><td><b>${esc(p.asset)}</b></td><td>${legs(p.long,p.short)}</td><td class="num mono">${pct(p.spread)}</td></tr>`);
+ const spreads=d.assets.filter(x=>x.price_spread!=null).sort((a,b)=>b.price_spread-a.price_spread).slice(0,8).map(x=>`<tr><td><b>${esc(x.asset)}</b></td><td>${legs(x.price_long,x.price_short)}</td><td class="num mono">${pct(x.price_spread)}</td></tr>`);
  const extreme=h.cells.slice(0,8).map(c=>`<tr><td><b>${esc(c.asset)}</b></td><td>${esc(name(c.venue))} <small class="muted">${intervalLabel(c.interval)}</small></td><td class="num mono ${c.rate<0?'bad':'good'}">${rate(c.rate)}</td></tr>`);
  const listings=(d.listings||[]).slice(0,8).map(x=>`<tr><td><b>${esc(x.asset)}</b></td><td>${x.venues.slice(0,3).map(v=>esc(name(v))).join(', ')}${x.venues.length>3?' +'+(x.venues.length-3):''}</td><td class="num">${x.venues.length}</td><td class="num mono">${new Date(x.ts*1000).toLocaleString('tr-TR',{timeZone:'Europe/Istanbul',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</td></tr>`);
  return head('Perp borsa takibi',`${d.venues.length} borsa · veri ${time} · public veri, tavsiye değildir`)+`<div class="stat-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">${tiles.map(([l,n,t])=>`<div class="metric"><div class="label">${l}</div><div class="number">${n}</div><small>${t}</small></div>`).join('')}</div>`
  +`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:18px">`
  +homeCard('En iyi funding çiftleri','şu anki oranlar',['funding','Tüm çiftler'],['Varlık','Bacaklar','#Fark /'+periodLabel(),'#APR'],best,'Henüz iki borsada oranı olan varlık yok.')
- +homeCard('En geniş fiyat farkları','seçili varlıklar',['price','Tüm çiftler'],['Varlık','Bacaklar','#Fark'],spreads,'Fiyat verisi bekleniyor.')
+ +homeCard('En geniş fiyat farkları','tüm varlıklar · mark fiyatı',['price','Tüm çiftler'],['Varlık','Bacaklar','#Fark'],spreads,'Fiyat verisi bekleniyor.')
  +homeCard('Uç funding','tek piyasa, şu an',['funding','Tüm oranlar'],['Varlık','Borsa','#Oran /'+periodLabel()],extreme,'Oran verisi bekleniyor.')
  +homeCard('Yeni listelemeler','son 7 gün, takip başladıktan sonra',null,['Varlık','Borsalar','#Sayı','#İlk görülme'],listings,'Takip başladı; bundan sonra yeni listelenen perp’ler burada görünür.')
  +`</div>`}
@@ -333,4 +333,8 @@ const apBaseDrawer=wideDrawer;wideDrawer=function(p){const html=apBaseDrawer(p);
  document.addEventListener('keydown',e=>{if(e.key==='/'&&!e.target.closest('input,select,textarea')){e.preventDefault();gs?.focus()}});if(gs)gs.placeholder='Varlık, DEX, çift  / · Enter: varlık';}
 const apStyle=document.createElement('style');apStyle.textContent='table.matrix tbody tr,.card tbody tr{cursor:default}table.matrix tbody td:first-child,table.matrix tbody td:nth-child(2){cursor:pointer}table.matrix tbody td:first-child b{text-decoration:underline dotted}';document.head.appendChild(apStyle);
 if(['pair','asset'].includes(tab))render();
+
+// Keep the scroll position across the periodic refresh (outermost wrapper, so it must stay last). Screen wrappers above render the
+// base page first, which can be shorter, so the browser clamps scrollY before they read it.
+const scrollKeepRender=render;let scrollKeepTab=null;render=function(){const y=window.scrollY,same=scrollKeepTab===tab;scrollKeepRender();scrollKeepTab=tab;if(same&&Math.abs(window.scrollY-y)>1)window.scrollTo(0,y)};
 </script></body></html>

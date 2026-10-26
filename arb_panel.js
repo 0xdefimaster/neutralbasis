@@ -82,3 +82,7 @@ const apBaseDrawer=wideDrawer;wideDrawer=function(p){const html=apBaseDrawer(p);
  document.addEventListener('keydown',e=>{if(e.key==='/'&&!e.target.closest('input,select,textarea')){e.preventDefault();gs?.focus()}});if(gs)gs.placeholder='Varlık, DEX, çift  / · Enter: varlık';}
 const apStyle=document.createElement('style');apStyle.textContent='table.matrix tbody tr,.card tbody tr{cursor:default}table.matrix tbody td:first-child,table.matrix tbody td:nth-child(2){cursor:pointer}table.matrix tbody td:first-child b{text-decoration:underline dotted}';document.head.appendChild(apStyle);
 if(['pair','asset'].includes(tab))render();
+
+// Keep the scroll position across the periodic refresh (outermost wrapper, so it must stay last). Screen wrappers above render the
+// base page first, which can be shorter, so the browser clamps scrollY before they read it.
+const scrollKeepRender=render;let scrollKeepTab=null;render=function(){const y=window.scrollY,same=scrollKeepTab===tab;scrollKeepRender();scrollKeepTab=tab;if(same&&Math.abs(window.scrollY-y)>1)window.scrollTo(0,y)};

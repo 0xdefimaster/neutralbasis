@@ -1,4 +1,4 @@
-import os, tempfile, threading, unittest
+import math, os, tempfile, threading, unittest
 from unittest import mock
 import bot, funding_matrix, wide_markets
 from funding_matrix import build, paid7, top_pairs
@@ -98,9 +98,15 @@ class UniverseTests(unittest.TestCase):
             self.assertEqual(self.wide.universe_snapshot()["Binance"], {})
 
 
-def row(v, a, rate, interval=3600, fee=0.0005, received=T0):
+def row(v, a, rate, interval=3600, fee=0.0005, received=T0, mark=None):
     return dict(
-        venue=v, asset=a, rate=rate, interval=interval, fee=fee, received=received
+        venue=v,
+        asset=a,
+        rate=rate,
+        interval=interval,
+        fee=fee,
+        received=received,
+        mark=mark,
     )
 
 
@@ -205,6 +211,33 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(len(ls), 1)
         st, ls = track_listings(st, self.m({}), at=T0 + 60 + 7 * 86400 + 1)
         self.assertEqual(ls, [])
+
+
+class PriceSpreadTests(unittest.TestCase):
+    def test_widest_mark_gap_drops_ticker_clashes(self):
+        from funding_matrix import price_spread
+
+        c = lambda m: [0.0, 3600, None, None, m]
+        r = price_spread(
+            {"A": c(100.0), "B": c(101.0), "C": c(100.5), "D": c(3.2), "E": c(None)}
+        )
+        self.assertEqual((r["price_long"], r["price_short"]), ("A", "B"))
+        self.assertAlmostEqual(r["price_spread"], math.log(1.01))
+        self.assertIsNone(price_spread({"A": c(100.0), "D": c(3.2)})["price_spread"])
+        self.assertIsNone(price_spread({"A": c(100.0)})["price_spread"])
+
+    def test_build_carries_marks(self):
+        m = build(
+            [],
+            [row("A", "X", 0.0, mark=10.0), row("B", "X", 0.0, mark=10.2)],
+            {},
+            {},
+            {},
+            {},
+            at=T0,
+        )
+        x = m["assets"][0]
+        self.assertEqual((x["price_long"], x["price_short"]), ("A", "B"))
 
 
 if __name__ == "__main__":
