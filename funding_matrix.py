@@ -97,6 +97,38 @@ def top_pairs(matrix, limit=40):
     return out
 
 
+def track_listings(state, matrix, at=None, keep=WEEK):
+    """New listings since tracking began. A venue's first scan only seeds what it already
+    lists; later, an asset no venue listed before is a new listing, and venues adding it
+    within `keep` are appended. Returns (state, listings newest first)."""
+    at = at or now()
+    seen = {v: set(a) for v, a in state.get("seen", {}).items()}
+    first = {a: x for a, x in state.get("first", {}).items() if at - x["ts"] <= keep}
+    known = set().union(*seen.values()) if seen else set()
+    for x in matrix["assets"]:
+        a = x["asset"]
+        for v in x["cells"]:
+            if v not in seen:
+                continue
+            if a in seen[v]:
+                continue
+            if a in first:
+                first[a]["venues"].append(v)
+            elif a not in known:
+                first[a] = dict(ts=at, venues=[v])
+            seen[v].add(a)
+    for x in matrix["assets"]:
+        for v in x["cells"]:
+            if v not in state.get("seen", {}):
+                seen.setdefault(v, set()).add(x["asset"])
+    out = dict(seen={v: sorted(a) for v, a in seen.items()}, first=first)
+    listings = sorted(
+        (dict(asset=a, **x) for a, x in first.items()),
+        key=lambda x: (-len(x["venues"]), -x["ts"]),
+    )
+    return out, listings
+
+
 class MatrixCache:
     def __init__(self, engine):
         self.engine = engine
@@ -127,7 +159,10 @@ class MatrixCache:
         rows, _ = e.wide.snapshot()
         sums = e.history.db.funding_sums(now() - WEEK)
         kinds = {v: c["kind"] for v, c in CATALOG.items()}
-        return build(native, rows, e.wide.universe_snapshot(), sums, kinds, LABELS)
+        m = build(native, rows, e.wide.universe_snapshot(), sums, kinds, LABELS)
+        state, m["listings"] = track_listings(e.store.get("matrix_listings", {}), m)
+        e.store.put("matrix_listings", state)
+        return m
 
     def get(self):
         with self.lock:

@@ -176,5 +176,36 @@ class FundingSumsTests(unittest.TestCase):
         self.assertAlmostEqual(sums[("A", "X")][0], 0.006)
 
 
+class ListingTests(unittest.TestCase):
+    def m(self, cells):
+        return dict(
+            assets=[
+                dict(asset=a, cells={v: [0, 3600, None, None] for v in vs})
+                for a, vs in cells.items()
+            ]
+        )
+
+    def test_first_scan_seeds_then_new_assets_are_listed(self):
+        from funding_matrix import track_listings
+
+        st, ls = track_listings({}, self.m({"BTC": ["A", "B"]}), at=T0)
+        self.assertEqual(ls, [])
+        # C is a new venue: seeded silently. NEW appears on A, later on B too.
+        st, ls = track_listings(
+            st, self.m({"BTC": ["A", "B", "C"], "NEW": ["A"], "OLD": ["C"]}), at=T0 + 60
+        )
+        self.assertEqual([x["asset"] for x in ls], ["NEW"])
+        st, ls = track_listings(
+            st,
+            self.m({"BTC": ["A"], "NEW": ["A", "B"], "OLD": ["C", "A"]}),
+            at=T0 + 120,
+        )
+        self.assertEqual(ls[0]["venues"], ["A", "B"])
+        self.assertEqual(ls[0]["ts"], T0 + 60)
+        self.assertEqual(len(ls), 1)
+        st, ls = track_listings(st, self.m({}), at=T0 + 60 + 7 * 86400 + 1)
+        self.assertEqual(ls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
