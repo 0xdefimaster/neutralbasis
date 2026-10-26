@@ -313,6 +313,82 @@ def report_csv(engine):
     return out.getvalue()
 
 
+class DeskHistorySource:
+    """Market list, incremental fetchers and publishing for the background history keeper."""
+
+    def __init__(self, engine):
+        self.engine = engine
+
+    def markets(self):
+        e = self.engine
+        out = []
+        for v in VENUES:
+            for a in e.cfg["symbols"]:
+                m = e.feed.meta.get(v, {}).get(a)
+                if m:
+                    out.append((v, a, "perp", 3600, m.get("price_type", "trade")))
+        rows, _ = e.wide.snapshot()
+        seen = set()
+        for r in rows:
+            key = (r["venue"], r["asset"], r["kind"])
+            if r["venue"] in VENUES or key in seen:
+                continue
+            seen.add(key)
+            out.append(key + (r.get("interval") or None, "trade"))
+        # Funding-only history for the widest matrix spreads outside the selected assets.
+        from funding_matrix import top_pairs
+
+        try:
+            extra = top_pairs(e.matrix.get())
+        except Exception:
+            extra = []
+        for v, a, interval in extra:
+            key = (v, a, "perp")
+            if v in VENUES or a in e.cfg["symbols"] or key in seen:
+                continue
+            seen.add(key)
+            out.append(key + (interval, "trade"))
+        return out
+
+    def candles(self, v, a, kind, start, end):
+        if a not in self.engine.cfg["symbols"]:
+            return {}
+        if v in VENUES:
+            return self.engine.feed.candles_range(v, a, start, end)["prices"]
+        return self.engine.wide.candles_since(v, a, kind, start, end)
+
+    def funding(self, v, a, start):
+        if v in VENUES:
+            return self.engine.feed.funding_range(v, a, start, now())
+        return self.engine.wide.funding_since(v, a, start)
+
+    def publish(self, v, a, kind, prices, rates, interval, price_type):
+        wide = self.engine.wide
+        with wide.lock:
+            old = wide.histories.get((v, a, kind)) or {}
+            wide.histories[(v, a, kind)] = dict(
+                prices=dict(
+                    prices=prices,
+                    price_type=price_type
+                    or (old.get("prices") or {}).get("price_type")
+                    or "trade",
+                    audit_ids=[],
+                    end=hour(now()),
+                ),
+                rates=rates,
+                interval=interval or old.get("interval") or 3600,
+                ts=now(),
+            )
+
+    def stored_prices(self, v, a, kind="perp"):
+        """Stored 30-day closes when they cover at least 95% of the window, else None."""
+        start = hour(now()) - 720 * 3600
+        prices = self.engine.history.db.candles(v, a, kind, start)
+        if len(prices) < 720 * 0.95:
+            return None
+        return dict(prices=prices, price_type="trade", audit_ids=[], end=hour(now()))
+
+
 class DeskEngine(RiskEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -325,8 +401,19 @@ class DeskEngine(RiskEngine):
 
         self.wide = WideMarkets(self.store, self.cfg["symbols"], self.stop_event)
         self.wide_paper = WidePaper(self.store, EngineSource(self))
+        from history_store import HistoryKeeper
+
+        self.history = HistoryKeeper(
+            self.store, DeskHistorySource(self), self.stop_event
+        )
+        from funding_matrix import MatrixCache
+
+        self.matrix = MatrixCache(self)
         self.read_lock = threading.RLock()
         self.read_jobs = {}
+
+    def funding_matrix(self):
+        return self.matrix.get()
 
     def evaluate(self, asset, lv, sv, books, analysis):
         from convergence import qualify
@@ -532,6 +619,7 @@ class DeskEngine(RiskEngine):
 
     def loop(self):
         self.wide.start()
+        self.history.start()
         return super().loop()
 
     def update_config(self, changes):
@@ -550,6 +638,7 @@ class DeskEngine(RiskEngine):
         o["market_view"] = expanded_view(self, market_view(self))
         o["venue_labels"] = LABELS
         o["wide_paper"] = self.wide_paper.snapshot()
+        o["history_status"] = self.history.status()
         o["deployment"] = (
             "Geniş public tarama: DEX + CEX. Lighter Core ve Robinhood ayrı kaynaklar. Paper yürütme: Lighter RH–Extended masası + tüm taranan borsalarda çoklu borsa funding masası."
         )
@@ -662,15 +751,16 @@ class DeskEngine(RiskEngine):
                 intervals = {}
                 for v, k in ((lv, kind), (sv, "perp")):
                     if v in VENUES and k == "perp":
-                        if days > 30:
-                            raise ValueError(
-                                v
-                                + ": native geçmiş bağlantısı en çok 30 günlük; 90 gün onaylı değil"
+                        first = hour(at) - (hours + 1) * 3600
+                        if first < hour(now()) - 720 * 3600:
+                            # Older than the 30-day live cache: page the native APIs.
+                            prices[v] = feed.candles_range(v, asset, first, hour(at))
+                            rates[v] = feed.funding_range(v, asset, first, at)
+                        else:
+                            prices[v] = feed.candles(v, asset)
+                            rates[v] = feed.funding_history(
+                                v, asset, hour(at) - int(days) * 86400
                             )
-                        prices[v] = feed.candles(v, asset)
-                        rates[v] = feed.funding_history(
-                            v, asset, hour(at) - int(days) * 86400
-                        )
                         intervals[v] = 3600
                     else:
                         prices[v], rates[v], row = self.wide.history(

@@ -1472,6 +1472,23 @@ class Engine:
         )
 
 
+class ExclusiveServer(ThreadingHTTPServer):
+    """Refuse a port another server already holds.
+
+    HTTPServer sets SO_REUSEADDR, which on Windows lets a second process bind the same
+    port while the first keeps answering: the browser then silently shows the old panel.
+    """
+
+    allow_reuse_address = False
+
+    def server_bind(self):
+        import socket
+
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def serve(engine, port, host="127.0.0.1", password=None):
     """Local by default. A non-loopback bind (hosted deploy) requires a dashboard password."""
     token = uuid.uuid4().hex
@@ -1557,6 +1574,8 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 return self.send(engine.connections.view())
             if self.path == "/api/backtest" and hasattr(engine, "backtest_status"):
                 return self.send(engine.backtest_status())
+            if self.path == "/api/funding-matrix" and hasattr(engine, "funding_matrix"):
+                return self.send(engine.funding_matrix())
             if self.path == "/api/read-jobs" and hasattr(engine, "read_status"):
                 return self.send(engine.read_status())
             if self.path == "/api/report.csv":
@@ -1690,7 +1709,13 @@ def serve(engine, port, host="127.0.0.1", password=None):
             except (ValueError, TypeError, KeyError) as ex:
                 self.send({"error": str(ex)}, 400)
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    try:
+        httpd = ExclusiveServer((host, port), Handler)
+    except OSError as ex:
+        raise SystemExit(
+            f"{host}:{port} portu başka bir işlem tarafından kullanılıyor ({ex}). "
+            "Eski motoru kapatın (Durdur.cmd veya Görev Yöneticisi'nde python) ya da --port ile başka port seçin."
+        )
     httpd.daemon_threads = True
     engine.public_snapshot = json.loads(json.dumps(engine.snapshot()))
     print(f"Funding Desk Paper: http://{host}:{port}", flush=True)

@@ -46,7 +46,7 @@ BOOLS = ("wide_enabled", "wide_funding_enabled", "wide_conv_enabled")
 LIMITS = dict(
     wide_capital=(10, 1000000),
     wide_size=(10, 100000),
-    wide_leverage=(1, 10),
+    wide_leverage=(1, 5),
     wide_reserve=(0.1, 0.9),
     wide_max_positions=(1, 10),
     wide_horizon=(1, 168),
@@ -59,7 +59,7 @@ LIMITS = dict(
     wide_cooldown_seconds=(0, 86400),
     wide_max_hold_hours=(1, 2160),
     wide_lock_trail=(0.1, 0.9),
-    wide_conv_leverage=(1, 10),
+    wide_conv_leverage=(1, 5),
     wide_conv_min_cross_7=(1, 168),
     wide_conv_min_cross_30=(1, 720),
     wide_conv_min_episodes=(1, 100),
@@ -74,6 +74,9 @@ LEG_SAFETY = 0.5
 HISTORY_TTL = 1800
 FUNDING_TTL = 120
 MIN_NOTIONAL = 10
+LATE_FUNDING_WINDOW = 7 * 86400
+# Funding quotes older than this at entry are refreshed or the entry is skipped.
+ENTRY_FUNDING_MAX_AGE = 120
 
 
 def next_payment(row, after):
@@ -356,6 +359,13 @@ class EngineSource:
         return self.engine.wide.book(v, a)
 
     def prices(self, v, a):
+        keeper = getattr(self.engine, "history", None)
+        if keeper is not None:
+            from desk_analytics import DeskHistorySource
+
+            stored = DeskHistorySource(self.engine).stored_prices(v, a)
+            if stored:
+                return stored
         if v in NATIVE:
             return {**self.engine.feed.candles(v, a), "price_type": "trade"}
         prices, _, _ = self.engine.wide.history(v, a, 30)
@@ -806,6 +816,50 @@ class WidePaper:
         out["eligible"] = not out["reasons"]
         return out
 
+    def entry_funding_check(self, c):
+        """Re-read funding right before the fills; None when the entry still holds."""
+        try:
+            fresh = {
+                (r["venue"], r["asset"]): r
+                for r in self.source.market_rows()
+                if r.get("kind", "perp") == "perp"
+            }
+        except Exception as ex:
+            return "Girişte funding yenilenemedi: " + str(ex)[:120]
+        at = now()
+        l, s = fresh.get((c["long"], c["asset"])), fresh.get((c["short"], c["asset"]))
+        if not l or not s or l.get("raw_rate") is None or s.get("raw_rate") is None:
+            return "Girişte güncel funding oranı yok"
+        if any(
+            at - r.get("funding_received", r["received"]) > ENTRY_FUNDING_MAX_AGE
+            for r in (l, s)
+        ):
+            return "Girişte funding verisi eski"
+        hours = (
+            c["expected_hours"]
+            if c.get("strategy") == "convergence"
+            else self.cfg["wide_horizon"]
+        )
+        end = at + hours * 3600
+        cash = c["size"] * (
+            s["raw_rate"] * payments_within(s, at, end)
+            - l["raw_rate"] * payments_within(l, at, end)
+        )
+        if c.get("strategy") == "convergence":
+            net = c["net"] - c["funding_cost_reserve"] + min(0.0, cash)
+        else:
+            if cash <= 0:
+                return "Girişte funding yenilendi: avantaj kalmadı"
+            net = (
+                c["net"]
+                - c["conservative_funding"]
+                + min(c["conservative_funding"], cash)
+            )
+        c["entry_funding_refresh"] = dict(cash=cash, net=net, at=at)
+        if net < self.cfg["wide_min_net"]:
+            return "Girişte funding yenilendi: net hedefin altına düştü"
+        return None
+
     def quote(self, v, a, qty, buy):
         b = self.source.book(v, a)
         return walk(b["asks" if buy else "bids"], qty, buy, self.extra_slippage), b
@@ -1244,7 +1298,11 @@ class WidePaper:
                         error=str(ex),
                     )
             for p in self.closed[-50:]:
-                if p.get("pending_funding"):
+                # Late-published rates replace unverified zero hours for a week after close.
+                if p.get("pending_funding") or (
+                    p.get("funding_unverified")
+                    and now() - p.get("closed_at", now()) < LATE_FUNDING_WINDOW
+                ):
                     self.settle(p)
                     p["net"] = p["price_pnl"] + p["funding"] - p["fees"]
             at = now()
@@ -1283,7 +1341,18 @@ class WidePaper:
                     default=None,
                 )
                 if best:
-                    self.open(best)
+                    stale = self.entry_funding_check(best)
+                    if stale:
+                        best["eligible"] = False
+                        best["reasons"].append(stale)
+                        self.events(
+                            "ENTRY_SKIP",
+                            stale,
+                            asset=best["asset"],
+                            strategy=best["strategy"],
+                        )
+                    else:
+                        self.open(best)
             self.last_cycle = now()
             self.persist()
         except Exception as ex:

@@ -85,3 +85,25 @@ Her iki strateji aynı ortak paper cüzdanı kullanır, varlık başına bir poz
 - Funding: ayrıca 7g fark standart sapması `wide_max_spread_sd_bps` (30 bp) altında olmalı; aynı risk payı nette düşülür. Funding dönüşü/zayıflığı `wide_weak_minutes` (30 dk) boyunca sürmezse çıkılmaz. Açık pozisyonda 7g/30g korelasyon düşerse veya z-skoru eşik+1'i aşarsa "Fiyat uyumu bozuldu". Kâr hedefi (beklenen net) ve kâr kilidi korunur.
 - Kaldıraç tavandır: bir bacağın tutma süresindeki 4 sigma hareketi tasfiye mesafesinin yarısını geçmeyecek şekilde düşürülür. Bir bacağın zararı kendi marjininin yarısına ulaşırsa "Bacak marjin riski" ile kapanır.
 - Her işlemde strateji, giriş gerekçesi ve kapanış nedeni kaydedilir. Bir bacak dolmazsa dolan bacak kapatılır. Funding API'si veya piyasa listesi bozuk olsa da defterden izleme ve kapatma sürer; bekleyen ödemeler sonradan uzlaştırılır. Testler: 102 (1 atlanan).
+
+
+## Arka planda geçmiş verisi
+Listelenen her piyasa (native DEX'ler ve CCXT perp/spot) için 1h kapanış mumları ve gerçekleşmiş funding arka planda, piyasalar arasında 1 saniye bekleyerek tek tek çekilir ve SQLite'a (`hist_candles`, `hist_funding`) yazılır. İlk geçişte 30 gün alınır; sonra her piyasa 30 dakikada bir yalnızca son kayıttan sonraki yeni satırlarla güncellenir. Hata veren piyasa 30 dakika sonra tekrar denenir. Yeniden başlatmada kayıtlı geçmiş istek atmadan hemen panele yüklenir. 35 günden eski satırlar silinir. Funding arb / Fiyat arb satırlarındaki 7g ortalama, kesişim ve ödenen funding sütunları "Geçmişi getir" beklemeden dolar; çoklu borsa masası da 30 günlük geçmiş tamamsa kayıtlı veriyi kullanır. İlk dolum piyasa sayısına göre yaklaşık 20–40 dakika sürer; durum üst şeritte "GEÇMİŞ x/y PİYASA" olarak görünür.
+
+## Funding matrisi (arb.sh/funding benzeri)
+
+- Funding arb sekmesi varsayılan olarak **Borsa matrisi** açılır: satırlar varlık, sütunlar borsa; oranlar seçili gösterim periyodunda (1H/8H/24H/APR).
+- Kapsam: toplu funding uç noktası (`fetchFundingRates`) olan her borsada listelenen **tüm** lineer USDT/USDC/USD perp'ler tek çağrıyla taranır. Toplu uç noktası olmayan borsalar ve yerel beslemeler (Lighter RH, Extended, TxFlow, RISEx, Arcus) seçili varlıklarla sınırlı kalır.
+- En geniş fark: çift filtresine (DEX içeren / Yalnız DEX / Yalnız CEX / Hepsi) uyan en yüksek oranlı borsada short, en düşükte long. Hücreler LONG/SHORT olarak işaretlenir.
+- Net son 7g: o çiftin kayıtlı gerçekleşen funding ödemeleri farkı × büyüklük, maliyetler açıksa 4 emir komisyonu düşülür. 7 günlük ödemeler tam kayıtlı değilse "geçmiş eksik" yazar; tahmin yapılmaz.
+- Seçili olmayan varlıklarda funding geçmişi, en geniş farklı ilk 40 varlığın iki ucu için arka plan geçmiş kaydedicisi tarafından doldurulur (yalnız funding, mum çekilmez).
+- İstikrarlı: net 7g > 0. Yüksek getiri: fark ≥ %0,1 / 8s. 50 satır, "100 daha göster".
+- Veri `/api/funding-matrix` üzerinden, 60 sn önbellekli.
+
+## Özet ana sayfa (arb.sh ana sayfası benzeri)
+
+Adres çubuğunda sekme yoksa panel **Özet** ile açılır. Yalnızca masanın gerçekten sahip olduğu verilerden hesaplanır:
+- Kutucuklar: DEX'lerde BTC funding ortalaması (CEX ortalaması ve en yüksek DEX ile), son 7 gün gerçekleşen funding'e göre ücret sonrası kârda olan çift sayısı, 7g ortalamaya dönüşte kârda olan fiyat farkı sayısı, kapsam (varlık/borsa), çoklu paper özsermaye.
+- Tablolar: en iyi funding çiftleri (fark ve APR), en geniş fiyat farkları (seçili varlıklar), uç funding (tek piyasa), yeni listelemeler.
+- Yeni listelemeler: bir borsanın ilk taraması mevcut listeyi yalnızca kaydeder; sonrasında hiçbir borsada görülmemiş bir perp çıkarsa listelenir, 7 gün boyunca ekleyen borsalar eklenir (`kv: matrix_listings`).
+- DEX hacmi/OI, haberler ve soru kutusu için veri kaynağımız olmadığından eklenmedi.

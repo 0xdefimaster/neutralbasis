@@ -429,6 +429,189 @@ class FiveFeed(Feed):
         self.history[(v, asset)] = out
         return out
 
+    WINDOW = 15 * 86400
+
+    def windows(self, start, end):
+        """Back-to-back windows small enough for every venue's per-request row limit."""
+        t = end
+        while t > start:
+            yield max(start, t - self.WINDOW), t
+            t = max(start, t - self.WINDOW)
+
+    def candles_range(self, v, asset, start, end):
+        """Closed 1h trade/oracle candles over an arbitrary range (backtests up to 90 days)."""
+        m = self.meta[v][asset]
+        prices, ids = {}, []
+        for s, e in self.windows(start, end):
+            if v == "Lighter":
+                o, info = self.req(
+                    bot.L
+                    + "candles?"
+                    + urllib.parse.urlencode(
+                        dict(
+                            market_id=m["id"],
+                            resolution="1h",
+                            start_timestamp=s,
+                            end_timestamp=e,
+                            count_back=500,
+                        )
+                    )
+                )
+                rows = {
+                    int(bot.stamp(x["t"])): number(x["c"]) for x in o["c"] if x.get("c")
+                }
+            elif v == "Extended":
+                o, info = self.req(
+                    bot.E
+                    + "info/candles/"
+                    + m["id"]
+                    + "/trades?"
+                    + urllib.parse.urlencode(
+                        dict(interval="PT1H", limit=750, endTime=e * 1000)
+                    )
+                )
+                rows = {int(bot.stamp(x["T"])): number(x["c"]) for x in o["data"]}
+            elif v == "TxFlow":
+                o, info = self.req(
+                    "https://rpc.txflow.com/info",
+                    {
+                        "type": "candleSnapshot",
+                        "req": {
+                            "coin": str(m["id"]),
+                            "interval": "1h",
+                            "startTime": s * 1000,
+                            "endTime": e * 1000,
+                        },
+                    },
+                )
+                rows = {int(epoch(x["t"])): number(x["c"]) for x in o["data"]}
+            elif v == "RISEx":
+                o, info = self.req(
+                    "https://api.rise.trade/v1/markets/id/"
+                    + m["id"]
+                    + "/trading-view-data?"
+                    + urllib.parse.urlencode(
+                        {"interval": 3600 * 10**9, "from": s * 10**9, "to": e * 10**9}
+                    )
+                )
+                rows = {
+                    int(epoch(x["time"])): number(x["close"]) for x in o["data"]["data"]
+                }
+            else:
+                o, info = self.req(
+                    "https://api.arcus.xyz/v1/candles?"
+                    + urllib.parse.urlencode(
+                        dict(
+                            market=m["id"],
+                            timeframe="1h",
+                            **{"from": s * 10**6, "to": e * 10**6},
+                        )
+                    )
+                )
+                rows = {
+                    int(epoch(x["openTime"])): number(x["close"])
+                    for x in o["candles"]
+                    if x.get("isFinal", True)
+                }
+            ids.append(info["audit_id"])
+            prices.update({t: p for t, p in rows.items() if s <= t < e and p > 0})
+        return dict(
+            prices=prices,
+            audit_ids=ids,
+            end=end,
+            price_type=(
+                "trade"
+                if v in ("Lighter", "Extended")
+                else m.get("price_type", "trade")
+            ),
+        )
+
+    def funding_range(self, v, asset, start, end):
+        """Realized funding over an arbitrary range, paged per window; never invents a rate."""
+        m = self.meta[v][asset]
+        if v == "TxFlow":
+            raise ValueError(
+                "TxFlow public gerçekleşmiş funding geçmişi / pozisyon bazında tahakkuk modeli doğrulanmadı"
+            )
+        out = {}
+        for s, e in self.windows(start, end):
+            if v == "Lighter":
+                o, info = self.req(
+                    bot.L
+                    + "fundings?"
+                    + urllib.parse.urlencode(
+                        dict(
+                            market_id=m["id"],
+                            resolution="1h",
+                            start_timestamp=int(s),
+                            end_timestamp=int(e),
+                            count_back=750,
+                        )
+                    )
+                )
+                rows = []
+                for x in o["fundings"]:
+                    sign = {"long": 1, "short": -1}.get(x["direction"])
+                    if sign is None:
+                        raise ValueError("Bilinmeyen funding yönü")
+                    rows.append(
+                        dict(
+                            ts=bot.stamp(x["timestamp"]),
+                            rate=abs(number(x["rate"])) / 100 * sign,
+                            value=abs(number(x["value"])) * sign,
+                        )
+                    )
+            elif v == "Extended":
+                o, info = self.req(
+                    bot.E
+                    + "info/"
+                    + m["id"]
+                    + "/funding?"
+                    + urllib.parse.urlencode(
+                        dict(startTime=int(s * 1000), endTime=int(e * 1000), limit=1000)
+                    )
+                )
+                rows = [
+                    dict(ts=bot.stamp(x["T"]), rate=number(x["f"]), value=None)
+                    for x in o["data"]
+                ]
+            elif v == "RISEx":
+                o, info = self.req(
+                    "https://api.rise.trade/v1/markets/id/"
+                    + m["id"]
+                    + "/funding-rate-history?"
+                    + urllib.parse.urlencode(
+                        dict(start_time=int(s * 1e9), end_time=int(e * 1e9), limit=1000)
+                    )
+                )
+                rows = [
+                    dict(
+                        ts=epoch(x["end_time"]),
+                        rate=number(x["funding_rate"]),
+                        value=number(x["index_price"]) * number(x["funding_rate"]),
+                    )
+                    for x in o["data"]["records"]
+                ]
+            else:
+                o, info = self.req(
+                    "https://api.arcus.xyz/v1/fundingRates?"
+                    + urllib.parse.urlencode(
+                        dict(
+                            market=m["id"],
+                            limit=1000,
+                            **{"from": int(s * 1e6), "to": int(e * 1e6)},
+                        )
+                    )
+                )
+                rows = [
+                    dict(ts=epoch(x["time"]), rate=number(x["fundingRate"]), value=None)
+                    for x in o["fundingRates"]
+                ]
+            for r in rows:
+                if s <= r["ts"] <= e:
+                    out[r["ts"]] = dict(r, audit_id=info["audit_id"])
+        return sorted(out.values(), key=lambda r: r["ts"])
+
     def funding_history(self, v, asset, start=None):
         if v in ("Lighter", "Extended"):
             return super().funding_history(v, asset, start)
@@ -692,10 +875,22 @@ class RiskEngine(Engine):
                 a = p["asset"]
                 vs = [x["venue"] for x in p["legs"] if not x["closed"]]
                 try:
+                    # A funding history outage must not stop marking or closing the legs.
                     for v in {x["venue"] for x in p["legs"]}:
-                        self.feed.funding_history(
-                            v, a, min(x["entered"] for x in p["legs"])
-                        )
+                        try:
+                            self.feed.funding_history(
+                                v,
+                                a,
+                                min((x["entered"] for x in p["legs"]), default=now()),
+                            )
+                        except Exception as ex:
+                            self.events(
+                                "FUNDING_WAIT",
+                                "Funding geçmişi alınamadı; fiyat izlemesi sürüyor",
+                                position=p["id"],
+                                venue=v,
+                                error=str(ex),
+                            )
                     self.settle(p)
                     books = {v: self.feed.book(v, a) for v in vs}
                     self.mark_position(p, books)

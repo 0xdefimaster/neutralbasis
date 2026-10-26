@@ -190,3 +190,64 @@ class RiskTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class OldEngineCloseTests(unittest.TestCase):
+    def test_funding_outage_does_not_block_manual_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = FiveFixture()
+            f.markets()
+            e = risk_scan.RiskEngine(Path(d) / "t.db", f)
+            e.cfg["symbols"] = ["BTC"]
+            try:
+                legs = [
+                    dict(
+                        venue=v,
+                        side=side,
+                        qty=0.01,
+                        entry=f.book(v, "BTC")["asks"][0][0],
+                        entered=bot.now() - 60,
+                        fee_rate=0.0003,
+                        entry_fee=0.0,
+                        margin=1.0,
+                        closed=False,
+                        price_pnl=0.0,
+                        audit_id=None,
+                    )
+                    for v, side in (("Lighter", "long"), ("Extended", "short"))
+                ]
+                p = dict(
+                    id="old1",
+                    asset="BTC",
+                    opened=bot.now() - 60,
+                    legs=legs,
+                    funding=0.0,
+                    estimated_funding=0.0,
+                    fees=0.0,
+                    unrealized=0.0,
+                    status="OPEN",
+                    price_pnl=0.0,
+                    close_reason=None,
+                    decision=dict(
+                        long="Lighter",
+                        short="Extended",
+                        qty=0.01,
+                        execution_drag=0.0,
+                        stress_loss=1e9,
+                    ),
+                )
+                e.positions.append(p)
+
+                def broken(*a, **k):
+                    raise ValueError("funding API kapalı")
+
+                f.funding_history = broken
+                e.manual_close.add("old1")
+                e.cfg["latency_ms"] = 0
+                e.cycle()
+                self.assertEqual(e.positions, [])
+                self.assertEqual(
+                    e.closed[-1]["close_reason"], "Kullanıcı paper kapatma talebi"
+                )
+            finally:
+                e.store.db.close()
