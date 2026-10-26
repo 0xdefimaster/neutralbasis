@@ -152,6 +152,56 @@ class HistoryTests(unittest.TestCase):
             bot.hour(T0) - 3 * 86400,
         )
 
+    def test_interior_gap_is_refetched(self):
+        self.keeper.run_once()
+        db = self.keeper.db
+        hole = range(bot.hour(T0) - 10 * 86400, bot.hour(T0) - 9 * 86400, 3600)
+        with self.store.lock:
+            self.store.db.execute(
+                "delete from hist_candles where venue='Binance' and ts>=? and ts<?",
+                (hole.start, hole.stop),
+            )
+            self.store.db.execute(
+                "delete from hist_funding where venue='Binance' and ts>=? and ts<?",
+                (hole.start, hole.stop),
+            )
+        self.assertEqual(len(db.candles("Binance", "BTC")), 30 * 24 - 24)
+        self.src.calls.clear()
+        self.clock = T0 + history_store.BACKFILL_SECONDS
+        self.keeper.run_once()
+        spans = [c for c in self.src.calls if c[0] == "candles" and c[1] == "Binance"]
+        self.assertIn(("candles", "Binance", hole.start, hole.stop), spans)
+        prices = db.candles("Binance", "BTC", start=bot.hour(T0) - 29 * 86400)
+        self.assertTrue(all(t in prices for t in hole))
+        st = self.keeper.market_state("Binance", "BTC")
+        self.assertTrue(st["complete"], st)
+        self.assertGreaterEqual(st["coverage"]["funding"], 89)
+
+    def test_candle_failure_still_syncs_and_publishes_funding(self):
+        class Half(Source):
+            def candles(self, v, a, kind, start, end):
+                raise ValueError("ohlcv kapalı")
+
+        src = Half()
+        keeper = HistoryKeeper(self.store, src, threading.Event(), sleep=lambda s: None)
+        keeper.run_once()
+        st = keeper.market_state("Binance", "BTC")
+        self.assertFalse(st["ok"])
+        self.assertIn("Mum: ohlcv kapalı", st["error"])
+        self.assertEqual(st["coverage"]["funding"], 30 * 3)
+        self.assertFalse(st["complete"])
+        _, rates, _, _ = src.published[("Binance", "BTC", "perp")]
+        self.assertEqual(len(rates), 30 * 3)
+
+    def test_partial_coverage_is_reported(self):
+        self.src.since["Lighter"] = bot.hour(T0) - 3 * 86400
+        self.keeper.run_once()
+        cov = self.keeper.market_state("Lighter", "BTC")["coverage"]
+        self.assertEqual((cov["candles"], cov["candle_hours"]), (72, 720))
+        self.assertEqual(cov["funding_expected"], 720)
+        st = self.keeper.status()
+        self.assertEqual(st["complete"], 1)
+
     def test_old_rows_are_pruned(self):
         db = HistoryStore(self.store)
         old = bot.hour(T0) - 40 * 86400
