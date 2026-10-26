@@ -1201,9 +1201,28 @@ class Engine:
                 if all(a in meta[v] for v in ("Lighter", "Extended"))
             ]
             missing = [a for a in self.cfg["symbols"] if a not in assets]
+            # RFQ markets have no executable public book; label them without fetching one.
+            rfq = [
+                a
+                for a in assets
+                if any(meta[v][a].get("rfq") for v in ("Lighter", "Extended"))
+            ]
+            assets = [a for a in assets if a not in rfq]
             assets = list(dict.fromkeys([p["asset"] for p in self.positions] + assets))
             books = {}
             self.candidates = []
+            for a in rfq:
+                for lv, sv in (("Lighter", "Extended"), ("Extended", "Lighter")):
+                    self.candidates.append(
+                        dict(
+                            asset=a,
+                            long=lv,
+                            short=sv,
+                            eligible=False,
+                            reasons=["RFQ yürütmesi henüz desteklenmiyor"],
+                            net=None,
+                        )
+                    )
             for a in missing:
                 for lv, sv in (("Lighter", "Extended"), ("Extended", "Lighter")):
                     self.candidates.append(
