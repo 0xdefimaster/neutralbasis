@@ -220,7 +220,10 @@ def matched(left, right, at, hours):
         if t in left["prices"] and t in right["prices"]
     ]
     if len(times) < hours * 0.95:
-        raise ValueError("%d günlük eşlenmiş 1h mum eksik" % (hours // 24))
+        raise ValueError(
+            "%d günlük eşlenmiş 1h mum eksik (%d/%d saat)"
+            % (hours // 24, len(times), hours)
+        )
     return times
 
 

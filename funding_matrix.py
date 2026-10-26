@@ -6,7 +6,7 @@ the whole window; nothing is estimated or interpolated.
 """
 
 import math, threading
-from bot import now
+from bot import now, hour
 from risk_scan import VENUES
 
 CACHE_SECONDS = 60
@@ -42,14 +42,17 @@ def price_spread(cells):
     )
 
 
-def build(native, rows, universe, sums, kinds, labels, at=None):
+def build(native, rows, universe, sums, kinds, labels, at=None, closes=None):
     """native/rows: lists of dicts with venue, asset, rate (hourly), interval, fee;
-    cells are [rate, interval, fee, paid7, mark, volume 24h, open interest] (USD);
-    universe: {venue: {asset: entry}}; sums: {(venue, asset): (sum, count)} over 7d.
+    cells are [rate, interval, fee, paid7, mark, volume 24h, open interest (USD),
+    close 7 days ago, last close] with the closes from stored 1h candles (None when
+    not stored); universe: {venue: {asset: entry}}; sums: {(venue, asset): (sum,
+    count)} over 7d; closes: ({(venue, asset): close} then, same now).
     Earlier sources win for the same cell (native feed, selected scan, bulk universe).
     """
     at = at or now()
     cells = {}
+    then, last = closes or ({}, {})
 
     def put(v, a, rate, interval, fee, received, mark=None, volume=None, oi=None):
         if rate is None or not interval or at - (received or 0) > FRESH_SECONDS:
@@ -64,6 +67,8 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
                 mark if mark and mark > 0 else None,
                 volume,
                 oi,
+                then.get((v, a)),
+                last.get((v, a)),
             ],
         )
 
@@ -250,8 +255,17 @@ class MatrixCache:
         rows, status = e.wide.snapshot(FRESH_SECONDS)
         sums = e.history.db.funding_sums(now() - WEEK)
         kinds = {v: c["kind"] for v, c in CATALOG.items()}
+        # Price legs of the 7-day net: the last closed hour and the hour 7 days before.
+        end = hour(now()) - 3600
+        closes = (e.history.db.closes_at(end - WEEK), e.history.db.closes_at(end))
         m = build(
-            native, rows, e.wide.universe_snapshot(FRESH_SECONDS), sums, kinds, LABELS
+            native,
+            rows,
+            e.wide.universe_snapshot(FRESH_SECONDS),
+            sums,
+            kinds,
+            LABELS,
+            closes=closes,
         )
         with e.wide.lock:
             ustatus = {v: dict(x) for v, x in e.wide.universe_status.items()}

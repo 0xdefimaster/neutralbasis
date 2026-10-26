@@ -411,11 +411,19 @@ class LiquidityCellTests(unittest.TestCase):
         }
         m = build(native, rows, universe, {}, {}, {}, at=T0)
         cells = m["assets"][0]["cells"]
-        self.assertEqual(cells["OKX"][5:], [5e6, 2e6])
-        self.assertEqual(cells["Gate"][5:], [7e5, None])
-        self.assertEqual(cells["Lighter"][5:], [None, None])
+        self.assertEqual(cells["OKX"][5:7], [5e6, 2e6])
+        self.assertEqual(cells["Gate"][5:7], [7e5, None])
+        self.assertEqual(cells["Lighter"][5:7], [None, None])
         curated = {v["id"]: v["curated"] for v in m["venues"]}
         self.assertEqual(curated, {"Lighter": True, "OKX": False, "Gate": False})
+
+    def test_cells_carry_stored_closes_for_the_seven_day_price_leg(self):
+        rows = [row("OKX", "BTC", 0.0002), row("Gate", "BTC", 0.0001)]
+        closes = ({("OKX", "BTC"): 100.0}, {("OKX", "BTC"): 103.0})
+        m = build([], rows, {}, {}, {}, {}, at=T0, closes=closes)
+        cells = m["assets"][0]["cells"]
+        self.assertEqual(cells["OKX"][7:], [100.0, 103.0])
+        self.assertEqual(cells["Gate"][7:], [None, None])
 
 
 class HourlySinceTests(unittest.TestCase):

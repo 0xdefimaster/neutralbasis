@@ -333,7 +333,19 @@ class PairViews:
             prices=self.prices(asset, (long, short)),
         )
         out["syncing"] = self.sync_state(asset)
+        out["coverage"] = {v: self.coverage(asset, v, legs) for v in (long, short)}
         return out
+
+    def coverage(self, asset, v, legs):
+        """Stored 30-day history for one leg (candles x/720, funding x/expected)."""
+        keeper = getattr(self.engine, "history", None)
+        if keeper is None:
+            return None
+        st = keeper.market_state(v, asset)
+        cov = st.get("coverage") or keeper.coverage(
+            v, asset, "perp", (legs.get(v) or {}).get("interval")
+        )
+        return dict(cov, error=None if st.get("ok", True) else st.get("error"))
 
     def sync_state(self, asset):
         with self.lock:
