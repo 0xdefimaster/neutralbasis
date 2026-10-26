@@ -662,15 +662,16 @@ class DeskEngine(RiskEngine):
                 intervals = {}
                 for v, k in ((lv, kind), (sv, "perp")):
                     if v in VENUES and k == "perp":
-                        if days > 30:
-                            raise ValueError(
-                                v
-                                + ": native geçmiş bağlantısı en çok 30 günlük; 90 gün onaylı değil"
+                        first = hour(at) - (hours + 1) * 3600
+                        if first < hour(now()) - 720 * 3600:
+                            # Older than the 30-day live cache: page the native APIs.
+                            prices[v] = feed.candles_range(v, asset, first, hour(at))
+                            rates[v] = feed.funding_range(v, asset, first, at)
+                        else:
+                            prices[v] = feed.candles(v, asset)
+                            rates[v] = feed.funding_history(
+                                v, asset, hour(at) - int(days) * 86400
                             )
-                        prices[v] = feed.candles(v, asset)
-                        rates[v] = feed.funding_history(
-                            v, asset, hour(at) - int(days) * 86400
-                        )
                         intervals[v] = 3600
                     else:
                         prices[v], rates[v], row = self.wide.history(

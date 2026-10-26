@@ -552,7 +552,7 @@ class WideMarkets:
             cursor = start * 1000
             prices = {}
             audits = []
-            for _ in range(12):
+            for _ in range(30):
                 batch = ex.fetch_ohlcv(row["symbol"], "1h", cursor, 500)
                 audits.append(ex.neutralbasis_audit)
                 if not batch:
@@ -571,7 +571,7 @@ class WideMarkets:
                 if not ex.has.get("fetchFundingRateHistory"):
                     raise ValueError(v + ": gerçekleşmiş funding geçmişi adaptörde yok")
                 cursor = (start + 3600) * 1000
-                for _ in range(16):
+                for _ in range(40):
                     batch = ex.fetch_funding_rate_history(row["symbol"], cursor, 200)
                     audit = ex.neutralbasis_audit
                     if not batch:
