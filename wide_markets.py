@@ -114,6 +114,7 @@ CATALOG = {
     )
     for v, k, a in SPECS
 }
+SCAN_PARALLEL = 12
 SPOT_ADAPTERS = {"Binance": "binance", "KuCoin": "kucoin", "KrakenFutures": "kraken"}
 
 
@@ -146,8 +147,8 @@ def funding_interval(rate, market, previous=None):
     )
     if current and nxt and 0 < nxt - current <= 86400000:
         return (nxt - current) / 1000
-    raw = market.get("info", {})
-    info = rate.get("info", {})
+    raw = market.get("info") or {}
+    info = rate.get("info") or {}
     for d in (info, raw):
         for key, factor in [
             ("fundingIntervalHour", 3600),
@@ -204,6 +205,26 @@ def universe_liquidity(ex, symbols):
     return ticks or {}, interest or {}
 
 
+def bulk_funding_rates(ex):
+    """Every perp's current funding in one call. CCXT's HTX adapter only offers the
+    inverse batch endpoint, so its USDT-margined batch is requested directly."""
+    if getattr(ex, "id", None) == "htx":
+        response = ex.request(
+            "linear-swap-api/v1/swap_batch_funding_rate", ["contract", "public"], "GET"
+        )
+        out = {}
+        for item in (response or {}).get("data") or []:
+            r = ex.parse_funding_rate(item)
+            if r.get("symbol"):
+                out[r["symbol"]] = r
+        return out
+    return ex.fetch_funding_rates()
+
+
+def has_bulk_funding(ex):
+    return getattr(ex, "id", None) == "htx" or bool(ex.has.get("fetchFundingRates"))
+
+
 def hourly_since(ex, symbol, cursor):
     """1h candles from `cursor` (ms). Some venues (HTX contracts) drop the start time when
     a limit is given and return only the latest candles, which leaves the start of a
@@ -236,6 +257,7 @@ class WideMarkets:
         self.thread = None
         self.histories = {}
         self.universe = {}
+        self.universe_status = {}
 
     def client(self, v, spot=False):
         key = v + ":spot" if spot else v
@@ -287,7 +309,11 @@ class WideMarkets:
     def scan_universe(self, v, ex):
         """Every listed linear perp's funding from one bulk call; venues without a
         bulk endpoint stay limited to the selected assets (no per-symbol storm)."""
-        if not ex.has.get("fetchFundingRates"):
+        if not has_bulk_funding(ex):
+            with self.lock:
+                self.universe_status[v] = dict(
+                    ts=now(), count=0, error="Toplu funding uç noktası yok"
+                )
             return {}
         markets = {}
         for m in ex.markets.values():
@@ -302,8 +328,12 @@ class WideMarkets:
             if old is None or (m["quote"] == "USDT" and old["quote"] != "USDT"):
                 markets[m["base"]] = m
         try:
-            rates = ex.fetch_funding_rates()
-        except Exception:
+            rates = bulk_funding_rates(ex)
+        except Exception as e:
+            with self.lock:
+                self.universe_status[v] = dict(
+                    ts=now(), count=0, error="Toplu funding: " + public_error(e)
+                )
             return {}
         periods = {}
         if ex.has.get("fetchFundingIntervals"):
@@ -316,6 +346,7 @@ class WideMarkets:
         )
         received = now()
         out = {}
+        no_interval = 0
         for a, m in markets.items():
             r = rates.get(m["symbol"])
             if not r:
@@ -325,6 +356,8 @@ class WideMarkets:
             )
             raw = finite(r.get("fundingRate"))
             nxt = finite(r.get("nextFundingTimestamp") or r.get("fundingTimestamp"))
+            if raw is not None and not interval:
+                no_interval += 1
             if raw is None or not interval:
                 continue
             if nxt and nxt / 1000 < received - interval:
@@ -344,6 +377,21 @@ class WideMarkets:
             )
         with self.lock:
             self.universe[v] = out
+            self.universe_status[v] = dict(
+                ts=received,
+                count=len(out),
+                listed=len(markets),
+                no_interval=no_interval,
+                error=(
+                    None
+                    if out
+                    else (
+                        "Funding aralığı kaynakta yok (%d piyasa)" % no_interval
+                        if no_interval
+                        else "Toplu funding cevabında lineer perp yok"
+                    )
+                ),
+            )
         return rates
 
     def scan_one(self, v):
@@ -621,7 +669,9 @@ class WideMarkets:
     def start(self):
         if self.thread:
             return
-        semaphore = threading.BoundedSemaphore(5)
+        # Each venue has its own host and rate limiter; five at a time left a full
+        # round over ~25 adapters longer than the matrix keeps a scan fresh.
+        semaphore = threading.BoundedSemaphore(SCAN_PARALLEL)
         self.threads = []
         self.thread = True
 
@@ -642,19 +692,23 @@ class WideMarkets:
                 self.threads.append(thread)
                 thread.start()
 
-    def snapshot(self):
+    def snapshot(self, max_age=180):
         with self.lock:
             return [
                 dict(r)
                 for rs in self.rows.values()
                 for r in rs
-                if now() - r["received"] <= 180
+                if now() - r["received"] <= max_age
             ], {v: dict(s) for v, s in self.status.items()}
 
-    def universe_snapshot(self):
+    def universe_snapshot(self, max_age=300):
         with self.lock:
             return {
-                v: {a: dict(x) for a, x in rows.items() if now() - x["received"] <= 300}
+                v: {
+                    a: dict(x)
+                    for a, x in rows.items()
+                    if now() - x["received"] <= max_age
+                }
                 for v, rows in self.universe.items()
             }
 
@@ -673,6 +727,8 @@ class WideMarkets:
                     ),
                     None,
                 )
+                if not row and kind == "perp":
+                    row = self.universe.get(v, {}).get(a)
             if not row:
                 raise ValueError(v + ": seçili piyasanın güncel verisi yok")
             if not ex.has.get("fetchOHLCV"):
@@ -765,6 +821,42 @@ class WideMarkets:
                     break
                 cursor = nxt
             return prices
+
+    def current_funding(self, v, a):
+        """One market's funding read now (for the paper desk's entry check on assets
+        that only the bulk scan covers)."""
+        with self.client_locks[v]:
+            ex = self.client(v)
+            ex.neutralbasis_live = True
+            with self.lock:
+                row = next(
+                    (
+                        r
+                        for r in self.rows.get(v, [])
+                        if r["asset"] == a and r["kind"] == "perp"
+                    ),
+                    None,
+                ) or self.universe.get(v, {}).get(a)
+            if not row:
+                raise ValueError(v + ": seçili piyasanın güncel verisi yok")
+            m = ex.markets.get(row["symbol"], {})
+            if ex.has.get("fetchFundingRate"):
+                r = ex.fetch_funding_rate(row["symbol"])
+            else:
+                r = bulk_funding_rates(ex).get(row["symbol"]) or {}
+            received = now()
+            interval = funding_interval(r, m, row.get("interval"))
+            raw = finite(r.get("fundingRate"))
+            if raw is None or not interval:
+                raise ValueError(v + ": güncel funding okunamadı")
+            nxt = finite(r.get("nextFundingTimestamp") or r.get("fundingTimestamp"))
+            return dict(
+                raw_rate=raw,
+                rate=raw / (interval / 3600),
+                interval=interval,
+                next=nxt / 1000 if nxt else None,
+                funding_received=received,
+            )
 
     def funding_since(self, v, a, start):
         """Realized per-interval funding rates after start; used to settle paper legs."""

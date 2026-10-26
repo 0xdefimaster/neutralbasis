@@ -92,6 +92,81 @@ class UniverseTests(unittest.TestCase):
         self.assertEqual(self.wide.scan_universe("Bybit", ex), {})
         self.assertEqual(ex.calls, 0)
 
+    def test_outcome_is_recorded_per_venue(self):
+        self.wide.scan_universe("Binance", FakeExchange())
+        st = self.wide.universe_status["Binance"]
+        self.assertEqual((st["count"], st["error"]), (2, None))
+
+        class Failing(FakeExchange):
+            def fetch_funding_rates(self):
+                raise ValueError("403 Forbidden")
+
+        self.wide.scan_universe("OKX", Failing())
+        self.assertIn("403 Forbidden", self.wide.universe_status["OKX"]["error"])
+
+        class NoInterval(FakeExchange):
+            def fetch_funding_rates(self):
+                return {"BTC/USDT:USDT": dict(fundingRate=0.0001)}
+
+        self.wide.scan_universe("Gate", NoInterval())
+        self.assertIn("aralığı", self.wide.universe_status["Gate"]["error"])
+        ex = FakeExchange()
+        ex.has = {}
+        self.wide.scan_universe("MEXC", ex)
+        self.assertIn("uç noktası yok", self.wide.universe_status["MEXC"]["error"])
+
+    def test_htx_uses_the_linear_batch_endpoint(self):
+        import ccxt
+
+        ex = ccxt.htx()
+        ex.set_markets(
+            [
+                dict(
+                    id="BTC-USDT",
+                    symbol="BTC/USDT:USDT",
+                    base="BTC",
+                    quote="USDT",
+                    settle="USDT",
+                    baseId="BTC",
+                    quoteId="USDT",
+                    settleId="USDT",
+                    type="swap",
+                    spot=False,
+                    margin=False,
+                    swap=True,
+                    future=False,
+                    option=False,
+                    active=True,
+                    contract=True,
+                    linear=True,
+                    inverse=False,
+                    contractSize=1,
+                    precision={},
+                    limits={},
+                )
+            ]
+        )
+        asked = []
+
+        def request(path, api, method="GET", *args, **kwargs):
+            asked.append((path, api))
+            item = dict(
+                contract_code="BTC-USDT",
+                funding_rate="0.0001",
+                funding_time=str((T0 - 3600) * 1000),
+                next_funding_time=str((T0 + 7 * 3600) * 1000),
+            )
+            return {"status": "ok", "data": [item]}
+
+        ex.request = request
+        ex.fetch_tickers = lambda *a, **k: {}
+        ex.fetch_open_interests = lambda *a, **k: {}
+        self.wide.scan_universe("HTX", ex)
+        self.assertEqual(asked[0][0], "linear-swap-api/v1/swap_batch_funding_rate")
+        u = self.wide.universe["HTX"]["BTC"]
+        self.assertEqual(u["interval"], 8 * 3600)
+        self.assertAlmostEqual(u["rate"], 0.0001 / 8)
+
     def test_stale_universe_is_hidden(self):
         self.wide.scan_universe("Binance", FakeExchange())
         with mock.patch.object(wide_markets, "now", lambda: T0 + 301):
@@ -214,6 +289,39 @@ class MatrixTests(unittest.TestCase):
             at=T0,
         )
         self.assertEqual(top_pairs(m), [("A", "X", 3600), ("B", "X", 3600)])
+
+
+class CoverageTests(unittest.TestCase):
+    def test_reasons_for_missing_or_limited_venues(self):
+        matrix = dict(
+            venues=[dict(id="Binance", assets=700), dict(id="MEXC", assets=15)]
+        )
+        status = {
+            "Binance": dict(ok=True, ts=T0),
+            "MEXC": dict(ok=True, ts=T0),
+            "OKX": dict(ok=False, ts=T0, message="NetworkError: blocked"),
+            "Gate": dict(ok=True, ts=T0 - 1200),
+        }
+        ustatus = {
+            "Binance": dict(ts=T0, count=700, error=None),
+            "MEXC": dict(ts=T0, count=0, error="Toplu funding uç noktası yok"),
+            "Gate": dict(ts=T0 - 1200, count=500, error=None),
+        }
+        out = funding_matrix.coverage(
+            matrix,
+            ["Binance", "MEXC", "OKX", "Gate", "Nado"],
+            status,
+            ustatus,
+            {},
+            {},
+            T0,
+        )
+        reasons = {x["id"]: x["reason"] for x in out}
+        self.assertNotIn("Binance", reasons)
+        self.assertIn("yalnız seçili", reasons["MEXC"])
+        self.assertIn("blocked", reasons["OKX"])
+        self.assertIn("20 dk", reasons["Gate"])
+        self.assertIn("bekleniyor", reasons["Nado"])
 
 
 class FundingSumsTests(unittest.TestCase):

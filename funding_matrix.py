@@ -10,7 +10,9 @@ from bot import now
 from risk_scan import VENUES
 
 CACHE_SECONDS = 60
-FRESH_SECONDS = 300
+# Funding moves slowly; a venue stays in the matrix for a few scan rounds so a slow
+# round (25 venues, rate limits) does not drop it. Paper entries refresh on their own.
+FRESH_SECONDS = 900
 WEEK = 7 * 86400
 MAX_PRICE_GAP = 0.15
 
@@ -133,6 +135,43 @@ def build(native, rows, universe, sums, kinds, labels, at=None):
     return dict(ts=at, venues=venues, assets=assets)
 
 
+def coverage(matrix, adapters, status, universe_status, labels, kinds, at=None):
+    """Why each scanned venue is missing from the matrix or limited to a few assets."""
+    at = at or now()
+    shown = {v["id"]: v["assets"] for v in matrix["venues"]}
+    out = []
+    for v in adapters:
+        st = status.get(v) or {}
+        us = universe_status.get(v) or {}
+        if not st and not us:
+            reason = "İlk tarama bekleniyor"
+        elif not st.get("ok", True) and not us.get("count"):
+            reason = st.get("message") or "Bağlantı hatası"
+        elif us.get("error"):
+            reason = us["error"] + (
+                "; yalnız seçili varlıklar" if st.get("ok") and shown.get(v) else ""
+            )
+        elif v not in shown:
+            last = max(st.get("ts") or 0, us.get("ts") or 0)
+            reason = (
+                "Son başarılı tarama %d dk önce" % ((at - last) // 60)
+                if last
+                else "Veri yok"
+            )
+        else:
+            continue
+        out.append(
+            dict(
+                id=v,
+                label=labels.get(v, v),
+                kind=kinds.get(v, "DEX"),
+                assets=shown.get(v, 0),
+                reason=reason,
+            )
+        )
+    return out
+
+
 def top_pairs(matrix, limit=40):
     """(asset, venue) markets of the widest spreads, for the history keeper's funding sync."""
     out = []
@@ -208,10 +247,16 @@ class MatrixCache:
                         received=m.get("received"),
                     )
                 )
-        rows, _ = e.wide.snapshot()
+        rows, status = e.wide.snapshot(FRESH_SECONDS)
         sums = e.history.db.funding_sums(now() - WEEK)
         kinds = {v: c["kind"] for v, c in CATALOG.items()}
-        m = build(native, rows, e.wide.universe_snapshot(), sums, kinds, LABELS)
+        m = build(
+            native, rows, e.wide.universe_snapshot(FRESH_SECONDS), sums, kinds, LABELS
+        )
+        with e.wide.lock:
+            ustatus = {v: dict(x) for v, x in e.wide.universe_status.items()}
+        adapters = [v for v, c in CATALOG.items() if c["adapter"]]
+        m["coverage"] = coverage(m, adapters, status, ustatus, LABELS, kinds)
         state, m["listings"] = track_listings(e.store.get("matrix_listings", {}), m)
         e.store.put("matrix_listings", state)
         return m

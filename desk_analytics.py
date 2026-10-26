@@ -352,13 +352,32 @@ class DeskHistorySource:
                 continue
             seen.add(key)
             out.append(key + (interval, "trade"))
-        # Candidate legs go first so missing history is filled where it can lead to a trade.
-        rank = {k: i for i, k in enumerate(self.priority())}
+        # Paper candidate legs outside the lists above (any asset) are added, and all
+        # candidate legs go first so missing history is filled where it can lead to a trade.
+        priority = self.priority()
+        rows_by = {(r["venue"], r["asset"]): r for r in rows if r["kind"] == "perp"}
+        universe = e.wide.universe_snapshot()
+        for key in priority:
+            if key in seen:
+                continue
+            v, a, kind = key
+            if v in VENUES:
+                if a in e.cfg["symbols"] or not e.feed.meta.get(v, {}).get(a):
+                    continue
+                interval = e.feed.meta[v][a].get("interval") or 3600
+                ptype = e.feed.meta[v][a].get("price_type", "trade")
+            else:
+                x = rows_by.get((v, a)) or universe.get(v, {}).get(a)
+                if not x:
+                    continue
+                interval, ptype = x.get("interval"), "trade"
+            seen.add(key)
+            out.append(key + (interval, ptype))
+        rank = {k: i for i, k in enumerate(priority)}
         return sorted(out, key=lambda m: rank.get(m[:3], len(rank)))
 
     def candles(self, v, a, kind, start, end):
-        if a not in self.engine.cfg["symbols"]:
-            return {}
+        # Every listed market gets candles: the paper desk evaluates all assets.
         if v in VENUES:
             return self.engine.feed.candles_range(v, a, start, end)["prices"]
         return self.engine.wide.candles_since(v, a, kind, start, end)

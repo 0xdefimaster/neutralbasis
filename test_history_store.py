@@ -159,5 +159,39 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(list(db.candles("X", "BTC")), [bot.hour(T0) - 3600])
 
 
+class DeskSourceTests(unittest.TestCase):
+    def engine(self):
+        class Wide:
+            def snapshot(self, max_age=180):
+                return [], {}
+
+            def universe_snapshot(self, max_age=300):
+                return {"Bybit": {"IRYS": dict(interval=14400)}}
+
+            def candles_since(self, v, a, kind, start, end):
+                return {start: 1.0}
+
+        class Matrix:
+            def get(self):
+                raise ValueError("not yet")
+
+        e = type("E", (), {})()
+        e.cfg = {"symbols": ["BTC"]}
+        e.feed = type("F", (), {"meta": {}})()
+        e.wide = Wide()
+        e.matrix = Matrix()
+        e.wide_paper = type(
+            "W", (), {"history_needs": lambda self: [("Bybit", "IRYS"), ("Gone", "X")]}
+        )()
+        return e
+
+    def test_paper_candidate_legs_of_any_asset_get_price_history_first(self):
+        from desk_analytics import DeskHistorySource
+
+        src = DeskHistorySource(self.engine())
+        self.assertEqual(src.markets(), [("Bybit", "IRYS", "perp", 14400, "trade")])
+        self.assertEqual(src.candles("Bybit", "IRYS", "perp", 3600, 7200), {3600: 1.0})
+
+
 if __name__ == "__main__":
     unittest.main()
