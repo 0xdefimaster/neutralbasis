@@ -148,3 +148,6 @@ Desteklenmeyenler:
 - Puan/airdrop rozeti.
 - KYC kontrolü.
 - MEXC. Toplu funding yok, bu yüzden seçili varlıklar dışındaki MEXC çiftleri görünmez.
+
+## Borsa başı teminat
+Çoklu paper masası, sıfırlamada "Borsa başı" seçilirse hesap borsalarının (Lighter, Extended, Hyperliquid, TxFlow, RISEx, Arcus) her birine ayrı teminat verir (varsayılan $1000). Yalnızca bu borsalar arasında işlem açılır. Her bacağın marjini, ücreti, funding'i ve fiyat PnL'si kendi borsasının teminatına yazılır. Büyüklük teminatı az olan borsaya göre küçülür. Bir borsanın özsermayesi marjininin yarısına inerse pozisyon "Borsa teminatı riski" ile kapanır. Borsalar arası transfer modellenmez ve yapılmaz. TxFlow, RISEx ve Arcus'un çoklu paper veri adaptörü henüz yok; tabloda "veri yok" görünürler ve işlem açmazlar. Gerçek hesap aşamaları: CANLI-HESAP-PLANI.md.

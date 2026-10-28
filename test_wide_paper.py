@@ -724,6 +724,92 @@ class WidePaperTests(unittest.TestCase):
             self.store.get("wide_epochs", [])[0]["closed"][0]["asset"], "ERA"
         )
 
+    # --- per-venue collateral ------------------------------------------------
+    def setup_account_pair(self):
+        """Hyperliquid long, Extended short: both are account venues."""
+        self.setup_pair()
+        self.src.rows = [
+            dict(r, venue="Extended") if r["venue"] == "Binance" else r
+            for r in self.src.rows
+        ]
+        for d in (self.src.books, self.src.history, self.src.rates):
+            if ("Binance", "BTC") in d:
+                d[("Extended", "BTC")] = d.pop(("Binance", "BTC"))
+
+    def test_per_venue_reset_gives_each_account_its_own_collateral(self):
+        self.desk.reset(venue_capital=1000)
+        venues = self.desk.wallet["venues"]
+        self.assertEqual(set(venues), set(wide_paper.ACCOUNT_VENUES))
+        self.assertTrue(all(x == 1000 for x in venues.values()))
+        self.assertEqual(self.desk.wallet["cash"], 6000)
+        self.assertEqual(self.desk.cfg["wide_capital"], 6000)
+        with self.assertRaisesRegex(ValueError, "Borsa başı"):
+            self.desk.update_config({"wide_capital": 9000})
+        again = WidePaper(self.store, self.src, sleep=lambda s: None)
+        self.assertEqual(again.wallet["venues"], venues)
+
+    def test_per_venue_trades_only_between_account_venues(self):
+        self.setup_pair()  # Hyperliquid / Binance: Binance holds no account
+        self.desk.reset(venue_capital=1000)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertTrue(
+            all("Binance" not in (c["long"], c["short"]) for c in self.desk.candidates)
+        )
+
+    def test_per_venue_charges_each_leg_to_its_own_venue(self):
+        self.setup_account_pair()
+        self.desk.reset(venue_capital=1000)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        p = self.desk.positions[0]
+        venues = self.desk.wallet["venues"]
+        for leg in p["legs"]:
+            self.assertAlmostEqual(venues[leg["venue"]], 1000 - leg["entry_fee"])
+            # Margin and fee fit inside the venue's own collateral after the reserve.
+            self.assertLessEqual(
+                leg["margin"] + leg["entry_fee"],
+                1000 * (1 - self.desk.cfg["wide_reserve"]) + 1e-6,
+            )
+        self.assertAlmostEqual(self.desk.wallet["cash"], sum(venues.values()))
+        self.assertEqual(venues["Lighter"], 1000)
+        b = {x["venue"]: x for x in self.desk.snapshot()["venue_balances"]}
+        self.assertTrue(b["Extended"]["data"])
+        self.assertFalse(b["TxFlow"]["data"])
+
+    def test_per_venue_size_follows_the_smaller_venue(self):
+        self.setup_account_pair()
+        self.desk.reset(venue_capital=1000)
+        self.desk.wallet["venues"]["Extended"] = 100.0
+        self.desk.cfg.update(
+            wide_risk=1000.0, wide_daily_loss=10000.0, wide_min_net=0.1
+        )
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        short = next(l for l in self.desk.positions[0]["legs"] if l["side"] == "short")
+        self.assertLessEqual(
+            short["margin"] + short["entry_fee"],
+            100 * (1 - self.desk.cfg["wide_reserve"]) + 1e-6,
+        )
+
+    def test_venue_collateral_is_not_covered_by_the_other_venue(self):
+        self.setup_account_pair()
+        self.desk.reset(venue_capital=1000)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        short = next(l for l in self.desk.positions[0]["legs"] if l["side"] == "short")
+        # Extended's account runs thin while Hyperliquid stays rich.
+        self.desk.wallet["venues"]["Extended"] = short["margin"] * 0.4
+        self.clock = T0 + 60
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        for v in ("Hyperliquid", "Extended"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(
+            self.desk.closed[0]["close_reason"], "Borsa teminatı riski: Extended"
+        )
+
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
 

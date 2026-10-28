@@ -14,6 +14,9 @@ from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIE
 
 # Native venues whose taker fee is configured; the rest come from the CCXT scanner.
 NATIVE = ("Lighter", "Extended")
+# Venues the user holds accounts on. In per-venue mode each one has its own paper
+# collateral, as a real account would: a leg is margined only by its own venue.
+ACCOUNT_VENUES = ("Lighter", "Extended", "Hyperliquid", "TxFlow", "RISEx", "Arcus")
 WIDE_DEFAULTS = dict(
     wide_enabled=True,
     wide_capital=10000.0,
@@ -570,27 +573,57 @@ class WidePaper:
     def events(self, kind, message, **kwargs):
         self.store.event("WIDE_" + kind, dict(message=message, **kwargs))
 
-    def balance(self):
-        pnl = sum(
-            leg.get("price_pnl", 0)
-            for p in self.positions
-            for leg in p["legs"]
-            if not leg["closed"]
-        )
-        margin = sum(
-            leg["margin"]
-            for p in self.positions
-            for leg in p["legs"]
-            if not leg["closed"]
-        )
-        equity = self.wallet["cash"] + pnl
-        return dict(
-            cash=self.wallet["cash"], equity=equity, margin=margin, free=equity - margin
-        )
+    def per_venue(self):
+        """Each account venue holds its own collateral (set by a reset)."""
+        return "venues" in self.wallet
 
-    def headroom(self):
-        b = self.balance()
+    def credit(self, venue, amount):
+        self.wallet["cash"] += amount
+        if self.per_venue():
+            self.wallet["venues"][venue] = (
+                self.wallet["venues"].get(venue, 0.0) + amount
+            )
+
+    def balance(self, venue=None):
+        legs = [
+            leg
+            for p in self.positions
+            for leg in p["legs"]
+            if not leg["closed"] and (venue is None or leg["venue"] == venue)
+        ]
+        pnl = sum(leg.get("price_pnl", 0) for leg in legs)
+        margin = sum(leg["margin"] for leg in legs)
+        cash = (
+            self.wallet["cash"]
+            if venue is None
+            else self.wallet.get("venues", {}).get(venue, 0.0)
+        )
+        equity = cash + pnl
+        return dict(cash=cash, equity=equity, margin=margin, free=equity - margin)
+
+    def headroom(self, venue=None):
+        """Free collateral after the reserve; per venue in per-venue mode, where a
+        venue outside the account list has none."""
+        if venue is not None and not self.per_venue():
+            venue = None
+        if venue is not None and venue not in self.wallet["venues"]:
+            return 0.0
+        b = self.balance(venue)
         return max(0, b["free"] - max(0, b["equity"]) * self.cfg["wide_reserve"])
+
+    def venue_balances(self):
+        if not self.per_venue():
+            return []
+        live = {v for v, a in self.rows}
+        return [
+            dict(
+                venue=v,
+                **self.balance(v),
+                headroom=self.headroom(v),
+                data=v in live,
+            )
+            for v in self.wallet["venues"]
+        ]
 
     def daily_pnl(self):
         day = (
@@ -623,6 +656,10 @@ class WidePaper:
                 raise ValueError(k + " sınır dışında")
             fresh[k] = int(n) if isinstance(WIDE_DEFAULTS[k], int) else n
         if fresh["wide_capital"] != self.cfg["wide_capital"]:
+            if self.per_venue():
+                raise ValueError(
+                    "Borsa başı teminat yalnızca Arşivle ve sıfırla ile değişir"
+                )
             if self.traded():
                 raise ValueError(
                     "Çoklu borsa sermayesi işlem kayıtlarından sonra değiştirilemez"
@@ -633,13 +670,24 @@ class WidePaper:
         self.persist()
         self.events("CONFIG", "Çoklu borsa paper ayarları güncellendi")
 
-    def reset(self, capital=None):
+    def reset(self, capital=None, venue_capital=None, venues=ACCOUNT_VENUES):
         """Start a new paper period: archive closed trades and their results, then begin
-        again from fresh capital. Results of different capitals are never mixed."""
+        again from fresh capital. Results of different capitals are never mixed. With
+        venue_capital every account venue starts with that much of its own collateral.
+        """
         if self.positions:
             raise ValueError("Açık pozisyonlar kapanmadan paper sıfırlanamaz")
-        capital = WIDE_DEFAULTS["wide_capital"] if capital is None else number(capital)
         lo, hi = LIMITS["wide_capital"]
+        if venue_capital is not None:
+            venue_capital = number(venue_capital)
+            venues = list(dict.fromkeys(venues))
+            if not venues or not lo <= venue_capital <= hi:
+                raise ValueError("Borsa başı teminat sınır dışında")
+            capital = venue_capital * len(venues)
+        else:
+            capital = (
+                WIDE_DEFAULTS["wide_capital"] if capital is None else number(capital)
+            )
         if not lo <= capital <= hi:
             raise ValueError("wide_capital sınır dışında")
         trades = [p for p in self.closed if p.get("legs")]
@@ -650,6 +698,7 @@ class WidePaper:
                 ended=now(),
                 capital=self.cfg["wide_capital"],
                 cash=self.wallet["cash"],
+                venues=self.wallet.get("venues"),
                 trades=len(trades),
                 net=sum(p.get("net", 0) for p in trades),
                 report=self.report(),
@@ -661,12 +710,15 @@ class WidePaper:
         self.closed = []
         self.cfg["wide_capital"] = capital
         self.wallet = {"cash": capital}
+        if venue_capital is not None:
+            self.wallet["venues"] = {v: venue_capital for v in venues}
         self.store.put("wide_daily", {})
         self.persist()
         self.events(
             "RESET",
             "Paper yeni dönemle sıfırlandı; önceki dönem arşivlendi",
             capital=capital,
+            venue_capital=venue_capital,
             archived=len(trades),
         )
 
@@ -766,10 +818,19 @@ class WidePaper:
             raise ValueError("Günlük kayıp limiti doldu")
         budget = self.risk_budget()
         # Margin plus entry fee of both legs per $1 notional, at the worst accepted fill.
-        per_dollar = (1 + FILL_TOLERANCE) * (2 / leverage + fee_l + fee_s)
+        # In per-venue mode each leg is funded by its own venue's free collateral.
+        if self.per_venue():
+            room = min(
+                self.headroom(v) / ((1 + FILL_TOLERANCE) * (1 / leverage + f))
+                for v, f in ((lv, fee_l), (sv, fee_s))
+            )
+        else:
+            room = self.headroom() / (
+                (1 + FILL_TOLERANCE) * (2 / leverage + fee_l + fee_s)
+            )
         notional = min(
             size,
-            self.headroom() / per_dollar,
+            room,
             budget / max(stress + c["fee_roundtrip"] + 4 * extra, 1e-4),
         )
         price = (mid[lv] + mid[sv]) / 2
@@ -1141,7 +1202,7 @@ class WidePaper:
                 fee_rate = c["fee_long"] if side == "long" else c["fee_short"]
                 fee = c["qty"] * px * fee_rate
                 margin = c["qty"] * px / c["leverage"]
-                if margin + fee > self.headroom():
+                if margin + fee > self.headroom(venue):
                     raise ValueError("Dolum öncesi marjin rezervi yetersiz")
                 interval = c["interval_long"] if side == "long" else c["interval_short"]
                 nxt = c["next_long"] if side == "long" else c["next_short"]
@@ -1165,7 +1226,7 @@ class WidePaper:
                 )
                 p["legs"].append(leg)
                 p["fees"] += fee
-                self.wallet["cash"] -= fee
+                self.credit(venue, -fee)
                 self.persist()
                 self.events("FILL", "Sanal bacak doldu", position=p["id"], leg=leg)
             p["status"] = "OPEN"
@@ -1250,7 +1311,7 @@ class WidePaper:
                     audit_id=r.get("audit_id"),
                 )
                 with self.store.lock:
-                    self.wallet["cash"] += cash
+                    self.credit(v, cash)
                     p["funding"] += cash
                     if estimated:
                         p["estimated_funding"] += cash
@@ -1360,7 +1421,7 @@ class WidePaper:
                     * (1 if leg["side"] == "long" else -1)
                 )
                 fee = leg["qty"] * px * leg["fee_rate"]
-                self.wallet["cash"] += pnl - fee
+                self.credit(leg["venue"], pnl - fee)
                 p["price_pnl"] += pnl
                 p["fees"] += fee
                 leg.update(
@@ -1413,6 +1474,12 @@ class WidePaper:
                 and -leg.get("price_pnl", 0) >= LEG_SAFETY * leg["margin"]
             ):
                 return "Bacak marjin riski: " + leg["venue"]
+        # A venue's account is liquidated on its own equity, whatever the other venue holds.
+        if self.per_venue():
+            for leg in p["legs"]:
+                b = self.balance(leg["venue"])
+                if not leg["closed"] and b["equity"] <= LEG_SAFETY * b["margin"]:
+                    return "Borsa teminatı riski: " + leg["venue"]
         held = now() - p["opened"]
         if p.get("strategy") == "convergence":
             mid = {
@@ -1572,13 +1639,19 @@ class WidePaper:
                     self.settle(p)
                     p["net"] = p["price_pnl"] + p["funding"] - p["fees"]
             at = now()
+            # Per-venue mode trades only where an account (and its collateral) exists.
+            ranked_rows = (
+                [r for r in rows if r["venue"] in self.wallet["venues"]]
+                if rows is not None and self.per_venue()
+                else rows
+            )
             self.candidates = (
-                rank(rows, self.cfg, at)
+                rank(ranked_rows, self.cfg, at)
                 if rows is not None and self.cfg["wide_funding_enabled"]
                 else []
             )
             self.conv_candidates = (
-                rank_spreads(rows, at)
+                rank_spreads(ranked_rows, at)
                 if rows is not None and self.cfg["wide_conv_enabled"]
                 else []
             )
@@ -1637,11 +1710,22 @@ class WidePaper:
                     if self.blocked(best):
                         continue
                     # Sized against the headroom before earlier entries this round.
-                    need = (1 + FILL_TOLERANCE) * (
-                        2 * best["size"] / best["leverage"] + best["entry_fee"]
-                    )
-                    if need > self.headroom():
-                        continue
+                    if self.per_venue():
+                        fees = (best["fee_long"], best["fee_short"])
+                        if any(
+                            (1 + FILL_TOLERANCE)
+                            * best["size"]
+                            * (1 / best["leverage"] + f)
+                            > self.headroom(v)
+                            for v, f in zip((best["long"], best["short"]), fees)
+                        ):
+                            continue
+                    else:
+                        need = (1 + FILL_TOLERANCE) * (
+                            2 * best["size"] / best["leverage"] + best["entry_fee"]
+                        )
+                        if need > self.headroom():
+                            continue
                     if self.worst_loss(best) > self.risk_budget() + 1e-6:
                         continue
                     stale = self.entry_funding_check(best)
@@ -1722,6 +1806,8 @@ class WidePaper:
         return dict(
             config=self.cfg,
             balance=self.balance(),
+            venue_balances=self.venue_balances(),
+            account_venues=list(ACCOUNT_VENUES),
             daily_pnl=self.daily_pnl(),
             positions=self.positions,
             closed=self.closed[-100:],
