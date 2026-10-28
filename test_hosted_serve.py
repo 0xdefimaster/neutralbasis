@@ -125,6 +125,31 @@ class BindGuardTests(unittest.TestCase):
             bot.serve(StubEngine(), free_port(), "0.0.0.0", None)
 
 
+class ServerErrorTests(unittest.TestCase):
+    def test_a_client_that_leaves_mid_response_is_not_logged(self):
+        import contextlib, http.server, io
+        import bot
+
+        server = bot.ExclusiveServer(
+            ("127.0.0.1", 0), http.server.BaseHTTPRequestHandler
+        )
+        try:
+            for error, logged in (
+                (ConnectionAbortedError(10053, "aborted"), False),
+                (BrokenPipeError(), False),
+                (ValueError("real bug"), True),
+            ):
+                out = io.StringIO()
+                with contextlib.redirect_stderr(out):
+                    try:
+                        raise error
+                    except Exception:
+                        server.handle_error(None, ("127.0.0.1", 1))
+                self.assertEqual(bool(out.getvalue()), logged, repr(error))
+        finally:
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

@@ -8,7 +8,8 @@ class KeepAwakeTests(unittest.TestCase):
         with mock.patch.object(risk_main.os, "name", "nt"), mock.patch(
             "ctypes.windll", create=True
         ) as w:
-            w.kernel32.SetThreadExecutionState.return_value = 0x80000000
+            # It returns the previous state, which may be zero.
+            w.kernel32.SetThreadExecutionState.return_value = 0
             self.assertTrue(risk_main.keep_awake())
             w.kernel32.SetThreadExecutionState.assert_called_once_with(0x80000001)
 

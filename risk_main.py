@@ -13,11 +13,9 @@ def keep_awake():
     import ctypes
 
     ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
-    return bool(
-        ctypes.windll.kernel32.SetThreadExecutionState(
-            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-        )
-    )
+    # The return value is the previous state, which may be zero; it is not a result.
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    return True
 
 
 if __name__ == "__main__":
