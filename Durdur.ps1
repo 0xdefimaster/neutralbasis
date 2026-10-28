@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $taskPidFile = Join-Path $PSScriptRoot 'data-five-rh\paper.pid'
 if (-not (Test-Path -LiteralPath $taskPidFile)) { Write-Output 'Kayıtlı motor yok.'; return }
 $taskBot = Join-Path $PSScriptRoot 'risk_main.py'

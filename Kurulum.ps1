@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $taskEnv=Join-Path $PSScriptRoot '.venv'
 if (Get-Command py -ErrorAction SilentlyContinue) { & py -3 -m venv $taskEnv } else { & python -m venv $taskEnv }
