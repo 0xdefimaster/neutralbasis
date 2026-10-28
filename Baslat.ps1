@@ -16,6 +16,12 @@ if (Test-Path -LiteralPath $taskPidFile) {
         Write-Output 'Paper motor zaten çalışıyor: http://127.0.0.1:8765'
         return
     }
+    # Açılış sırasında (ör. ilk veritabanı bakımı) panel henüz cevap vermez; ikinci motor başlatılmaz.
+    $taskStarting = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $taskOldPid) -ErrorAction SilentlyContinue
+    if ($taskStarting -and $taskStarting.CommandLine -like '*risk_main.py*') {
+        Write-Output 'Paper motor açılıyor; ikinci motor başlatılmadı.'
+        return
+    }
 }
 if (Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue) { throw '8765 portu başka bir işlem tarafından kullanılıyor. Yeni motor başlatılmadı.' }
 $taskProc = Start-Process -FilePath $taskPython -ArgumentList @('-u', ('"' + $taskBot + '"'), '--autostart') -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $taskData 'motor.log') -RedirectStandardError (Join-Path $taskData 'motor-error.log')

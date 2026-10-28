@@ -148,3 +148,12 @@ Desteklenmeyenler:
 - Puan/airdrop rozeti.
 - KYC kontrolü.
 - MEXC. Toplu funding yok, bu yüzden seçili varlıklar dışındaki MEXC çiftleri görünmez.
+
+## Borsa başı teminat
+Çoklu paper masası, sıfırlamada "Borsa başı" seçilirse işaretlenen hesap borsalarının her birine ayrı teminat verir (varsayılan 15 perp borsası: Lighter, Extended, Hyperliquid, TxFlow, RISEx, Arcus, Binance, Bybit, OKX, Bitget, Gate, Aster, Paradex, dYdX, GRVT; borsa başı $1000). Yalnızca bu borsalar arasında işlem açılır. Her bacağın marjini, ücreti, funding'i ve fiyat PnL'si kendi borsasının teminatına yazılır. Büyüklük teminatı az olan borsaya göre küçülür. Bir borsanın özsermayesi marjininin yarısına inerse pozisyon "Borsa teminatı riski" ile kapanır. Borsalar arası transfer modellenmez ve yapılmaz. TxFlow, RISEx ve Arcus'un çoklu paper veri adaptörü henüz yok; tabloda "veri yok" görünürler ve işlem açmazlar. Gerçek hesap aşamaları: CANLI-HESAP-PLANI.md.
+
+## Gerçeğe yakınlık: lot, gecikme, üç ek borsa
+TxFlow, RISEx ve Arcus çoklu paper masasına masanın kendi beslemesiyle bağlandı. Taker ücreti ya da funding geçmişi doğrulanmayan borsa işlem havuzuna girmez; gerekçe borsa tablosunda görünür. Emir miktarı iki bacağın adım büyüklüğüne aşağı yuvarlanır, asgari miktar ve tutar altındaki girişler reddedilir. Her bacağın dolum gecikmesi, ayarlanan taban ile o borsada ölçülen p90 defter isteği süresinden büyüğüdür.
+
+## Borsa başı ücret ve dönem raporu
+Ayarlar'da her borsa için kullanıcının kendi hesabındaki taker ücreti girilebilir; girilmeyen borsada public tarife kullanılır, ücreti bilinmeyen borsa işlem açmaz. Çoklu paper ekranındaki dönem raporu süreyi, kesintiyi, işlem sayısını, ücret sonrası neti, kazanç/kayıp oranını, en iyi 3 işlemin nete payını, girişlerin kapalı kaldığı süreyi, dönem içi ayar değişikliklerini ve borsa teminatı riski kapanışlarını eşikleriyle gösterir. Motor Windows'ta çalışırken uyku modunu engeller; OtomatikBaslat.cmd motoru oturum açılınca ve her 5 dakikada bir kontrol edip gerekirse yeniden başlatır. Adımlar: CANLI-HESAP-PLANI.md.

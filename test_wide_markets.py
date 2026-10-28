@@ -112,3 +112,27 @@ class WideTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrderRulesTests(unittest.TestCase):
+    def test_tick_size_rules_scale_with_contract_size(self):
+        import ccxt
+        from wide_markets import order_rules
+
+        ex = ccxt.hyperliquid()
+        m = dict(
+            contractSize=10,
+            precision=dict(amount=0.01),
+            limits=dict(amount=dict(min=0.1), cost=dict(min=5)),
+        )
+        self.assertEqual(order_rules(ex, m), dict(step=0.1, minimum=1.0, min_quote=5.0))
+        ex.precisionMode = ccxt.DECIMAL_PLACES
+        self.assertAlmostEqual(
+            order_rules(ex, dict(precision=dict(amount=3)))["step"], 0.001
+        )
+        # Unknown precision modes and missing limits are left unpublished.
+        ex.precisionMode = ccxt.SIGNIFICANT_DIGITS
+        self.assertEqual(
+            order_rules(ex, dict(precision=dict(amount=3))),
+            dict(step=None, minimum=None, min_quote=None),
+        )

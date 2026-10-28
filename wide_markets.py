@@ -126,6 +126,27 @@ def finite(x):
         return None
 
 
+def order_rules(ex, m):
+    """Size step, minimum amount (base units) and minimum cost of a CCXT market; book
+    sizes are scaled by contractSize, so the rules are too. Unpublished rules stay None.
+    """
+    size = finite(m.get("contractSize")) or 1.0
+    step = finite((m.get("precision") or {}).get("amount"))
+    if step is not None and ccxt is not None:
+        mode = getattr(ex, "precisionMode", None)
+        if mode == ccxt.DECIMAL_PLACES:
+            step = 10.0**-step
+        elif mode != ccxt.TICK_SIZE:
+            step = None
+    limits = m.get("limits") or {}
+    minimum = finite((limits.get("amount") or {}).get("min"))
+    return dict(
+        step=step * size if step else None,
+        minimum=minimum * size if minimum else None,
+        min_quote=finite((limits.get("cost") or {}).get("min")),
+    )
+
+
 def comparable_prices(first, second, at):
     return (
         first.get("price_type") != "last_trade"
@@ -371,6 +392,7 @@ class WideMarkets:
                 fee=finite(m.get("taker")),
                 mark=finite(r.get("markPrice")),
                 leverage=finite(m.get("limits", {}).get("leverage", {}).get("max")),
+                **order_rules(ex, m),
                 volume=quote_volume(ticks.get(m["symbol"])),
                 oi=interest_value(interest.get(m["symbol"]), r.get("markPrice")),
                 received=received,
@@ -582,6 +604,7 @@ class WideMarkets:
                             ),
                             volume=finite(t.get("quoteVolume")),
                             oi=oi,
+                            **order_rules(ex, m),
                             basis="CCXT normalized public funding / API payment interval",
                             audit_id=rate_audit,
                             execution=False,

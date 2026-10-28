@@ -1721,7 +1721,15 @@ def serve(engine, port, host="127.0.0.1", password=None):
                     elif self.path == "/api/wide_reset" and hasattr(
                         engine, "wide_paper"
                     ):
-                        engine.wide_paper.reset(body.get("capital"))
+                        engine.wide_paper.reset(
+                            body.get("capital"),
+                            body.get("venue_capital"),
+                            body.get("venues"),
+                        )
+                    elif self.path == "/api/wide_fees" and hasattr(
+                        engine, "wide_paper"
+                    ):
+                        engine.wide_paper.set_fees(body.get("fees") or {})
                     elif self.path == "/api/backtest" and hasattr(
                         engine, "request_backtest"
                     ):
