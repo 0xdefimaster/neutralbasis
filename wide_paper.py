@@ -1271,14 +1271,16 @@ class WidePaper:
                 max_hold,
             )
             raw = self.conservative_raw(c, at, required=False)
-            window = at + expected * 3600
+            # The gap may take until the maximum hold to close, and the funding is paid
+            # all that time: a cost is charged over the longest hold the exits allow.
+            window = at + max_hold * 3600
             rl = dict(interval=c["interval_long"], next=c["next_long"])
             rs = dict(interval=c["interval_short"], next=c["next_short"])
             funding = q["size"] * (
                 raw["short"] * payments_within(rs, at, window)
                 - raw["long"] * payments_within(rl, at, window)
             )
-            # Funding is not the thesis: a cost over the expected hold is charged, income is not credited.
+            # Funding is not the thesis: a cost is charged, income is not credited.
             funding_cost = min(0.0, funding)
             # Target: the pair's normal gap, the less favourable of the 7d and long-window
             # medians. It may be below zero when the short venue is usually the cheaper one.
@@ -1636,7 +1638,7 @@ class WidePaper:
         p["pending_funding"] = pending
 
     def mark_position(self, p, books):
-        unrealized = exit_fee = 0.0
+        unrealized = exit_fee = slippage = 0.0
         for leg in p["legs"]:
             if leg["closed"]:
                 continue
@@ -1645,6 +1647,8 @@ class WidePaper:
             px = walk(
                 b["asks" if buy else "bids"], leg["qty"], buy, self.extra_slippage
             )
+            mid = (max(x for x, q in b["bids"]) + min(x for x, q in b["asks"])) / 2
+            slippage += leg["qty"] * abs(px - mid)
             leg["price_pnl"] = (
                 leg["qty"] * (px - leg["entry"]) * (1 if leg["side"] == "long" else -1)
             )
@@ -1653,6 +1657,8 @@ class WidePaper:
             exit_fee += leg["qty"] * px * leg["fee_rate"]
         p["unrealized"] = unrealized - exit_fee
         p["price_pnl_open"] = unrealized
+        # What closing now costs: exit fees plus crossing both books from mid.
+        p["exit_cost"] = exit_fee + slippage
         p["net_if_closed"] = p["price_pnl"] + p["funding"] - p["fees"] + p["unrealized"]
         p["last_mark"] = now()
 
@@ -1793,7 +1799,10 @@ class WidePaper:
                 "raw_rate"
             ] * payments_within(l, now(), end)
             p["remaining_funding_fraction"] = ahead
-            flipped = ahead < 0
+            # Leaving costs the exit fees and spread now. A reversal that costs less than
+            # that over the horizon is cheaper to hold through; the loss limits above
+            # still close the position whenever they are hit.
+            flipped = ahead < 0 and -ahead * d["size"] > p.get("exit_cost", 0.0)
             weak = flipped or (
                 p["net_if_closed"] >= cfg["wide_min_net"]
                 and ahead * d["size"] < cfg["wide_min_net"]
