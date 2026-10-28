@@ -678,6 +678,8 @@ class WidePaper:
         self.conv_candidates = []
         self.rfq_review = []
         self.rejected = {}
+        # The latest decision per pair, kept past the cooldown for the pair pages.
+        self.decisions = {}
         self.review = dict(rounds=0, examined=0, eligible=0, skipped=0, reasons={})
         self.rows = {}
         self.last_cycle = None
@@ -1956,17 +1958,23 @@ class WidePaper:
                     self.note_review(x, at)
                 # Every qualifying pair is entered, best first, one per asset, while
                 # position slots and margin headroom last.
-                for best in sorted(
+                ready = sorted(
                     (x for x in self.assessed if x["eligible"]),
                     key=lambda x: -x["net"],
-                ):
+                )
+                for i, best in enumerate(ready):
                     # An earlier entry this round may have left a leg in recovery or
                     # used up the day's loss budget: check again before every entry.
                     halt = self.entry_halt()
                     if halt:
                         self.events("ENTRY_HALT", "Yeni girişler durduruldu: " + halt)
+                        for x in ready[i:]:
+                            self.decide(
+                                x, at, "skipped", ["Yeni girişler durdu: " + halt]
+                            )
                         break
                     if self.blocked(best):
+                        self.decide(best, at, "skipped", self.blocked(best))
                         continue
                     # Sized against the headroom before earlier entries this round.
                     if self.per_venue():
@@ -1978,14 +1986,21 @@ class WidePaper:
                             > self.headroom(v)
                             for v, f in zip((best["long"], best["short"]), fees)
                         ):
+                            self.decide(
+                                best, at, "skipped", ["Borsa teminatı yetersiz"]
+                            )
                             continue
                     else:
                         need = (1 + FILL_TOLERANCE) * (
                             2 * best["size"] / best["leverage"] + best["entry_fee"]
                         )
                         if need > self.headroom():
+                            self.decide(best, at, "skipped", ["Teminat yetersiz"])
                             continue
                     if self.worst_loss(best) > self.risk_budget() + 1e-6:
+                        self.decide(
+                            best, at, "skipped", ["Günün kalan kayıp bütçesi yetmiyor"]
+                        )
                         continue
                     stale = self.entry_funding_check(best)
                     if stale:
@@ -1993,6 +2008,7 @@ class WidePaper:
                         best["reasons"].append(stale)
                         self.review["eligible"] -= 1
                         self.reject(best, [stale], at)
+                        self.decide(best, at, "rejected")
                         self.events(
                             "ENTRY_SKIP",
                             stale,
@@ -2001,6 +2017,7 @@ class WidePaper:
                         )
                     else:
                         self.open(best)
+                        self.decide(best, at, "opened", [])
             self.last_cycle = now()
             self.record_run(self.last_cycle, entries and self.cfg["wide_enabled"])
             self.persist()
@@ -2178,6 +2195,101 @@ class WidePaper:
         r["eligible"] += bool(x["eligible"])
         if not x["eligible"]:
             self.reject(x, x["reasons"] or ["Bilinmeyen"], at)
+        self.decide(x, at, "eligible" if x["eligible"] else "rejected")
+
+    def decide(self, x, at, outcome, reasons=None):
+        """Keep the desk's latest word on a pair: eligible, rejected, skipped (eligible
+        but not entered) or opened, with the reasons and the expected net."""
+        if reasons is None:
+            reasons = x.get("reasons") or []
+        self.decisions[self.pair_key(x)] = dict(
+            at=at, outcome=outcome, reasons=list(reasons)[:4], net=x.get("net")
+        )
+        if len(self.decisions) > 5000:
+            for k in sorted(self.decisions, key=lambda k: self.decisions[k]["at"])[
+                :1000
+            ]:
+                del self.decisions[k]
+
+    def verdict(self, asset, a, b):
+        """What the desk did with one asset on two venues, per strategy: data for each
+        leg, the candidate rank, the latest decision and when a rejected pair returns.
+        """
+        venues = {a, b}
+
+        def same(x):
+            return x.get("asset") == asset and {x.get("long"), x.get("short")} == venues
+
+        at = now()
+        legs = {}
+        for v in (a, b):
+            r = self.rows.get((v, asset))
+            if self.per_venue() and v not in self.wallet["venues"]:
+                legs[v] = "hesap listesinde değil"
+            elif not r:
+                legs[v] = "piyasa verisi yok"
+            elif r.get("fee") is None:
+                legs[v] = "taker ücreti bilinmiyor"
+            elif not r.get("interval") or r.get("raw_rate") is None:
+                legs[v] = "funding oranı/aralığı yok"
+            elif at - r["received"] > ROW_MAX_AGE:
+                legs[v] = "veri eski"
+            elif r.get("rfq"):
+                legs[v] = "RFQ piyasası"
+            else:
+                legs[v] = None
+        out = dict(
+            legs=legs,
+            positions=[
+                dict(
+                    strategy=p.get("strategy", "funding"),
+                    long=next(
+                        (l["venue"] for l in p["legs"] if l["side"] == "long"), None
+                    ),
+                    short=next(
+                        (l["venue"] for l in p["legs"] if l["side"] == "short"), None
+                    ),
+                    opened=p.get("opened"),
+                    net_if_closed=p.get("net_if_closed"),
+                    entry_reason=p.get("entry_reason"),
+                )
+                for p in self.positions
+                if p["asset"] == asset
+            ],
+            trades=[x for x in self.trade_log() if same(x)][:5],
+            strategies=[],
+        )
+        for key, ranked, flag in (
+            ("funding", self.candidates, "wide_funding_enabled"),
+            ("convergence", self.conv_candidates, "wide_conv_enabled"),
+        ):
+            c = next((x for x in ranked if same(x)), None)
+            d = next(
+                (
+                    dict(v, long=k[2], short=k[3])
+                    for k, v in self.decisions.items()
+                    if k[0] == key and k[1] == asset and {k[2], k[3]} == venues
+                ),
+                None,
+            )
+            wait = next(
+                (x for x in self.rejected.values() if x["strategy"] == key and same(x)),
+                None,
+            )
+            out["strategies"].append(
+                dict(
+                    strategy=key,
+                    enabled=bool(self.cfg[flag]),
+                    rank=c["rank"] if c else None,
+                    candidates=len(ranked),
+                    score=c["score"] if c else None,
+                    long=(c or d or {}).get("long"),
+                    short=(c or d or {}).get("short"),
+                    decision=d,
+                    retry_at=wait["until"] if wait else None,
+                )
+            )
+        return out
 
     def reject(self, x, reasons, at):
         groups = list(dict.fromkeys(reason_group(t) for t in reasons))

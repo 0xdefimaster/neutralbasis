@@ -334,6 +334,11 @@ class PairViews:
         )
         out["syncing"] = self.sync_state(asset)
         out["coverage"] = {v: self.coverage(asset, v, legs) for v in (long, short)}
+        wide = getattr(self.engine, "wide_paper", None)
+        try:
+            out["paper"] = wide.verdict(asset, long, short) if wide else None
+        except Exception:
+            out["paper"] = None
         return out
 
     def coverage(self, asset, v, legs):

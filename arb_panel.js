@@ -33,6 +33,23 @@ function apPairChart(d,size){const span=apSpans[ap.range],from=d.ts-span,pts=d.p
  const levels=[{value:0,label:'Sıfır',color:'#59635b'},...(w.mean!=null?[{value:w.mean*100,label:'Ortalama',color:'#d8b76c'}]:[]),...(d.price_gap!=null?[{value:d.price_gap*100,label:'Şimdi',color:'#8fb3ff'}]:[])];
  return pairChartSvg(pts.map(p=>({ts:p.ts,gap:p.gap*100})),['gap'],[name(d.short.venue)+' / '+name(d.long.venue)+' − 1'],['#a8c697'],[],levels,'%')}
 
+// The multi-venue paper desk's word on this asset on these two venues: why it opened or why not.
+function apPaper(pv){if(!pv)return '';const clock=t=>t?new Date(t*1000).toLocaleString('tr-TR',{timeZone:'Europe/Istanbul',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
+ const bad=Object.entries(pv.legs||{}).filter(([,r])=>r).map(([v,r])=>`${esc(name(v))}: ${esc(r)}`),label={funding:'Funding',convergence:'Yakınsama'};
+ const row=s=>{const d=s.decision,dir=s.long?`<div class="cell-sub">long ${esc(name(s.long))} · short ${esc(name(s.short))}</div>`:'';let st,text;
+  if(!s.enabled){st='Kapalı';text='Strateji Çoklu masa ayarlarında kapalı.'}
+  else if(bad.length){st='Aday değil';text=bad.join(' · ')}
+  else if(d?.outcome==='opened'){st='Açıldı';text=`${clock(d.at)} · beklenen net ${signedMoney(d.net)}`}
+  else if(d?.outcome==='eligible'){st='Uygun';text=`${clock(d.at)} · beklenen net ${signedMoney(d.net)}`}
+  else if(d?.outcome==='skipped'){st='Açılamadı';text=`${clock(d.at)} · uygun bulundu ama: ${esc(d.reasons.join(' · '))}`}
+  else if(d?.outcome==='rejected'){st='Elendi';text=`${clock(d.at)} · ${esc(d.reasons.join(' · '))}${s.retry_at?` · tekrar denenir ${clock(s.retry_at)}`:''}`}
+  else if(s.rank&&s.score>0){st='Sırada';text=`Aday sıralamasında ${s.rank}. / ${s.candidates} (ücret sonrası ${(s.score*10000).toFixed(1)} bp); her turda en iyi adaylar incelenir, sırası henüz gelmedi.`}
+  else if(s.rank){st='Aday değil';text=`Ücretler sonrası beklenti negatif (${(s.score*10000).toFixed(1)} bp); derin kontrole girmez.`}
+  else{st='Aday değil';text='Bu turda aday listesinde yok.'}
+  return `<tr><td><b>${label[s.strategy]}</b>${dir}</td><td><span class="tag ${['Açıldı','Uygun'].includes(st)?'':'warn'}">${st}</span></td><td style="white-space:normal">${text}</td></tr>`};
+ const open=(pv.positions||[]).map(p=>`<tr><td><b>Açık pozisyon</b><div class="cell-sub">${label[p.strategy]} · long ${esc(name(p.long))} · short ${esc(name(p.short))}</div></td><td class="${color(p.net_if_closed)}">${p.net_if_closed==null?'—':signedMoney(p.net_if_closed)}</td><td style="white-space:normal">${clock(p.opened)} açıldı · ${esc(p.entry_reason||'')}</td></tr>`).join('');
+ const done=(pv.trades||[]).map(x=>`<tr><td><b>Kapanan işlem</b><div class="cell-sub">${label[x.strategy]||''} · ${clock(x.opened)} → ${clock(x.closed_at)}</div></td><td class="${color(x.net)}">${signedMoney(x.net)}</td><td style="white-space:normal"><b>Açılış:</b> ${esc(x.entry_reason||'—')}<br><b>Kapanış:</b> ${esc(x.reason||'—')}</td></tr>`).join('');
+ return `<div class="card" style="margin-top:18px"><div class="card-head"><h2>Çoklu paper kararı <small class="muted">bu varlık, bu iki borsa</small></h2><a href="#multi">Çoklu paper →</a></div><div class="table-wrap"><table><tbody>${pv.strategies.map(row).join('')}${open}${done}</tbody></table></div></div>`}
 function pairScreen(){apLoad();const q=apParams(),a=q.get('asset')||'',lv=q.get('long')||'',sv=q.get('short')||'',d=ap.data;
  const title=`${esc(a)} · <span class="good">L</span> ${esc(name(lv))} / <span class="bad">S</span> ${esc(name(sv))}`;
  if(!d)return head(title,'Funding arbitrajı çift detayı')+`<div class="plot-empty">${ap.error?esc(ap.error)+` · <a href="${assetHash(a)}">${esc(a)} tüm borsalar →</a>`:'Çift verisi yükleniyor…'}</div>`;
@@ -89,7 +106,7 @@ function pairScreen(){apLoad();const q=apParams(),a=q.get('asset')||'',lv=q.get(
  const charts=`<div class="card"><div class="card-head"><h2>Fiyat ve funding</h2>${apSeg('chart',[['gap','Fiyat farkı'],['prices','Fiyatlar'],['funding','Funding']])}${apSeg('range',apWindows)}</div>${apPairChart(d,size)}${ap.chart==='gap'&&d.price_windows[ap.range].mean!=null?`<div class="filters" style="padding:0 16px 14px">${line('Şimdi',apGapPct(d.price_gap))}${line('Ortalama',apGapPct(d.price_windows[ap.range].mean))}${line('Aralık',apGapPct(d.price_windows[ap.range].low)+' … '+apGapPct(d.price_windows[ap.range].high))}${line('Daha geniş fark görülen süre',d.price_gap==null?'—':Math.round(d.price_points.filter(p=>p.ts>d.ts-apSpans[ap.range]&&p.gap>d.price_gap).length/Math.max(1,d.price_windows[ap.range].count)*100)+'%')}</div>`:''}</div>`;
  const every=`<div class="card"><div class="card-head"><h2>${esc(a)} tüm borsalarda funding</h2><a href="${assetHash(a)}">Varlık sayfası →</a></div><div class="table-wrap"><table><thead><tr><th>BORSA</th><th class="num">FUNDING / ${periodLabel()}</th><th>ARALIK</th><th></th></tr></thead><tbody>${others.map(o=>`<tr class="${[lv,sv].includes(o.venue)?'selected':''}"><td><b>${esc(o.label)}</b> <small class="muted">${o.kind}</small></td><td class="num mono ${color(o.rate)}">${rate(o.rate)}</td><td>${intervalLabel(o.interval)}</td><td class="num">${o.venue===lv||o.venue===sv?`<span class="tag">${o.venue===lv?'LONG':'SHORT'}</span>`:`<a href="${apHash(a,o.venue,o.venue===sv?lv:sv)}">long yap</a> · <a href="${apHash(a,o.venue===lv?sv:lv,o.venue)}">short yap</a>`}</td></tr>`).join('')}</tbody></table></div></div>`;
  const grid=x=>`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:18px;margin-top:18px">${x}</div>`;
- return head(title,`Funding arbitrajı çift detayı · veri ${new Date(d.ts*1000).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul'})} · public veri, tavsiye değildir`)+bar+legs+hold
+ return head(title,`Funding arbitrajı çift detayı · veri ${new Date(d.ts*1000).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul'})} · public veri, tavsiye değildir`)+bar+legs+apPaper(d.paper)+hold
   +grid(`${charts}<div class="card"><div class="card-head"><h2>Açmadan önce</h2><small class="muted">${nOk} tamam · ${nWatch} dikkat</small></div><div style="padding:8px 16px">${checks}</div></div>`)
   +grid(books+calc)+grid(every)}
 
