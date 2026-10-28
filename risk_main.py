@@ -3,6 +3,23 @@ from pathlib import Path
 import bot, retention
 from desk_analytics import DeskEngine as RiskEngine
 
+
+def keep_awake():
+    """On Windows, keep the machine from sleeping while the desk runs: a sleeping desk
+    stops watching its positions and the paper period gets a gap. The screen may still
+    turn off. Elsewhere this does nothing."""
+    if os.name != "nt":
+        return False
+    import ctypes
+
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+    return bool(
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        )
+    )
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     # Hosted deploys (Railway) configure through env; local defaults are unchanged.
@@ -34,6 +51,8 @@ if __name__ == "__main__":
         )
         print("Risk taraması kaydedildi:", d / "last-scan.json")
     else:
+        if keep_awake():
+            print("Uyku modu motor çalıştığı sürece engellendi.")
         bot.serve(
             engine, a.port, a.host, os.environ.get("NB_DASHBOARD_PASSWORD") or None
         )

@@ -115,6 +115,18 @@ UNIVERSE_MIN_USD = 1_000_000
 FUNDING_TTL = 120
 MIN_NOTIONAL = 10
 LATE_FUNDING_WINDOW = 7 * 86400
+# A cycle later than this after the previous one counts as downtime: the desk was not
+# watching, so the period's results exclude that time.
+DOWNTIME_GAP = 600
+# Thresholds the period report checks before results are trusted.
+PERIOD_CHECKS = dict(
+    days=30,
+    trades=40,
+    profit_factor=1.3,
+    top3_share=0.5,
+    downtime_share=0.05,
+    paused_share=0.05,
+)
 # Funding quotes older than this at entry are refreshed or the entry is skipped.
 ENTRY_FUNDING_MAX_AGE = 120
 
@@ -496,9 +508,10 @@ class EngineSource:
             try:
                 fee = e.fee(v)
             except ValueError as ex:
+                # Listed without a fee: ranking skips it until the user enters one.
+                fee = None
                 if e.feed.meta.get(v):
                     self.excluded[v] = str(ex)
-                continue
             for a, m in list(e.feed.meta.get(v, {}).items()):
                 if not m or m.get("rate") is None:
                     continue
@@ -602,6 +615,8 @@ class WidePaper:
         self.positions = store.get("wide_positions", [])
         self.closed = store.get("wide_closed", [])
         self.wallet = store.get("wide_wallet", {"cash": self.cfg["wide_capital"]})
+        # Taker fees the user read from their own account, by venue; public otherwise.
+        self.fees = store.get("wide_fees", {})
         if not self.traded():
             moved = {
                 k: WIDE_DEFAULTS[k]
@@ -685,20 +700,37 @@ class WidePaper:
     def venue_balances(self):
         if not self.per_venue():
             return []
-        live = {v for v, a in self.rows}
+        fees = {}
+        for (v, a), r in self.rows.items():
+            fees.setdefault(v, [])
+            if r.get("fee") is not None:
+                fees[v].append(r["fee"])
         excluded = getattr(self.source, "excluded", {})
-        return [
-            dict(
-                venue=v,
-                **self.balance(v),
-                headroom=self.headroom(v),
-                data=v in live,
-                reason=excluded.get(v),
-                latency_ms=round(self.latency(v) * 1000),
-                measured=len(self.rtt[v]),
+        out = []
+        for v in self.wallet["venues"]:
+            known = fees.get(v, [])
+            if known:
+                reason = None
+            elif v in fees:
+                reason = excluded.get(v) or "Taker ücreti bilinmiyor"
+            else:
+                reason = "Piyasa verisi yok"
+            out.append(
+                dict(
+                    venue=v,
+                    **self.balance(v),
+                    headroom=self.headroom(v),
+                    data=bool(known),
+                    reason=reason,
+                    fee=max(set(known), key=known.count) if known else None,
+                    fee_source=(
+                        "user" if v in self.fees else ("public" if known else None)
+                    ),
+                    latency_ms=round(self.latency(v) * 1000),
+                    measured=len(self.rtt[v]),
+                )
             )
-            for v in self.wallet["venues"]
-        ]
+        return out
 
     def daily_pnl(self):
         day = (
@@ -741,9 +773,56 @@ class WidePaper:
                 )
             self.wallet = {"cash": fresh["wide_capital"]}
             self.store.put("wide_daily", {})
+        changed = fresh != self.cfg
         self.cfg = fresh
         self.persist()
+        if changed:
+            self.note_change()
         self.events("CONFIG", "Çoklu borsa paper ayarları güncellendi")
+
+    def set_fees(self, changes):
+        """Taker fee per venue as a fraction (0.00045 = %0.045), read from the user's own
+        account page. None removes an entry and the public tariff applies again."""
+        choices = venue_choices()
+        fresh = dict(self.fees)
+        for v, fee in changes.items():
+            if v not in choices:
+                raise ValueError("Taranmayan borsa: " + str(v))
+            if fee is None:
+                fresh.pop(v, None)
+                continue
+            n = number(fee)
+            if not 0 <= n <= 0.01:
+                raise ValueError(v + " ücreti %0 ile %1 arasında olmalı")
+            fresh[v] = n
+        if fresh == self.fees:
+            return
+        self.fees = fresh
+        self.store.put("wide_fees", fresh)
+        self.note_change()
+        self.events("FEES", "Borsa ücretleri güncellendi", fees=fresh)
+
+    def with_fees(self, rows):
+        return [
+            (
+                dict(r, fee=self.fees[r["venue"]], fee_source="user")
+                if r["venue"] in self.fees
+                else r
+            )
+            for r in rows
+        ]
+
+    def mark_epoch(self, at):
+        """A period without a reset starts at its first recorded cycle or change."""
+        if self.store.get("wide_epoch_start", None) is None:
+            self.store.put("wide_epoch_start", at)
+
+    def note_change(self):
+        """A settings change inside a period: its results mix two configurations."""
+        self.mark_epoch(now())
+        run = self.store.get("wide_run", {})
+        run.setdefault("changes", []).append(now())
+        self.store.put("wide_run", run)
 
     def reset(self, capital=None, venue_capital=None, venues=ACCOUNT_VENUES):
         """Start a new paper period: archive closed trades and their results, then begin
@@ -770,7 +849,7 @@ class WidePaper:
             )
         if not lo <= capital <= hi:
             raise ValueError("wide_capital sınır dışında")
-        trades = [p for p in self.closed if p.get("legs")]
+        trades = self.period_trades()
         epochs = self.store.get("wide_epochs", [])
         epochs.append(
             dict(
@@ -780,13 +859,17 @@ class WidePaper:
                 cash=self.wallet["cash"],
                 venues=self.wallet.get("venues"),
                 trades=len(trades),
-                net=sum(p.get("net", 0) for p in trades),
+                net=sum(p["net"] for p in trades),
                 report=self.report(),
+                period=self.period_report(),
                 closed=self.closed,
             )
         )
         self.store.put("wide_epochs", epochs)
         self.store.put("wide_epoch_start", now())
+        self.store.put("wide_run", {})
+        self.store.put("wide_equity", [])
+        self.store.put("wide_ledger", {})
         self.closed = []
         self.cfg["wide_capital"] = capital
         self.wallet = {"cash": capital}
@@ -1546,6 +1629,7 @@ class WidePaper:
         self.closed.append(p)
         self.manual_close.discard(p["id"])
         self.persist()
+        self.record_close(p)
         self.events("CLOSE", reason, position=p["id"], net=p["net"])
 
     def exit_reason(self, p, books):
@@ -1655,14 +1739,11 @@ class WidePaper:
     def report(self):
         """Paper results per strategy; unverified and estimated funding kept apart."""
         out = {}
+        # Every trade of the period, not only the last 500 kept in full.
+        trades = self.period_trades()
         for key in ("funding", "convergence"):
-            # Records from before entries without a fill were dropped have no legs.
-            done = [
-                p
-                for p in self.closed
-                if p.get("strategy", "funding") == key and p.get("legs")
-            ]
-            settled = [p for p in done if not p.get("pending_funding")]
+            done = [p for p in trades if p["strategy"] == key]
+            settled = [p for p in done if not p["pending"]]
             out[key] = dict(
                 open=sum(p.get("strategy", "funding") == key for p in self.positions),
                 trades=len(done),
@@ -1671,11 +1752,9 @@ class WidePaper:
                 net=sum(p["net"] for p in settled),
                 price_pnl=sum(p["price_pnl"] for p in settled),
                 funding=sum(p["funding"] for p in settled),
-                estimated_funding=sum(p.get("estimated_funding", 0) for p in settled),
+                estimated_funding=sum(p["estimated_funding"] for p in settled),
                 fees=sum(p["fees"] for p in settled),
-                unverified_payments=sum(
-                    len(p.get("funding_unverified", [])) for p in done
-                ),
+                unverified_payments=sum(p["unverified"] for p in done),
                 pending=len(done) - len(settled),
             )
         return out
@@ -1684,7 +1763,7 @@ class WidePaper:
         self.error = None
         try:
             try:
-                rows = self.source.market_rows()
+                rows = self.with_fees(self.source.market_rows())
             except Exception as ex:
                 # Open positions are still marked and closed from the books.
                 rows = None
@@ -1733,6 +1812,7 @@ class WidePaper:
                 ):
                     self.settle(p)
                     p["net"] = p["price_pnl"] + p["funding"] - p["fees"]
+                    self.record_close(p)
             at = now()
             # Per-venue mode trades only where an account (and its collateral) exists.
             ranked_rows = (
@@ -1838,10 +1918,158 @@ class WidePaper:
                     else:
                         self.open(best)
             self.last_cycle = now()
+            self.record_run(self.last_cycle, entries and self.cfg["wide_enabled"])
             self.persist()
         except Exception as ex:
             self.error = str(ex)
             self.events("ERROR", str(ex))
+
+    def record_run(self, at, entries=True):
+        """Downtime between cycles, time with new entries switched off, and an hourly
+        equity sample, for the period report."""
+        run = self.store.get("wide_run", {})
+        last = run.get("last")
+        if last is not None:
+            if at - last > DOWNTIME_GAP:
+                run.setdefault("gaps", []).append([last, at])
+            elif not entries:
+                run["paused"] = run.get("paused", 0.0) + at - last
+        run["last"] = at
+        self.store.put("wide_run", run)
+        self.mark_epoch(at)
+        samples = self.store.get("wide_equity", [])
+        t = hour(at)
+        if not samples or samples[-1][0] != t:
+            equity = self.wallet["cash"] + sum(
+                p.get("unrealized", 0) for p in self.positions
+            )
+            samples.append([t, equity])
+            self.store.put("wide_equity", samples[-24 * 120 :])
+
+    @staticmethod
+    def ledger_entry(p):
+        return dict(
+            strategy=p.get("strategy", "funding"),
+            net=p.get("net", 0.0),
+            price_pnl=p.get("price_pnl", 0.0),
+            funding=p.get("funding", 0.0),
+            estimated_funding=p.get("estimated_funding", 0.0),
+            fees=p.get("fees", 0.0),
+            venues=[leg.get("venue") for leg in p["legs"]],
+            reason=p.get("close_reason"),
+            pending=bool(p.get("pending_funding")),
+            unverified=len(p.get("funding_unverified", [])),
+        )
+
+    def record_close(self, p):
+        """Only the last 500 closed trades are kept in full; this compact ledger keeps
+        every trade of the period, so a long period never loses its early results."""
+        if not p.get("legs") or not p.get("id"):
+            return
+        ledger = self.store.get("wide_ledger", {})
+        entry = self.ledger_entry(p)
+        if ledger.get(p["id"]) != entry:
+            ledger[p["id"]] = entry
+            self.store.put("wide_ledger", ledger)
+
+    def period_trades(self):
+        trades = dict(self.store.get("wide_ledger", {}))
+        for i, p in enumerate(self.closed):
+            if p.get("legs"):
+                trades[p.get("id") or "closed-%d" % i] = self.ledger_entry(p)
+        return list(trades.values())
+
+    def period_report(self):
+        """Is this period's result trustworthy? Each check is shown with its threshold;
+        none of them is a guarantee of future results."""
+        at = now()
+        start = self.store.get("wide_epoch_start", None) or at
+        run = self.store.get("wide_run", {})
+        gaps = run.get("gaps", [])
+        if run.get("last") is not None and at - run["last"] > DOWNTIME_GAP:
+            gaps = gaps + [[run["last"], at]]
+        down = sum(min(b, at) - max(a, start) for a, b in gaps if b > start)
+        span = max(at - start, 1)
+        paused = run.get("paused", 0.0)
+        changes = [t for t in run.get("changes", []) if t >= start]
+        opened = [p for p in self.positions if p.get("legs")]
+        open_net = sum(p.get("net_if_closed", 0) for p in opened)
+        done = self.period_trades()
+        settled = [p for p in done if not p["pending"]]
+        nets = sorted((p["net"] for p in settled), reverse=True)
+        total = sum(nets)
+        gains = sum(x for x in nets if x > 0)
+        losses = -sum(x for x in nets if x < 0)
+        peak = drawdown = 0.0
+        for _, equity in self.store.get("wide_equity", []):
+            peak = max(peak, equity)
+            drawdown = max(drawdown, peak - equity)
+        venues = {}
+        for p in done:
+            for v in p["venues"]:
+                venues[v] = venues.get(v, 0) + 1
+        collateral = sum(
+            str(p["reason"] or "").startswith("Borsa teminatı riski") for p in done
+        )
+        unverified = sum(p["unverified"] for p in done)
+        pf = gains / losses if losses else (None if not gains else math.inf)
+        top3 = sum(nets[:3]) / total if total > 0 else None
+        days = span / 86400
+        t = PERIOD_CHECKS
+        checks = [
+            ("Süre", f"{days:.1f} / {t['days']} gün", days >= t["days"]),
+            (
+                "Kesintisiz izleme",
+                f"%{down / span * 100:.1f} kesinti (sınır %{t['downtime_share'] * 100:.0f})",
+                down / span <= t["downtime_share"],
+            ),
+            (
+                "İşlem sayısı",
+                f"{len(settled)} / {t['trades']}",
+                len(settled) >= t["trades"],
+            ),
+            ("Ücretler sonrası net", f"{total:+.2f} $", total > 0),
+            (
+                "Kazanç / kayıp oranı",
+                "—" if pf is None else ("kayıp yok" if pf == math.inf else f"{pf:.2f}"),
+                pf is not None and pf >= t["profit_factor"],
+            ),
+            (
+                "En iyi 3 işlemin nete payı",
+                "—" if top3 is None else f"%{top3 * 100:.0f}",
+                top3 is not None and top3 < t["top3_share"],
+            ),
+            (
+                "Yeni girişler açık kaldı",
+                f"%{paused / span * 100:.1f} kapalı (sınır %{t['paused_share'] * 100:.0f})",
+                paused / span <= t["paused_share"],
+            ),
+            ("Dönem içinde ayar değişikliği", str(len(changes)), not changes),
+            ("Borsa teminatı riski kapanışı", str(collateral), collateral == 0),
+        ]
+        return dict(
+            start=start,
+            days=days,
+            downtime_hours=down / 3600,
+            gaps=len(gaps),
+            paused_hours=paused / 3600,
+            changes=len(changes),
+            open=len(opened),
+            open_net=open_net,
+            trades=len(done),
+            settled=len(settled),
+            wins=sum(x > 0 for x in nets),
+            net=total,
+            profit_factor=None if pf in (None, math.inf) else pf,
+            top3_share=top3,
+            max_drawdown=drawdown,
+            capital=self.cfg["wide_capital"],
+            collateral_closes=collateral,
+            unverified_payments=unverified,
+            venues=dict(sorted(venues.items(), key=lambda kv: -kv[1])),
+            checks=[dict(label=a, value=b, ok=bool(c)) for a, b, c in checks],
+            ready=all(c for _, _, c in checks),
+        )
 
     @staticmethod
     def pair_key(c):
@@ -1904,6 +2132,7 @@ class WidePaper:
             venue_balances=self.venue_balances(),
             account_venues=list(ACCOUNT_VENUES),
             venue_choices=venue_choices(),
+            fees=self.fees,
             daily_pnl=self.daily_pnl(),
             positions=self.positions,
             closed=self.closed[-100:],
@@ -1917,6 +2146,7 @@ class WidePaper:
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
             review=self.review_snapshot(),
             epochs=self.epochs(),
+            period=self.period_report(),
             epoch_start=self.store.get("wide_epoch_start", None),
             venues=venues,
             last_cycle=self.last_cycle,

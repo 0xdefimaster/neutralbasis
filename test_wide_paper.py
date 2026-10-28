@@ -873,6 +873,189 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(slept, [self.desk.latency(v) for v in legs])
         self.assertIn(2.5, slept)
 
+    # --- user fees and the period report ---------------------------------------
+    def test_user_fee_replaces_the_public_tariff(self):
+        self.setup_pair()
+        self.desk.set_fees({"Binance": 0.0002})
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        short = next(l for l in self.desk.positions[0]["legs"] if l["side"] == "short")
+        self.assertEqual(short["fee_rate"], 0.0002)
+        with self.assertRaisesRegex(ValueError, "%0 ile %1"):
+            self.desk.set_fees({"Binance": 0.02})
+        with self.assertRaisesRegex(ValueError, "Taranmayan"):
+            self.desk.set_fees({"Nowhere": 0.0001})
+        again = WidePaper(self.store, self.src, sleep=lambda s: None)
+        self.assertEqual(again.fees, {"Binance": 0.0002})
+        again.set_fees({"Binance": None})
+        self.assertEqual(again.fees, {})
+
+    def test_unknown_fee_venue_trades_once_the_user_enters_its_fee(self):
+        self.setup_pair()
+        self.src.rows = [
+            dict(r, fee=None) if r["venue"] == "Binance" else r for r in self.src.rows
+        ]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.desk.set_fees({"Binance": 0.0005})
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+
+    def test_venue_table_says_why_a_venue_cannot_trade(self):
+        self.setup_pair()
+        self.src.rows.append(row("RISEx", fee=None))
+        self.desk.reset(venue_capital=1000)
+        self.desk.cycle()
+        b = {x["venue"]: x for x in self.desk.venue_balances()}
+        self.assertEqual(
+            (b["Hyperliquid"]["fee"], b["Hyperliquid"]["fee_source"]),
+            (0.00045, "public"),
+        )
+        self.assertIsNone(b["Hyperliquid"]["reason"])
+        self.assertFalse(b["RISEx"]["data"])
+        self.assertEqual(b["RISEx"]["reason"], "Taker ücreti bilinmiyor")
+        self.assertEqual(b["TxFlow"]["reason"], "Piyasa verisi yok")
+        self.desk.set_fees({"RISEx": 0.0004})
+        self.desk.cycle(entries=False)
+        b = {x["venue"]: x for x in self.desk.venue_balances()}
+        self.assertTrue(b["RISEx"]["data"])
+        self.assertEqual(
+            (b["RISEx"]["fee"], b["RISEx"]["fee_source"]), (0.0004, "user")
+        )
+
+    def check(self, report, label):
+        return next(c for c in report["checks"] if c["label"] == label)
+
+    def test_period_report_counts_downtime_pauses_and_changes(self):
+        self.desk.reset(venue_capital=1000)
+        self.desk.cycle()
+        self.clock += 120
+        self.desk.cycle(entries=False)
+        self.clock += 3600  # the machine slept
+        self.desk.cycle()
+        self.desk.update_config({"wide_min_net": 0.6})
+        # Saving unchanged settings or fees is not a change.
+        self.desk.update_config({"wide_min_net": 0.6})
+        self.desk.set_fees({})
+        r = self.desk.period_report()
+        self.assertAlmostEqual(r["downtime_hours"], 1.0)
+        self.assertEqual(r["gaps"], 1)
+        self.assertAlmostEqual(r["paused_hours"], 120 / 3600)
+        self.assertEqual(r["changes"], 1)
+        self.assertFalse(self.check(r, "Kesintisiz izleme")["ok"])
+        self.assertTrue(self.check(r, "Yeni girişler açık kaldı")["ok"])
+        self.assertFalse(self.check(r, "Dönem içinde ayar değişikliği")["ok"])
+        self.assertFalse(self.check(r, "Süre")["ok"])
+        self.assertFalse(r["ready"])
+        # Time since the last cycle counts while the desk is down.
+        self.clock += 1200
+        self.assertAlmostEqual(self.desk.period_report()["downtime_hours"], 4800 / 3600)
+        # A new period starts clean.
+        self.desk.reset(venue_capital=1000)
+        r = self.desk.period_report()
+        self.assertEqual((r["gaps"], r["changes"], r["paused_hours"]), (0, 0, 0))
+        self.assertEqual(self.store.get("wide_equity", None), [])
+
+    def test_period_report_checks_how_profit_is_spread(self):
+        self.desk.reset(venue_capital=1000)
+
+        def trade(net):
+            return dict(
+                asset="X",
+                strategy="funding",
+                legs=[dict(venue="Binance"), dict(venue="Bybit")],
+                net=net,
+                price_pnl=0.0,
+                funding=net,
+                fees=0.0,
+                closed_at=self.clock,
+            )
+
+        self.desk.closed = [trade(10), trade(5), trade(-2)] + [trade(1)] * 40
+        r = self.desk.period_report()
+        self.assertEqual((r["settled"], r["wins"]), (43, 42))
+        self.assertAlmostEqual(r["net"], 53)
+        self.assertAlmostEqual(r["profit_factor"], 27.5)
+        self.assertAlmostEqual(r["top3_share"], 16 / 53)
+        self.assertEqual(r["venues"], {"Binance": 43, "Bybit": 43})
+        for label in (
+            "İşlem sayısı",
+            "Ücretler sonrası net",
+            "Kazanç / kayıp oranı",
+            "En iyi 3 işlemin nete payı",
+        ):
+            self.assertTrue(self.check(r, label)["ok"], label)
+        # One lucky trade carrying the period fails the spread check.
+        self.desk.closed = [trade(30), trade(1), trade(-1)]
+        r = self.desk.period_report()
+        self.assertFalse(self.check(r, "En iyi 3 işlemin nete payı")["ok"])
+        self.assertFalse(self.check(r, "İşlem sayısı")["ok"])
+
+    def test_period_report_tracks_drawdown_and_open_positions(self):
+        self.desk.reset(venue_capital=1000)
+        self.store.put(
+            "wide_equity", [[0, 15000], [3600, 15200], [7200, 14900], [10800, 15100]]
+        )
+        self.desk.positions = [dict(id="x", asset="BTC", legs=[{}], net_if_closed=-4.0)]
+        r = self.desk.period_report()
+        self.assertAlmostEqual(r["max_drawdown"], 300)
+        self.assertEqual((r["open"], r["open_net"]), (1, -4.0))
+
+    def test_period_keeps_every_trade_beyond_the_closed_list(self):
+        self.desk.reset(venue_capital=1000)
+        for i in range(600):
+            p = dict(
+                id="t%d" % i,
+                asset="X",
+                strategy="funding",
+                legs=[dict(venue="Binance"), dict(venue="Bybit")],
+                net=1.0,
+                price_pnl=0.0,
+                funding=1.0,
+                fees=0.0,
+                closed_at=self.clock,
+                close_reason="test",
+            )
+            self.desk.closed.append(p)
+            self.desk.record_close(p)
+        self.desk.persist()
+        again = WidePaper(self.store, self.src, sleep=lambda s: None)
+        self.assertEqual(len(again.closed), 500)
+        r = again.period_report()
+        self.assertEqual((r["settled"], r["net"]), (600, 600.0))
+        f = again.report()["funding"]
+        self.assertEqual((f["trades"], f["net"], f["funding"]), (600, 600.0, 600.0))
+        # A late funding payment on a recent trade updates its ledger entry.
+        again.closed[-1]["net"] = 2.0
+        again.record_close(again.closed[-1])
+        self.assertEqual(again.period_report()["net"], 601.0)
+        again.reset(venue_capital=1000)
+        self.assertEqual(again.period_report()["settled"], 0)
+
+    def test_closing_a_position_records_it_in_the_ledger(self):
+        self.setup_pair()
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        pid = self.desk.positions[0]["id"]
+        self.desk.manual_close.add(pid)
+        self.clock += 60
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.cycle(entries=False)
+        entry = self.store.get("wide_ledger", {})[pid]
+        self.assertEqual(entry["venues"], ["Hyperliquid", "Binance"])
+        self.assertEqual(entry["net"], self.desk.closed[-1]["net"])
+
+    def test_cycles_record_hourly_equity(self):
+        self.desk.reset(venue_capital=1000)
+        self.desk.cycle()
+        self.clock += 60
+        self.desk.cycle()
+        self.clock += 3600
+        self.desk.cycle()
+        samples = self.store.get("wide_equity", [])
+        self.assertEqual([t for t, e in samples], [bot.hour(T0), bot.hour(T0 + 3660)])
+        self.assertEqual(samples[0][1], 15000)
+
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
 
@@ -900,15 +1083,35 @@ class DeskIntegrationTests(unittest.TestCase):
                 self.assertTrue(all(r["fee"] == e.fee(r["venue"]) for r in rows))
                 venues = {r["venue"] for r in rows}
                 self.assertIn("Arcus", venues)
+                # A venue without a verified fee is listed but cannot rank until
+                # the user enters the fee from their own account.
                 f.meta["RISEx"] = {"BTC": dict(f.meta["Arcus"]["BTC"], venue="RISEx")}
-                self.assertNotIn("RISEx", {r["venue"] for r in source.market_rows()})
+                (rise,) = [r for r in source.market_rows() if r["venue"] == "RISEx"]
+                self.assertIsNone(rise["fee"])
                 self.assertIn("ücret", source.excluded["RISEx"])
+                self.assertNotIn(
+                    "RISEx",
+                    wide_paper.usable_rows([rise], rise["received"]).get("BTC", {}),
+                )
+                e.wide_paper.set_fees({"RISEx": 0.0004})
+                (rise,) = [
+                    r
+                    for r in e.wide_paper.with_fees(source.market_rows())
+                    if r["venue"] == "RISEx"
+                ]
+                self.assertEqual((rise["fee"], rise["fee_source"]), (0.0004, "user"))
                 for r in rows:
                     m = f.meta[r["venue"]][r["asset"]]
                     self.assertEqual(r["interval"], m.get("interval") or 3600)
                     self.assertAlmostEqual(
                         r["rate"] * r["interval"] / 3600, r["raw_rate"]
                     )
+                # Engine latency and slippage also price this desk: a change counts.
+                changes = e.wide_paper.period_report()["changes"]
+                e.update_config({"latency_ms": e.cfg["latency_ms"]})
+                self.assertEqual(e.wide_paper.period_report()["changes"], changes)
+                e.update_config({"latency_ms": e.cfg["latency_ms"] + 100})
+                self.assertEqual(e.wide_paper.period_report()["changes"], changes + 1)
                 snap = json.loads(json.dumps(e.snapshot()))
                 self.assertIn("wide_paper", snap)
                 self.assertEqual(snap["wide_paper"]["balance"]["cash"], 10000)

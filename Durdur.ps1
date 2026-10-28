@@ -10,3 +10,4 @@ if ($taskIdentity.pid -eq $taskPid -and $taskIdentity.root -eq $PSScriptRoot -an
     Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8765/api/shutdown' -Headers @{'X-Paper-Token'=$taskToken} -ContentType 'application/json' -Body '{}' | Out-Null
     Write-Output 'Motor kapanıyor. Açık paper kayıtları korunur; izleme durur.'
 } else { Write-Output 'Kayıtlı işlem çalışmıyor; başka bir işlem durdurulmadı.' }
+if (Get-ScheduledTask -TaskName 'neutralbasis paper' -ErrorAction SilentlyContinue) { Write-Output 'Not: otomatik başlatma açık; motor 5 dakika içinde yeniden başlar. Tamamen durdurmak için önce OtomatikKapat.cmd çalıştırın.' }

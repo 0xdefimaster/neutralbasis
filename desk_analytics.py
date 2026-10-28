@@ -682,7 +682,12 @@ class DeskEngine(RiskEngine):
         if wide:
             self.wide_paper.update_config(wide)
         if rest or not wide:
+            # Fill latency and extra slippage also price the multi-venue desk's fills.
+            shared = ("latency_ms", "extra_slippage_bps")
+            before = {k: self.cfg.get(k) for k in shared}
             super().update_config(rest)
+            if any(self.cfg.get(k) != before[k] for k in shared):
+                self.wide_paper.note_change()
         self.wide.symbols = list(self.cfg["symbols"])
 
     def snapshot(self):

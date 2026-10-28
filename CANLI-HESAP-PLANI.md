@@ -4,7 +4,7 @@ Hedef: paper sonuçları, gerçek hesapta aynı kararlarla alınacak sonuca olab
 
 Varsayılan hesap borsaları (15 perp): **Lighter, Extended, Hyperliquid, TxFlow, RISEx, Arcus, Binance, Bybit, OKX, Bitget, Gate, Aster, Paradex, dYdX, GRVT**. Liste sıfırlama ekranında işaretlenerek değiştirilebilir; taranan her perp borsası seçilebilir. Bot kullanıcının kendi Windows bilgisayarında çalışır. Anahtarlar yalnızca orada, Windows kullanıcı şifrelemesiyle (DPAPI, `connections.py`) saklanır. Sunucuya (Railway) anahtar konmaz.
 
-## Aşama 1 — Borsa başı teminat (bu dalda yapıldı)
+## Aşama 1 — Borsa başı teminat (yapıldı)
 
 Önceki paper tek bir ortak cüzdan kullanıyordu. Gerçekte ise her borsada ayrı teminat tutulur, para borsalar arasında anında taşınamaz.
 
@@ -16,22 +16,54 @@ Varsayılan hesap borsaları (15 perp): **Lighter, Extended, Hyperliquid, TxFlow
 - **Transfer yok:** Borsalar arasında transfer yapılmaz. Bir borsada biriken kâr, öbüründeki eksiği kapatmaz.
 - **Teminat tablosu:** Çoklu paper ekranında borsa başı nakit, özsermaye, marjin, boş teminat ve veri durumu görünür.
 
-## Aşama 1b — Gerçeğe yakınlık (bu dalda yapıldı)
+## Aşama 1b — Gerçeğe yakınlık (yapıldı)
 
 - **Üç borsa masaya bağlandı:** TxFlow, RISEx ve Arcus artık masanın kendi beslemesinden (defter, 1h mumlar, funding geçmişi) çoklu paper masasına bağlı. Her borsa ancak gerçekten işlem açılabilecek veri tamsa işleme girer. Şu anki durum:
   - **Arcus:** Ücret tarifesi public API'den okunuyor. Ancak fiyat geçmişi oracle fiyatı; işlem fiyatı korelasyon kontrolünü geçmediği için çiftler genelde elenir.
-  - **RISEx:** Taker ücreti public olarak doğrulanmadı, işlem açılmaz. Gerekçe panelde yazar.
-  - **TxFlow:** Taker ücreti ve gerçekleşmiş funding geçmişi doğrulanmadı, işlem açılmaz.
-
-  Bu iki boşluk Aşama 2'de hesap anahtarıyla (gerçek ücret kademesi, gerçek funding ödemeleri) kapanacak.
+  - **RISEx:** Taker ücreti public olarak doğrulanmadı. Hesap sayfanızdaki ücreti Ayarlar → "Borsa taker ücretleri" alanına yazınca işleme girer.
+  - **TxFlow:** Ücret girilse bile gerçekleşmiş funding geçmişi public olarak doğrulanmadığı için işlem açmaz. Bu boşluk Aşama 2'de hesap anahtarıyla (gerçek funding ödemeleri) kapanacak.
 - **Lot kuralları:** Emir miktarı iki borsanın adım büyüklüğüne aşağı yuvarlanıyor. Borsanın asgari miktarı ya da asgari tutarı altında kalan işlem açılmıyor. Kurallar Lighter, Extended, TxFlow, RISEx ve Arcus'ta kendi API'lerinden, CCXT borsalarında (Hyperliquid) piyasa tanımından geliyor. Yayımlanmayan kural uydurulmuyor.
 - **Ölçülen gecikme:** Her bacak, ayarlanan tabandan (750 ms) ya da o borsanın son 50 defter isteğinde ölçülen p90 gidiş-dönüş süresinden hangisi uzunsa o kadar bekleyip, sonra taze defterden doluyor. Bu süre borsa tablosunda görünüyor.
 
+## Aşama 1c — 30 günlük teste hazırlık (yapıldı)
+
+- **Borsa başı ücret:** Ayarlar → "Borsa taker ücretleri (%)". Her borsanın kendi hesap sayfanızdaki taker ücreti yazılır; boş kalan borsada public tarife kullanılır. Borsa tablosunda ücretin kaynağı yazar ("senin girdiğin" / "public tarife" / "bilinmiyor").
+- **Dönem raporu:** Çoklu paper ekranındaki kart dönemin güvenilir olup olmadığını ölçüt ölçüt gösterir:
+  - süre en az 30 gün;
+  - kesinti en çok %5;
+  - en az 40 kapanmış işlem;
+  - ücretler sonrası net pozitif;
+  - kazanç/kayıp oranı en az 1.3;
+  - en iyi 3 işlemin nete payı %50'nin altında;
+  - yeni girişler kapalı kalan süre en çok %5;
+  - dönem içinde ayar değişikliği yok;
+  - "Borsa teminatı riski" kapanışı yok.
+
+  Ayrıca açık pozisyonların kapatılırsa netini, en büyük düşüşü, kesinti sayısını ve borsa başı işlem sayısını gösterir.
+- **Kesinti kaydı:** İki tur arasında 10 dakikadan uzun boşluk kesinti sayılır. Yeni girişlerin kapalı olduğu süre ve dönem içindeki ayar/ücret değişiklikleri de kaydedilir. Sıfırlama bu kayıtları yeni dönem için temizler.
+- **Uyku engelleme:** Motor Windows'ta çalışırken bilgisayarın uykuya geçmesini engeller. Ekran yine kapanabilir.
+- **Otomatik başlatma:** `OtomatikBaslat.cmd` bir kez çalıştırılır. Windows Görev Zamanlayıcı oturum açılınca ve her 5 dakikada bir motoru kontrol eder; motor kapanmış ya da çökmüşse yeniden başlatır. `OtomatikKapat.cmd` görevi kaldırır.
+
+## 30 günlük paper testi: adım adım
+
+1. Güncel kodu alın. Ardından `Durdur.cmd`, sonra `Baslat.cmd` çalıştırın. İlk açılışta veritabanı bir kerelik sıkıştırılır, birkaç dakika sürebilir.
+2. Panel → Çoklu paper. Açık pozisyon varsa "Kapat" ile kapatın.
+3. Ayarlar → "Borsa taker ücretleri": her borsanın hesap sayfanızdaki taker ücretini yazıp kaydedin. Bunu sıfırlamadan **önce** yapın; sonra yapılan değişiklik dönem raporunda ayar değişikliği sayılır.
+4. Ayarlar → "Arşivle ve sıfırla": "Borsa başı (gerçekçi)", tutar 1000. Listede yalnızca gerçekten hesap açıp perp işlem yapabileceğiniz borsaları işaretli bırakın.
+5. `OtomatikBaslat.cmd` çalıştırın. "Erişim engellendi" hatası verirse sağ tık → Yönetici olarak çalıştırın.
+6. Windows ayarları:
+   - **Dizüstü:** kapak kapanınca "Hiçbir şey yapma" seçilmeli.
+   - **Windows Update:** güncellemeleri 4–5 hafta duraklatın ya da etkin saatleri ayarlayın.
+   - **Yeniden başlatma sonrası:** oturum açılana kadar motor çalışmaz. Bu süre kesinti olarak kayda geçer.
+7. 30 gün boyunca ayarları değiştirmeyin. Haftada bir dönem raporuna ve borsa tablosuna bakın.
+8. Gün 30'da dönem raporundaki ölçütlere bakın. Tümü sağlanmadıysa sonuç karar vermek için yeterli değildir.
+
 ## Hâlâ modellenmeyenler
 
-- **İki kontrol arasındaki fiyat sıçramaları:** Pozisyonlar her turda defterden işaretleniyor. Turlar arasındaki kısa ani hareket (fitil) görülmüyor. Gerçekte bu hareket likidasyona yol açabilir.
-- **Gerçek ücret kademesi:** Public tarife kullanılıyor; Aşama 2'de hesaptan okunacak.
-- **Dolum doğruluğu:** Paper'ın dolum fiyatının gerçekle ne kadar örtüştüğü ancak gerçek emirle ölçülebilir (Aşama 3, isteğe bağlı mikro emir).
+- **İki kontrol arasındaki fiyat sıçramaları:** Pozisyonlar her turda defterden işaretleniyor; aradaki kısa ani hareketler görülmüyor. Borsa başı $1000 teminatla etkin kaldıraç düşük olduğundan likidasyon için çok büyük bir hareket gerekir. Ama botun kendi zarar-kes kararları bir tur gecikebilir; gerçek bir bot da aynı gecikmeyi yaşar.
+- **Gerçek ücret kademesi:** Elle girilmezse public tarife kullanılır. Aşama 2'de hesaptan okunacak.
+- **Dolum doğruluğu:** Paper'ın dolum fiyatının gerçekle ne kadar örtüştüğü ancak gerçek emirle ölçülebilir (Aşama 3, isteğe bağlı mikro emir). Paper bu konuda temkinli tarafta: yalnızca taker emir, bacaklar sırayla, en az 750 ms gecikme ve +1 bp ek kayma.
+- **Borsa olayları:** Bakım, listeden çıkma, ADL ve para çekme durdurmaları modellenmez.
 
 ## Aşama 2 — Bağlantı ve salt okunur hesap
 
