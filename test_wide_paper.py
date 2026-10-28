@@ -179,6 +179,70 @@ class WidePaperTests(unittest.TestCase):
         self.assertGreater(d["execution_drag"], 0)
         self.assertLess(d["size"], 1.0 / d["fee_roundtrip"])
 
+    # --- the desk's word on one pair, for the pair page ----------------------------
+    def test_verdict_tells_a_rejected_pair_why_and_when_it_returns(self):
+        self.setup_pair()
+        self.desk.update_config({"wide_min_net": 1000})
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        v = self.desk.verdict("BTC", "Binance", "Hyperliquid")
+        self.assertEqual(v["legs"], {"Binance": None, "Hyperliquid": None})
+        f = v["strategies"][0]
+        self.assertEqual((f["strategy"], f["rank"]), ("funding", 1))
+        self.assertEqual(f["decision"]["outcome"], "rejected")
+        self.assertIn(
+            "Funding geliri ücret + kayma + spread riski payını karşılamıyor",
+            f["decision"]["reasons"],
+        )
+        self.assertEqual(f["retry_at"], T0 + wide_paper.REJECT_COOLDOWN)
+        self.assertEqual((f["long"], f["short"]), ("Hyperliquid", "Binance"))
+
+    def test_verdict_tells_an_opened_pair_and_its_position(self):
+        self.setup_pair()
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        v = self.desk.verdict("BTC", "Hyperliquid", "Binance")
+        self.assertEqual(v["strategies"][0]["decision"]["outcome"], "opened")
+        (p,) = v["positions"]
+        self.assertEqual((p["long"], p["short"]), ("Hyperliquid", "Binance"))
+        self.assertTrue(p["entry_reason"].startswith("Funding:"))
+
+    def test_verdict_keeps_why_an_eligible_pair_was_not_entered(self):
+        x = dict(
+            strategy="funding",
+            asset="BTC",
+            long="Hyperliquid",
+            short="Binance",
+            reasons=[],
+            net=1.25,
+        )
+        self.desk.decide(x, T0, "skipped", ["Borsa teminatı yetersiz"])
+        d = self.desk.verdict("BTC", "Binance", "Hyperliquid")["strategies"][0]
+        self.assertEqual(
+            d["decision"],
+            dict(
+                at=T0,
+                outcome="skipped",
+                reasons=["Borsa teminatı yetersiz"],
+                net=1.25,
+                long="Hyperliquid",
+                short="Binance",
+            ),
+        )
+        # Without explicit reasons the pair's own reasons are kept.
+        self.desk.decide(dict(x, reasons=["Hedge beta uyumsuz"]), T0 + 1, "rejected")
+        d = self.desk.verdict("BTC", "Binance", "Hyperliquid")["strategies"][0]
+        self.assertEqual(d["decision"]["reasons"], ["Hedge beta uyumsuz"])
+
+    def test_verdict_names_a_leg_without_an_account_or_data(self):
+        self.setup_pair()
+        self.desk.reset(venue_capital=1000, venues=["Hyperliquid", "Extended"])
+        self.desk.cycle()
+        v = self.desk.verdict("BTC", "Hyperliquid", "Binance")
+        self.assertEqual(v["legs"]["Binance"], "hesap listesinde değil")
+        v = self.desk.verdict("BTC", "Hyperliquid", "Extended")
+        self.assertEqual(v["legs"]["Extended"], "piyasa verisi yok")
+
     def test_rejects_when_fees_beat_funding(self):
         self.setup_pair(long_rate=0.0, short_rate=0.00005)
         self.desk.cycle()
