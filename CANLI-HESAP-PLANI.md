@@ -46,11 +46,12 @@ Varsayılan hesap borsaları (15 perp): **Lighter, Extended, Hyperliquid, TxFlow
 
 ## 30 günlük paper testi: adım adım
 
-1. Güncel kodu alın. Ardından `Durdur.cmd`, sonra `Baslat.cmd` çalıştırın. İlk açılışta veritabanı bir kerelik sıkıştırılır, birkaç dakika sürebilir.
+1. Güncel kodu alın (`git pull`). Motor çalışıyorsa `.\Durdur.cmd`, sonra `.\Baslat.cmd` çalıştırın. PowerShell'de dosya adının başına `.\` gerekir; Gezgin'de çift tıklamak da olur. Motoru `python risk_main.py` ile ön planda değil, `Baslat.cmd` ile arka planda çalıştırın; PowerShell penceresi kapanınca motor durmaz.
+   - İlk açılışta veritabanı bir kerelik sıkıştırılır. Bu birkaç dakika sürebilir ve o sırada panel açılmaz. Bittiğinde `data-five-rh\motor.log` dosyasında "Bakım bitti" yazar.
 2. Panel → Çoklu paper. Açık pozisyon varsa "Kapat" ile kapatın.
 3. Ayarlar → "Borsa taker ücretleri": her borsanın hesap sayfanızdaki taker ücretini yazıp kaydedin. Bunu sıfırlamadan **önce** yapın; sonra yapılan değişiklik dönem raporunda ayar değişikliği sayılır.
 4. Ayarlar → "Arşivle ve sıfırla": "Borsa başı (gerçekçi)", tutar 1000. Listede yalnızca gerçekten hesap açıp perp işlem yapabileceğiniz borsaları işaretli bırakın.
-5. `OtomatikBaslat.cmd` çalıştırın. "Erişim engellendi" hatası verirse sağ tık → Yönetici olarak çalıştırın.
+5. `.\OtomatikBaslat.cmd` çalıştırın. "Erişim engellendi" hatası verirse sağ tık → Yönetici olarak çalıştırın.
 6. Windows ayarları:
    - **Dizüstü:** kapak kapanınca "Hiçbir şey yapma" seçilmeli.
    - **Windows Update:** güncellemeleri 4–5 hafta duraklatın ya da etkin saatleri ayarlayın.

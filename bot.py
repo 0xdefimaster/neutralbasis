@@ -3,7 +3,7 @@
 from __future__ import annotations
 import argparse, base64, concurrent.futures, datetime as dt, email.utils, hashlib, hmac, json, math, os, signal
 from pathlib import Path
-import sqlite3, statistics, threading, time, traceback, urllib.parse, urllib.request, uuid, zlib
+import sqlite3, statistics, sys, threading, time, traceback, urllib.parse, urllib.request, uuid, zlib
 from decimal import Decimal, ROUND_DOWN
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from connections import Connections
@@ -1506,6 +1506,12 @@ class ExclusiveServer(ThreadingHTTPServer):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
+
+    def handle_error(self, request, client_address):
+        # A browser that reloads or closes the page mid-response is not an engine error.
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
 
 
 def serve(engine, port, host="127.0.0.1", password=None):
