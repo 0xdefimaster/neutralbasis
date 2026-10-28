@@ -14,9 +14,25 @@ from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIE
 
 # Native venues whose taker fee is configured; the rest come from the CCXT scanner.
 NATIVE = ("Lighter", "Extended")
-# Venues the user holds accounts on. In per-venue mode each one has its own paper
-# collateral, as a real account would: a leg is margined only by its own venue.
-ACCOUNT_VENUES = ("Lighter", "Extended", "Hyperliquid", "TxFlow", "RISEx", "Arcus")
+# Default account venues: fifteen perp venues. In per-venue mode each one has its own
+# paper collateral, as a real account would: a leg is margined only by its own venue.
+ACCOUNT_VENUES = (
+    "Lighter",
+    "Extended",
+    "Hyperliquid",
+    "TxFlow",
+    "RISEx",
+    "Arcus",
+    "Binance",
+    "Bybit",
+    "OKX",
+    "Bitget",
+    "Gate",
+    "Aster",
+    "Paradex",
+    "dYdX",
+    "GRVT",
+)
 # Venues whose public data comes from the desk's own feed instead of the CCXT scanner.
 FEED_VENUES = ("Lighter", "Extended", "TxFlow", "RISEx", "Arcus")
 WIDE_DEFAULTS = dict(
@@ -199,6 +215,13 @@ def pair_fields(a, l, s):
         lot_long=lot_of(l),
         lot_short=lot_of(s),
     )
+
+
+def venue_choices():
+    """Perp venues the desk scans: the only ones an account can be simulated on."""
+    from wide_markets import CATALOG
+
+    return [v for v, c in CATALOG.items() if c["scan"] and v != "LighterCore"]
 
 
 def lot_of(row):
@@ -732,8 +755,13 @@ class WidePaper:
         lo, hi = LIMITS["wide_capital"]
         if venue_capital is not None:
             venue_capital = number(venue_capital)
-            venues = list(dict.fromkeys(venues))
-            if not venues or not lo <= venue_capital <= hi:
+            venues = list(dict.fromkeys(venues or ACCOUNT_VENUES))
+            unknown = [v for v in venues if v not in venue_choices()]
+            if unknown:
+                raise ValueError("Taranmayan borsa: " + ", ".join(map(str, unknown)))
+            if len(venues) < 2:
+                raise ValueError("En az iki borsa gerekli")
+            if not lo <= venue_capital <= hi:
                 raise ValueError("Borsa başı teminat sınır dışında")
             capital = venue_capital * len(venues)
         else:
@@ -1875,6 +1903,7 @@ class WidePaper:
             balance=self.balance(),
             venue_balances=self.venue_balances(),
             account_venues=list(ACCOUNT_VENUES),
+            venue_choices=venue_choices(),
             daily_pnl=self.daily_pnl(),
             positions=self.positions,
             closed=self.closed[-100:],

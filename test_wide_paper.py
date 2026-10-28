@@ -745,16 +745,30 @@ class WidePaperTests(unittest.TestCase):
         venues = self.desk.wallet["venues"]
         self.assertEqual(set(venues), set(wide_paper.ACCOUNT_VENUES))
         self.assertTrue(all(x == 1000 for x in venues.values()))
-        self.assertEqual(self.desk.wallet["cash"], 6000)
-        self.assertEqual(self.desk.cfg["wide_capital"], 6000)
+        self.assertGreaterEqual(len(venues), 15)
+        self.assertEqual(self.desk.wallet["cash"], 1000 * len(venues))
+        self.assertEqual(self.desk.cfg["wide_capital"], 1000 * len(venues))
         with self.assertRaisesRegex(ValueError, "Borsa başı"):
             self.desk.update_config({"wide_capital": 9000})
         again = WidePaper(self.store, self.src, sleep=lambda s: None)
         self.assertEqual(again.wallet["venues"], venues)
 
+    def test_per_venue_reset_takes_a_chosen_venue_list(self):
+        self.desk.reset(venue_capital=500, venues=["Binance", "Hyperliquid"])
+        self.assertEqual(
+            self.desk.wallet["venues"], {"Binance": 500, "Hyperliquid": 500}
+        )
+        with self.assertRaisesRegex(ValueError, "Taranmayan borsa"):
+            self.desk.reset(venue_capital=500, venues=["Binance", "Nowhere"])
+        with self.assertRaisesRegex(ValueError, "En az iki"):
+            self.desk.reset(venue_capital=500, venues=["Binance"])
+        self.assertTrue(
+            set(wide_paper.ACCOUNT_VENUES) <= set(wide_paper.venue_choices())
+        )
+
     def test_per_venue_trades_only_between_account_venues(self):
-        self.setup_pair()  # Hyperliquid / Binance: Binance holds no account
-        self.desk.reset(venue_capital=1000)
+        self.setup_pair()  # Hyperliquid / Binance: Binance holds no account here
+        self.desk.reset(venue_capital=1000, venues=["Hyperliquid", "Extended"])
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
         self.assertTrue(

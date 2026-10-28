@@ -2,14 +2,14 @@
 
 Hedef: paper sonuçları, gerçek hesapta aynı kararlarla alınacak sonuca olabildiğince yakın olsun. Gerçek paraya ne zaman geçileceği bu sonuçlara bakılarak seçilsin.
 
-Hesap açılacak borsalar: **Lighter, Extended, Hyperliquid, TxFlow, RISEx, Arcus**. Bot kullanıcının kendi Windows bilgisayarında çalışır. Anahtarlar yalnızca orada, Windows kullanıcı şifrelemesiyle (DPAPI, `connections.py`) saklanır. Sunucuya (Railway) anahtar konmaz.
+Varsayılan hesap borsaları (15 perp): **Lighter, Extended, Hyperliquid, TxFlow, RISEx, Arcus, Binance, Bybit, OKX, Bitget, Gate, Aster, Paradex, dYdX, GRVT**. Liste sıfırlama ekranında işaretlenerek değiştirilebilir; taranan her perp borsası seçilebilir. Bot kullanıcının kendi Windows bilgisayarında çalışır. Anahtarlar yalnızca orada, Windows kullanıcı şifrelemesiyle (DPAPI, `connections.py`) saklanır. Sunucuya (Railway) anahtar konmaz.
 
 ## Aşama 1 — Borsa başı teminat (bu dalda yapıldı)
 
 Önceki paper tek bir ortak cüzdan kullanıyordu. Gerçekte ise her borsada ayrı teminat tutulur, para borsalar arasında anında taşınamaz.
 
-- Ayarlar → "Arşivle ve sıfırla" → Teminat: **Borsa başı**, tutar **1000**. Altı borsanın her biri $1000 ayrı teminatla başlar (toplam $6000). Önceki dönem arşivlenir.
-- **Sadece hesap borsaları:** Paper yalnızca bu altı borsa arasında işlem açar. Diğer borsalar taramada görünmeye devam eder ama işlem havuzuna girmez.
+- Ayarlar → "Arşivle ve sıfırla" → Teminat: **Borsa başı**, tutar **1000**. İşaretli borsaların her biri $1000 ayrı teminatla başlar (varsayılan 15 borsa, toplam $15.000). Önceki dönem arşivlenir.
+- **Sadece hesap borsaları:** Paper yalnızca işaretli borsalar arasında işlem açar. Diğer borsalar taramada görünmeye devam eder ama işlem havuzuna girmez.
 - **Teminat bacak başına:** Her bacağın marjini ve ücreti yalnızca kendi borsasının boş teminatından karşılanır; rezerv de borsa başına uygulanır. Büyüklük, iki borsadan teminatı az olana göre küçülür.
 - **Kâr öbür bacağı korumaz:** Bir borsanın özsermayesi kullandığı marjinin yarısına inerse pozisyon "Borsa teminatı riski" ile kapanır. Öbür borsadaki kâr bunu engellemez.
 - **Funding:** Funding ve fiyat PnL'si ödendiği ya da gerçekleştiği borsanın teminatına yazılır.
