@@ -1005,12 +1005,31 @@ class WidePaper:
         price = (mid[lv] + mid[sv]) / 2
         if notional < MIN_NOTIONAL:
             raise ValueError("Risk/marjin sınırı sonrası büyüklük minimumun altında")
-        # Equal base quantity on both legs, in sizes both venues accept.
-        qty = fit_lots(notional / price, price, [c.get("lot_long"), c.get("lot_short")])
-        if qty * price < MIN_NOTIONAL:
-            raise ValueError("Risk/marjin sınırı sonrası büyüklük minimumun altında")
-        la, ss = walk(lb["asks"], qty, True, extra), walk(sb["bids"], qty, False, extra)
-        lc, sc = walk(lb["bids"], qty, False, extra), walk(sb["asks"], qty, True, extra)
+        # Equal base quantity on both legs, in sizes both venues accept. The loss budget
+        # must also hold the books' own bid-ask spread, which the first sizing cannot
+        # see: the quantity shrinks until fees, spread and stress all fit inside it.
+        for _ in range(4):
+            qty = fit_lots(
+                notional / price, price, [c.get("lot_long"), c.get("lot_short")]
+            )
+            if qty * price < MIN_NOTIONAL:
+                raise ValueError(
+                    "Risk/marjin sınırı sonrası büyüklük minimumun altında"
+                )
+            la = walk(lb["asks"], qty, True, extra)
+            ss = walk(sb["bids"], qty, False, extra)
+            lc = walk(lb["bids"], qty, False, extra)
+            sc = walk(sb["asks"], qty, True, extra)
+            worst = qty * (
+                (la + lc) * fee_l
+                + (ss + sc) * fee_s
+                + (la - lc)
+                + (sc - ss)
+                + price * stress
+            )
+            if worst <= budget + 1e-6:
+                break
+            notional *= budget / worst * (1 - 1e-9)
         return dict(
             qty=qty,
             price=price,
