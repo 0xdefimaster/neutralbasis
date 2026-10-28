@@ -687,6 +687,43 @@ class WidePaperTests(unittest.TestCase):
                 self.desk.update_config({key: 6})
         self.desk.update_config({"wide_leverage": 5, "wide_conv_leverage": 5})
 
+    def test_reset_archives_the_period_and_unlocks_capital(self):
+        self.desk.closed = [
+            dict(
+                asset="ERA",
+                strategy="funding",
+                legs=[dict(venue="A")],
+                net=-3.0,
+                price_pnl=-1.0,
+                funding=0.5,
+                fees=2.5,
+                closed_at=T0,
+            )
+        ]
+        self.desk.wallet = {"cash": 997.0}
+        self.desk.cfg["wide_capital"] = 1000.0
+        with self.assertRaises(ValueError):
+            self.desk.update_config({"wide_capital": 10000})
+        self.desk.positions = [dict(id="x", asset="BTC", legs=[], status="OPEN")]
+        with self.assertRaisesRegex(ValueError, "Açık pozisyon"):
+            self.desk.reset(10000)
+        self.desk.positions = []
+        self.desk.reset(10000)
+        self.assertEqual(self.desk.closed, [])
+        self.assertEqual(self.desk.wallet["cash"], 10000)
+        self.assertEqual(self.desk.cfg["wide_capital"], 10000)
+        (e,) = self.desk.snapshot()["epochs"]
+        self.assertEqual(
+            (e["capital"], e["cash"], e["trades"], e["net"]), (1000, 997, 1, -3)
+        )
+        self.assertNotIn("closed", e)
+        # The archive survives a restart; the new period starts clean.
+        again = WidePaper(self.store, self.src, sleep=lambda s: None)
+        self.assertEqual((again.wallet["cash"], again.closed), (10000, []))
+        self.assertEqual(
+            self.store.get("wide_epochs", [])[0]["closed"][0]["asset"], "ERA"
+        )
+
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
 

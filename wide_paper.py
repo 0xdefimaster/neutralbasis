@@ -633,6 +633,49 @@ class WidePaper:
         self.persist()
         self.events("CONFIG", "Çoklu borsa paper ayarları güncellendi")
 
+    def reset(self, capital=None):
+        """Start a new paper period: archive closed trades and their results, then begin
+        again from fresh capital. Results of different capitals are never mixed."""
+        if self.positions:
+            raise ValueError("Açık pozisyonlar kapanmadan paper sıfırlanamaz")
+        capital = WIDE_DEFAULTS["wide_capital"] if capital is None else number(capital)
+        lo, hi = LIMITS["wide_capital"]
+        if not lo <= capital <= hi:
+            raise ValueError("wide_capital sınır dışında")
+        trades = [p for p in self.closed if p.get("legs")]
+        epochs = self.store.get("wide_epochs", [])
+        epochs.append(
+            dict(
+                started=self.store.get("wide_epoch_start", None),
+                ended=now(),
+                capital=self.cfg["wide_capital"],
+                cash=self.wallet["cash"],
+                trades=len(trades),
+                net=sum(p.get("net", 0) for p in trades),
+                report=self.report(),
+                closed=self.closed,
+            )
+        )
+        self.store.put("wide_epochs", epochs)
+        self.store.put("wide_epoch_start", now())
+        self.closed = []
+        self.cfg["wide_capital"] = capital
+        self.wallet = {"cash": capital}
+        self.store.put("wide_daily", {})
+        self.persist()
+        self.events(
+            "RESET",
+            "Paper yeni dönemle sıfırlandı; önceki dönem arşivlendi",
+            capital=capital,
+            archived=len(trades),
+        )
+
+    def epochs(self):
+        return [
+            {k: v for k, v in e.items() if k != "closed"}
+            for e in self.store.get("wide_epochs", [])
+        ]
+
     def traded(self):
         """Any real (filled) position, open or closed."""
         return bool(self.positions) or any(p.get("legs") for p in self.closed)
@@ -1691,6 +1734,8 @@ class WidePaper:
             rfq_review_count=len(self.rfq_review),
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
             review=self.review_snapshot(),
+            epochs=self.epochs(),
+            epoch_start=self.store.get("wide_epoch_start", None),
             venues=venues,
             last_cycle=self.last_cycle,
             error=self.error,
