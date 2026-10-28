@@ -256,6 +256,7 @@ def trades_csv(trades):
             "fees_usd",
             "net_usd",
             "pending_funding",
+            "entry_reason",
             "close_reason",
             "funding_unverified_hours",
         ]
@@ -277,6 +278,7 @@ def trades_csv(trades):
                 x.get("fees"),
                 x.get("net"),
                 x.get("pending"),
+                x.get("entry_reason"),
                 x.get("reason"),
                 x.get("unverified"),
             ]
@@ -2036,6 +2038,7 @@ class WidePaper:
             estimated_funding=p.get("estimated_funding", 0.0),
             fees=p.get("fees", 0.0),
             venues=[leg.get("venue") for leg in p["legs"]],
+            entry_reason=p.get("entry_reason"),
             reason=p.get("close_reason"),
             pending=bool(p.get("pending_funding")),
             unverified=len(p.get("funding_unverified", [])),

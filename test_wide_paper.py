@@ -1084,6 +1084,11 @@ class WidePaperTests(unittest.TestCase):
         )
         (logged,) = self.desk.trade_log()
         self.assertEqual((logged["id"], logged["net"]), (pid, closed["net"]))
+        # Why it opened and why it closed travel with the trade.
+        self.assertTrue(
+            entry["entry_reason"].startswith("Funding: short Binance, long Hyperliquid")
+        )
+        self.assertEqual(entry["reason"], "Kullanıcı paper kapatma talebi")
 
     def test_trade_log_is_latest_first_and_exports_to_csv(self):
         self.desk.reset(venue_capital=1000)
@@ -1104,28 +1109,32 @@ class WidePaperTests(unittest.TestCase):
                 funding=float(i) + 1,
                 fees=0.5,
                 close_reason="Kâr kilidi",
+                entry_reason="Funding: short Aster, long Bybit",
             )
             self.desk.closed.append(p)
             self.desk.record_close(p)
         log = self.desk.trade_log()
         self.assertEqual([x["id"] for x in log], ["t1", "t2", "t0"])
         self.assertEqual(self.desk.snapshot()["trades"][0]["id"], "t1")
-        rows = wide_paper.trades_csv(log).splitlines()
-        self.assertTrue(rows[0].startswith("id,asset,strategy,long,short,opened_utc"))
+        import csv, io
+
+        rows = list(csv.reader(io.StringIO(wide_paper.trades_csv(log))))
         self.assertEqual(
-            rows[1].split(",")[:8],
-            [
-                "t1",
-                "BTC",
-                "funding",
-                "Bybit",
-                "Aster",
-                str(T0),
-                str(T0 + 900),
-                "1000.0",
-            ],
+            rows[0][:6], ["id", "asset", "strategy", "long", "short", "opened_utc"]
         )
         self.assertEqual(len(rows), 4)
+        row = dict(zip(rows[0], rows[1]))
+        self.assertEqual(
+            [
+                row[k]
+                for k in ("id", "long", "short", "opened_utc", "closed_utc", "size_usd")
+            ],
+            ["t1", "Bybit", "Aster", str(T0), str(T0 + 900), "1000.0"],
+        )
+        self.assertEqual(
+            (row["entry_reason"], row["close_reason"]),
+            ("Funding: short Aster, long Bybit", "Kâr kilidi"),
+        )
 
     def test_cycles_record_hourly_equity(self):
         self.desk.reset(venue_capital=1000)
