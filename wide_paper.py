@@ -16,18 +16,18 @@ from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIE
 NATIVE = ("Lighter", "Extended")
 WIDE_DEFAULTS = dict(
     wide_enabled=True,
-    wide_capital=1000.0,
-    wide_size=500.0,
+    wide_capital=10000.0,
+    wide_size=1000.0,
     wide_leverage=3.0,
     wide_reserve=0.30,
-    wide_max_positions=2,
+    wide_max_positions=10,
     wide_horizon=24,
     wide_min_net=0.50,
-    wide_risk=10.0,
-    wide_daily_loss=30.0,
+    wide_risk=50.0,
+    wide_daily_loss=500.0,
     wide_min_corr=0.90,
     wide_max_z=3.0,
-    wide_deep_top=3,
+    wide_deep_top=5,
     wide_cooldown_seconds=3600,
     wide_max_hold_hours=168,
     wide_funding_enabled=True,
@@ -43,6 +43,16 @@ WIDE_DEFAULTS = dict(
     wide_conv_exit_bps=2.0,
     wide_max_spread_sd_bps=30.0,
     wide_weak_minutes=30,
+)
+# Earlier defaults: a stored config still holding them is moved to the current ones
+# (only before any real trade, since the wallet follows the capital).
+OLD_DEFAULTS = dict(
+    wide_capital=1000.0,
+    wide_size=500.0,
+    wide_max_positions=2,
+    wide_risk=10.0,
+    wide_daily_loss=30.0,
+    wide_deep_top=3,
 )
 BOOLS = ("wide_enabled", "wide_funding_enabled", "wide_conv_enabled")
 LIMITS = dict(
@@ -520,6 +530,15 @@ class WidePaper:
         self.positions = store.get("wide_positions", [])
         self.closed = store.get("wide_closed", [])
         self.wallet = store.get("wide_wallet", {"cash": self.cfg["wide_capital"]})
+        if not self.traded():
+            moved = {
+                k: WIDE_DEFAULTS[k]
+                for k, old in OLD_DEFAULTS.items()
+                if self.cfg.get(k) == old
+            }
+            if moved:
+                self.cfg.update(moved)
+                self.wallet = {"cash": self.cfg["wide_capital"]}
         self.manual_close = set()
         self.candidates = []
         self.assessed = []
@@ -604,7 +623,7 @@ class WidePaper:
                 raise ValueError(k + " sınır dışında")
             fresh[k] = int(n) if isinstance(WIDE_DEFAULTS[k], int) else n
         if fresh["wide_capital"] != self.cfg["wide_capital"]:
-            if self.positions or self.closed:
+            if self.traded():
                 raise ValueError(
                     "Çoklu borsa sermayesi işlem kayıtlarından sonra değiştirilemez"
                 )
@@ -613,6 +632,53 @@ class WidePaper:
         self.cfg = fresh
         self.persist()
         self.events("CONFIG", "Çoklu borsa paper ayarları güncellendi")
+
+    def reset(self, capital=None):
+        """Start a new paper period: archive closed trades and their results, then begin
+        again from fresh capital. Results of different capitals are never mixed."""
+        if self.positions:
+            raise ValueError("Açık pozisyonlar kapanmadan paper sıfırlanamaz")
+        capital = WIDE_DEFAULTS["wide_capital"] if capital is None else number(capital)
+        lo, hi = LIMITS["wide_capital"]
+        if not lo <= capital <= hi:
+            raise ValueError("wide_capital sınır dışında")
+        trades = [p for p in self.closed if p.get("legs")]
+        epochs = self.store.get("wide_epochs", [])
+        epochs.append(
+            dict(
+                started=self.store.get("wide_epoch_start", None),
+                ended=now(),
+                capital=self.cfg["wide_capital"],
+                cash=self.wallet["cash"],
+                trades=len(trades),
+                net=sum(p.get("net", 0) for p in trades),
+                report=self.report(),
+                closed=self.closed,
+            )
+        )
+        self.store.put("wide_epochs", epochs)
+        self.store.put("wide_epoch_start", now())
+        self.closed = []
+        self.cfg["wide_capital"] = capital
+        self.wallet = {"cash": capital}
+        self.store.put("wide_daily", {})
+        self.persist()
+        self.events(
+            "RESET",
+            "Paper yeni dönemle sıfırlandı; önceki dönem arşivlendi",
+            capital=capital,
+            archived=len(trades),
+        )
+
+    def epochs(self):
+        return [
+            {k: v for k, v in e.items() if k != "closed"}
+            for e in self.store.get("wide_epochs", [])
+        ]
+
+    def traded(self):
+        """Any real (filled) position, open or closed."""
+        return bool(self.positions) or any(p.get("legs") for p in self.closed)
 
     # --- cached public reads ---------------------------------------------------
     def cached(self, key, ttl, fn):
@@ -649,6 +715,27 @@ class WidePaper:
             reasons.append("Kapanış sonrası bekleme süresi")
         return reasons
 
+    def entry_halt(self):
+        """Why no new position may open now, or None."""
+        busy = [p["status"] for p in self.positions if p["status"] != "OPEN"]
+        if busy:
+            return "açık pozisyon " + busy[0] + " durumunda"
+        if len(self.positions) >= self.cfg["wide_max_positions"]:
+            return "pozisyon sınırı dolu"
+        if self.daily_pnl() <= -self.cfg["wide_daily_loss"]:
+            return "günlük kayıp limiti doldu"
+        return None
+
+    def risk_budget(self):
+        """Loss one new trade may risk: the per-trade limit or what is left of the day's."""
+        return min(
+            self.cfg["wide_risk"], self.cfg["wide_daily_loss"] + self.daily_pnl()
+        )
+
+    @staticmethod
+    def worst_loss(c):
+        return c["entry_fee"] + c["exit_fee"] + c["execution_drag"] + c["stress_loss"]
+
     def priced(self, c, leverage_cap, stress, size, vol=0.0, hold=24):
         """Size against margin, reserve and loss budget; VWAP all four fills on fresh books."""
         cfg = self.cfg
@@ -675,10 +762,9 @@ class WidePaper:
         )
         fee_l, fee_s = c["fee_long"], c["fee_short"]
         extra = self.extra_slippage
-        daily = self.daily_pnl()
-        if daily <= -cfg["wide_daily_loss"]:
+        if self.daily_pnl() <= -cfg["wide_daily_loss"]:
             raise ValueError("Günlük kayıp limiti doldu")
-        budget = min(cfg["wide_risk"], cfg["wide_daily_loss"] + daily)
+        budget = self.risk_budget()
         # Margin plus entry fee of both legs per $1 notional, at the worst accepted fill.
         per_dollar = (1 + FILL_TOLERANCE) * (2 / leverage + fee_l + fee_s)
         notional = min(
@@ -1512,10 +1598,13 @@ class WidePaper:
                     k: x for k, x in self.rejected.items() if x["until"] > at
                 }
                 self.review["rounds"] += 1
+                top = self.cfg["wide_deep_top"]
                 for ranked in (self.candidates, self.conv_candidates):
-                    picked = []
+                    picked, counted = [], 0
                     for c in ranked:
-                        if len(picked) >= self.cfg["wide_deep_top"] or c["score"] <= 0:
+                        # Pairs still waiting for history fail fast and do not use up a
+                        # deep-check slot; the total per round stays bounded.
+                        if counted >= top or len(picked) >= top * 4 or c["score"] <= 0:
                             break
                         if (
                             self.blocked(c)
@@ -1524,16 +1613,37 @@ class WidePaper:
                         ):
                             self.review["skipped"] += 1
                             continue
-                        picked.append(self.assess(c))
+                        x = self.assess(c)
+                        picked.append(x)
+                        if not any(
+                            reason_group(r) == "Geçmiş eksik" for r in x["reasons"]
+                        ):
+                            counted += 1
                     self.assessed += picked
                 for x in self.assessed:
                     self.note_review(x, at)
-                best = max(
+                # Every qualifying pair is entered, best first, one per asset, while
+                # position slots and margin headroom last.
+                for best in sorted(
                     (x for x in self.assessed if x["eligible"]),
-                    key=lambda x: x["net"],
-                    default=None,
-                )
-                if best:
+                    key=lambda x: -x["net"],
+                ):
+                    # An earlier entry this round may have left a leg in recovery or
+                    # used up the day's loss budget: check again before every entry.
+                    halt = self.entry_halt()
+                    if halt:
+                        self.events("ENTRY_HALT", "Yeni girişler durduruldu: " + halt)
+                        break
+                    if self.blocked(best):
+                        continue
+                    # Sized against the headroom before earlier entries this round.
+                    need = (1 + FILL_TOLERANCE) * (
+                        2 * best["size"] / best["leverage"] + best["entry_fee"]
+                    )
+                    if need > self.headroom():
+                        continue
+                    if self.worst_loss(best) > self.risk_budget() + 1e-6:
+                        continue
                     stale = self.entry_funding_check(best)
                     if stale:
                         best["eligible"] = False
@@ -1624,6 +1734,8 @@ class WidePaper:
             rfq_review_count=len(self.rfq_review),
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
             review=self.review_snapshot(),
+            epochs=self.epochs(),
+            epoch_start=self.store.get("wide_epoch_start", None),
             venues=venues,
             last_cycle=self.last_cycle,
             error=self.error,

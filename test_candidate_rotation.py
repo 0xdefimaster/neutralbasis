@@ -45,23 +45,24 @@ class RotationTests(unittest.TestCase):
     def test_rejected_pairs_give_way_to_the_next_ones(self):
         self.reasons["B"] = "30 günlük eşlenmiş 1h mum eksik"
         self.desk.cycle()
-        self.assertEqual(self.seen, ["A", "B", "C"])
+        # B fails on missing history and does not use up one of the three slots.
+        self.assertEqual(self.seen, ["A", "B", "C", "D"])
         self.clock += 60
         self.desk.cycle()
-        self.assertEqual(self.seen[3:], ["D", "E", "F"])
+        self.assertEqual(self.seen[4:], ["E", "F", "G"])
         r = self.desk.review_snapshot()
-        self.assertEqual((r["rounds"], r["examined"], r["eligible"]), (2, 6, 0))
+        self.assertEqual((r["rounds"], r["examined"], r["eligible"]), (2, 7, 0))
         self.assertEqual(r["reasons"]["Geçmiş eksik"], 1)
-        self.assertEqual(r["reasons"]["7g / 30g getiri korelasyonu sınır altında"], 5)
+        self.assertEqual(r["reasons"]["7g / 30g getiri korelasyonu sınır altında"], 6)
         self.assertEqual(r["waiting"]["Geçmiş eksik"], 1)
         # History retry comes back sooner than an ordinary rejection.
         self.clock = T0 + wide_paper.HISTORY_RETRY + 1
         del self.reasons["B"]
         self.desk.cycle()
-        self.assertEqual(self.seen[6:], ["B", "G"])
+        self.assertEqual(self.seen[7:], ["B"])
         self.clock = T0 + wide_paper.REJECT_COOLDOWN + 1
         self.desk.cycle()
-        self.assertEqual(self.seen[8:], ["A", "C"])
+        self.assertEqual(self.seen[8:], ["A", "C", "D"])
 
     def test_history_needs_put_history_rejections_first(self):
         self.reasons["C"] = "B: 24 saat gerçekleşmiş funding geçmişi eksik"
@@ -79,6 +80,80 @@ class RotationTests(unittest.TestCase):
             reason_group("Bu genişlikte geçmiş makas kapanışı yetersiz (2)"),
             "Bu genişlikte geçmiş makas kapanışı yetersiz (2)",
         )
+
+
+class EntryLoopTests(unittest.TestCase):
+    """Several qualifying pairs in one round: every entry re-checks the desk first."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.store = bot.Store(os.path.join(self.dir.name, "e.sqlite3"))
+        self.cands = [cand(a, 10 - i) for i, a in enumerate("ABC")]
+        for p in (
+            mock.patch.object(bot, "now", lambda: T0),
+            mock.patch.object(wide_paper, "now", lambda: T0),
+            mock.patch.object(wide_paper, "rank", lambda rows, cfg, at: self.cands),
+            mock.patch.object(wide_paper, "rank_spreads", lambda rows, at: []),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        self.desk = WidePaper(self.store, FakeSource(), sleep=lambda s: None)
+        self.desk.cfg.update(wide_enabled=True)
+        self.desk.assess = lambda c: dict(
+            c,
+            reasons=[],
+            eligible=True,
+            net=c["score"],
+            size=1000.0,
+            leverage=2.0,
+            entry_fee=0.5,
+            exit_fee=0.5,
+            execution_drag=0.5,
+            stress_loss=5.0,
+        )
+        self.desk.entry_funding_check = lambda c: None
+        self.opened = []
+        self.status = "OPEN"
+
+        def fake_open(c):
+            self.opened.append(c["asset"])
+            self.desk.positions.append(
+                dict(id=c["asset"], asset=c["asset"], legs=[], status=self.status)
+            )
+
+        self.desk.open = fake_open
+        # The fake positions above are not marked again within the round under test.
+        self.desk.settle = lambda p: None
+
+    def tearDown(self):
+        self.store.db.close()
+        self.dir.cleanup()
+
+    def test_all_qualifying_pairs_open_best_first(self):
+        self.desk.cycle()
+        self.assertEqual(self.opened, ["A", "B", "C"])
+
+    def test_first_entry_in_recovery_stops_the_round(self):
+        self.status = "RECOVERY"
+        self.desk.cycle()
+        self.assertEqual(self.opened, ["A"])
+        halts = self.store.db.execute(
+            "select body from events where kind='WIDE_ENTRY_HALT'"
+        ).fetchall()
+        self.assertIn("RECOVERY", halts[0][0])
+
+    def test_daily_loss_budget_is_checked_before_each_entry(self):
+        # The second entry would fit the per-trade limit but not what is left of the day.
+        self.desk.cfg.update(wide_daily_loss=10.0)
+
+        def losing_open(c):
+            self.opened.append(c["asset"])
+            self.desk.wallet["cash"] -= 5
+
+        self.desk.daily_pnl()
+        self.desk.open = losing_open
+        self.desk.cycle()
+        self.assertEqual(self.opened, ["A"])
 
 
 class PrioritySource:

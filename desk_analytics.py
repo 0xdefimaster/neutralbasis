@@ -442,6 +442,9 @@ class DeskEngine(RiskEngine):
         # Real RFQ books stream only once the engine loop runs (not in --once or tests).
         self.rfq = ExtendedRfq(self.store, self.stop_event)
         self.rfq_live = False
+        from retention import Retention
+
+        self.retention = Retention(self.store, self.stop_event)
         self.read_lock = threading.RLock()
         self.read_jobs = {}
 
@@ -670,6 +673,7 @@ class DeskEngine(RiskEngine):
         self.rfq_live = True
         self.wide.start()
         self.history.start()
+        self.retention.start()
         return super().loop()
 
     def update_config(self, changes):
@@ -690,6 +694,7 @@ class DeskEngine(RiskEngine):
         o["wide_paper"] = self.wide_paper.snapshot()
         o["history_status"] = self.history.status()
         o["rfq_streams"] = self.rfq.status()
+        o["retention"] = self.retention.status
         o["deployment"] = (
             "Geniş public tarama: DEX + CEX. Lighter Core ve Robinhood ayrı kaynaklar. Paper yürütme: Lighter RH–Extended masası + tüm taranan borsalarda çoklu borsa funding masası."
         )
