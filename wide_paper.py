@@ -618,11 +618,7 @@ class WidePaper:
         # Taker fees the user read from their own account, by venue; public otherwise.
         self.fees = store.get("wide_fees", {})
         if not self.traded():
-            moved = {
-                k: WIDE_DEFAULTS[k]
-                for k, old in OLD_DEFAULTS.items()
-                if self.cfg.get(k) == old
-            }
+            moved = self.moved_defaults()
             if moved:
                 self.cfg.update(moved)
                 self.wallet = {"cash": self.cfg["wide_capital"]}
@@ -658,6 +654,15 @@ class WidePaper:
 
     def events(self, kind, message, **kwargs):
         self.store.event("WIDE_" + kind, dict(message=message, **kwargs))
+
+    def moved_defaults(self):
+        """Settings still at an earlier default; a desk without trades, or a new period,
+        takes the current ones. Values the user changed stay."""
+        return {
+            k: WIDE_DEFAULTS[k]
+            for k, old in OLD_DEFAULTS.items()
+            if self.cfg.get(k) == old
+        }
 
     def per_venue(self):
         """Each account venue holds its own collateral (set by a reset)."""
@@ -871,6 +876,7 @@ class WidePaper:
         self.store.put("wide_equity", [])
         self.store.put("wide_ledger", {})
         self.closed = []
+        self.cfg.update(self.moved_defaults())
         self.cfg["wide_capital"] = capital
         self.wallet = {"cash": capital}
         if venue_capital is not None:

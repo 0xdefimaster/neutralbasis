@@ -753,6 +753,22 @@ class WidePaperTests(unittest.TestCase):
         again = WidePaper(self.store, self.src, sleep=lambda s: None)
         self.assertEqual(again.wallet["venues"], venues)
 
+    def test_a_new_period_takes_the_current_defaults(self):
+        # A desk that traded under the old defaults kept them; its next period does not.
+        self.desk.cfg.update(wide_paper.OLD_DEFAULTS)
+        self.desk.cfg["wide_size"] = 700.0  # changed by the user: stays
+        self.desk.closed = [dict(asset="ERA", legs=[dict(venue="A")], net=1.0)]
+        self.desk.reset(venue_capital=1000)
+        for k in (
+            "wide_max_positions",
+            "wide_risk",
+            "wide_daily_loss",
+            "wide_deep_top",
+        ):
+            self.assertEqual(self.desk.cfg[k], wide_paper.WIDE_DEFAULTS[k], k)
+        self.assertEqual(self.desk.cfg["wide_size"], 700.0)
+        self.assertEqual(self.desk.cfg["wide_capital"], 1000 * 15)
+
     def test_per_venue_reset_takes_a_chosen_venue_list(self):
         self.desk.reset(venue_capital=500, venues=["Binance", "Hyperliquid"])
         self.assertEqual(
