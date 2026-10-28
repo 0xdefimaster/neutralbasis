@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 # Windows Görev Zamanlayıcı görevi: oturum açılınca ve her 5 dakikada bir Baslat.ps1 çalışır.
 # Baslat.ps1 motor zaten çalışıyorsa hiçbir şey yapmaz; kapanmış ya da çökmüşse yeniden başlatır.
 $taskName = 'neutralbasis paper'
