@@ -9,7 +9,7 @@ Public data only. No order endpoint, no credentials; every fill is simulated aga
 the venue's real public order book. Capital is one pooled paper wallet.
 """
 
-import datetime as dt, itertools, json, math, statistics, time, uuid
+import collections, datetime as dt, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
 
 # Native venues whose taker fee is configured; the rest come from the CCXT scanner.
@@ -17,6 +17,8 @@ NATIVE = ("Lighter", "Extended")
 # Venues the user holds accounts on. In per-venue mode each one has its own paper
 # collateral, as a real account would: a leg is margined only by its own venue.
 ACCOUNT_VENUES = ("Lighter", "Extended", "Hyperliquid", "TxFlow", "RISEx", "Arcus")
+# Venues whose public data comes from the desk's own feed instead of the CCXT scanner.
+FEED_VENUES = ("Lighter", "Extended", "TxFlow", "RISEx", "Arcus")
 WIDE_DEFAULTS = dict(
     wide_enabled=True,
     wide_capital=10000.0,
@@ -194,7 +196,36 @@ def pair_fields(a, l, s):
         leverage_short=s.get("leverage"),
         rfq_long=bool(l.get("rfq")),
         rfq_short=bool(s.get("rfq")),
+        lot_long=lot_of(l),
+        lot_short=lot_of(s),
     )
+
+
+def lot_of(row):
+    """A venue's order size rules, in base units and quote currency; None if unpublished."""
+    return dict(
+        step=row.get("step"), minimum=row.get("minimum"), min_quote=row.get("min_quote")
+    )
+
+
+def fit_lots(qty, price, lots):
+    """Round an equal base quantity down to every leg's size step and check each venue's
+    minimum order. A quantity no venue would accept is refused, never assumed."""
+    steps = [x["step"] for x in lots if x and x.get("step")]
+    if steps:
+        big = max(steps)
+        qty = math.floor(qty / big * (1 + 1e-9)) * big
+        for step in steps:
+            if abs(qty / step - round(qty / step)) > 1e-6:
+                raise ValueError("Bacakların emir adımı uyumsuz; eşit miktar kurulamaz")
+    for x in lots:
+        if not x:
+            continue
+        if qty <= 0 or qty < (x.get("minimum") or 0) - 1e-12:
+            raise ValueError("Borsanın asgari emir miktarının altında")
+        if qty * price < (x.get("min_quote") or 0):
+            raise ValueError("Borsanın asgari emir tutarının altında")
+    return qty
 
 
 RFQ_UNSUPPORTED = "RFQ yürütmesi henüz desteklenmiyor"
@@ -420,6 +451,9 @@ def universe_rows(universe, rows, held=()):
                     volume=x.get("volume"),
                     oi=x.get("oi"),
                     execution=False,
+                    step=x.get("step"),
+                    minimum=x.get("minimum"),
+                    min_quote=x.get("min_quote"),
                 )
             )
     return out
@@ -434,14 +468,18 @@ class EngineSource:
     def market_rows(self):
         e = self.engine
         rows = []
-        for v in NATIVE:
+        self.excluded = {}
+        for v in FEED_VENUES:
             try:
                 fee = e.fee(v)
-            except ValueError:
+            except ValueError as ex:
+                if e.feed.meta.get(v):
+                    self.excluded[v] = str(ex)
                 continue
             for a, m in list(e.feed.meta.get(v, {}).items()):
                 if not m or m.get("rate") is None:
                     continue
+                interval = m.get("interval") or 3600
                 rows.append(
                     dict(
                         asset=a,
@@ -449,25 +487,30 @@ class EngineSource:
                         kind="perp",
                         mark=m["mark"],
                         rate=m["rate"],
-                        raw_rate=m["rate"],
-                        interval=3600,
+                        raw_rate=m.get("raw_rate", m["rate"] * interval / 3600),
+                        interval=interval,
                         next=m.get("next"),
                         received=m["received"],
                         fee=fee,
                         leverage=m.get("max_leverage"),
                         price_type="mark",
                         rfq=bool(m.get("rfq")),
+                        step=m.get("step"),
+                        minimum=m.get("minimum"),
+                        min_quote=m.get("min_quote"),
                     )
                 )
         extra, _ = e.wide.snapshot()
-        rows += [r for r in extra if r["kind"] == "perp" and r["venue"] not in NATIVE]
+        rows += [
+            r for r in extra if r["kind"] == "perp" and r["venue"] not in FEED_VENUES
+        ]
         held = {
             p["asset"] for p in getattr(getattr(e, "wide_paper", None), "positions", [])
         }
         return rows + universe_rows(e.wide.universe_snapshot(), rows, held)
 
     def book(self, v, a):
-        if v in NATIVE:
+        if v in FEED_VENUES:
             return self.engine.feed.book(v, a)
         return self.engine.wide.book(v, a)
 
@@ -482,6 +525,9 @@ class EngineSource:
         try:
             if v in NATIVE:
                 live = {**self.engine.feed.candles(v, a), "price_type": "trade"}
+            elif v in FEED_VENUES:
+                # Oracle-priced candles stay labelled; history checks refuse them.
+                live = self.engine.feed.candles(v, a)
             else:
                 live, _, _ = self.engine.wide.history(v, a, 30)
         except Exception as ex:
@@ -501,12 +547,12 @@ class EngineSource:
         return live
 
     def current_funding(self, v, a):
-        if v in NATIVE:
+        if v in FEED_VENUES:
             raise ValueError(v + ": yerel besleme kendi tazeliğini tutar")
         return self.engine.wide.current_funding(v, a)
 
     def funding(self, v, a, start):
-        if v in NATIVE:
+        if v in FEED_VENUES:
             return self.engine.feed.funding_history(v, a, start)
         return self.engine.wide.funding_since(v, a, start)
 
@@ -555,6 +601,8 @@ class WidePaper:
         self.cache = {}
         self.latency_ms = 750
         self.extra_slippage = 0.0001
+        # Measured round trips of each venue's public book request, in seconds.
+        self.rtt = collections.defaultdict(lambda: collections.deque(maxlen=50))
 
     # --- state ---------------------------------------------------------------
     def persist(self):
@@ -615,12 +663,16 @@ class WidePaper:
         if not self.per_venue():
             return []
         live = {v for v, a in self.rows}
+        excluded = getattr(self.source, "excluded", {})
         return [
             dict(
                 venue=v,
                 **self.balance(v),
                 headroom=self.headroom(v),
                 data=v in live,
+                reason=excluded.get(v),
+                latency_ms=round(self.latency(v) * 1000),
+                measured=len(self.rtt[v]),
             )
             for v in self.wallet["venues"]
         ]
@@ -792,7 +844,7 @@ class WidePaper:
         """Size against margin, reserve and loss budget; VWAP all four fills on fresh books."""
         cfg = self.cfg
         a, lv, sv = c["asset"], c["long"], c["short"]
-        lb, sb = self.source.book(lv, a), self.source.book(sv, a)
+        lb, sb = self.book(lv, a), self.book(sv, a)
         if (
             abs(lb["received"] - sb["received"]) > 5
             or now() - min(lb["received"], sb["received"]) > 30
@@ -836,8 +888,10 @@ class WidePaper:
         price = (mid[lv] + mid[sv]) / 2
         if notional < MIN_NOTIONAL:
             raise ValueError("Risk/marjin sınırı sonrası büyüklük minimumun altında")
-        # Equal base quantity on both legs.
-        qty = notional / price
+        # Equal base quantity on both legs, in sizes both venues accept.
+        qty = fit_lots(notional / price, price, [c.get("lot_long"), c.get("lot_short")])
+        if qty * price < MIN_NOTIONAL:
+            raise ValueError("Risk/marjin sınırı sonrası büyüklük minimumun altında")
         la, ss = walk(lb["asks"], qty, True, extra), walk(sb["bids"], qty, False, extra)
         lc, sc = walk(lb["bids"], qty, False, extra), walk(sb["asks"], qty, True, extra)
         return dict(
@@ -1168,8 +1222,21 @@ class WidePaper:
             return "Girişte funding yenilendi: net hedefin altına düştü"
         return None
 
-    def quote(self, v, a, qty, buy):
+    def book(self, v, a):
+        started = time.monotonic()
         b = self.source.book(v, a)
+        self.rtt[v].append(time.monotonic() - started)
+        return b
+
+    def latency(self, v):
+        """Delay before a leg fills: the configured floor or the venue's measured p90
+        round trip, whichever is longer. A real order travels the same network path."""
+        seen = sorted(self.rtt[v])
+        p90 = seen[int(0.9 * (len(seen) - 1))] if seen else 0.0
+        return max(self.latency_ms / 1000, p90)
+
+    def quote(self, v, a, qty, buy):
+        b = self.book(v, a)
         return walk(b["asks" if buy else "bids"], qty, buy, self.extra_slippage), b
 
     def open(self, c):
@@ -1194,7 +1261,7 @@ class WidePaper:
         self.persist()
         try:
             for venue, side in ((c["long"], "long"), (c["short"], "short")):
-                self.sleep(self.latency_ms / 1000)
+                self.sleep(self.latency(venue))
                 px, b = self.quote(venue, c["asset"], c["qty"], side == "long")
                 planned = c["entry_long"] if side == "long" else c["entry_short"]
                 if abs(px / planned - 1) > FILL_TOLERANCE:
@@ -1411,7 +1478,7 @@ class WidePaper:
             if leg["closed"]:
                 continue
             try:
-                self.sleep(self.latency_ms / 1000)
+                self.sleep(self.latency(leg["venue"]))
                 px, b = self.quote(
                     leg["venue"], p["asset"], leg["qty"], leg["side"] == "short"
                 )
@@ -1611,7 +1678,7 @@ class WidePaper:
                 try:
                     self.settle(p)
                     books = {
-                        l["venue"]: self.source.book(l["venue"], p["asset"])
+                        l["venue"]: self.book(l["venue"], p["asset"])
                         for l in p["legs"]
                         if not l["closed"]
                     }

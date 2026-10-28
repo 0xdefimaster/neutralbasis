@@ -16,7 +16,22 @@ Hesap açılacak borsalar: **Lighter, Extended, Hyperliquid, TxFlow, RISEx, Arcu
 - **Transfer yok:** Borsalar arasında transfer yapılmaz. Bir borsada biriken kâr, öbüründeki eksiği kapatmaz.
 - **Teminat tablosu:** Çoklu paper ekranında borsa başı nakit, özsermaye, marjin, boş teminat ve veri durumu görünür.
 
-**Bilinen eksik:** TxFlow, RISEx ve Arcus şu an çoklu paper masasına veri vermiyor. Sebepleri: funding geçmişi doğrulanmadı, ücret tarifesi yok, defter adaptörü yok. Tabloda "veri yok · işlem açılmaz" olarak görünürler. Bu yüzden ilk dönemde fiilen işlem açılabilecek borsalar **Lighter, Extended ve Hyperliquid**.
+## Aşama 1b — Gerçeğe yakınlık (bu dalda yapıldı)
+
+- **Üç borsa masaya bağlandı:** TxFlow, RISEx ve Arcus artık masanın kendi beslemesinden (defter, 1h mumlar, funding geçmişi) çoklu paper masasına bağlı. Her borsa ancak gerçekten işlem açılabilecek veri tamsa işleme girer. Şu anki durum:
+  - **Arcus:** Ücret tarifesi public API'den okunuyor. Ancak fiyat geçmişi oracle fiyatı; işlem fiyatı korelasyon kontrolünü geçmediği için çiftler genelde elenir.
+  - **RISEx:** Taker ücreti public olarak doğrulanmadı, işlem açılmaz. Gerekçe panelde yazar.
+  - **TxFlow:** Taker ücreti ve gerçekleşmiş funding geçmişi doğrulanmadı, işlem açılmaz.
+
+  Bu iki boşluk Aşama 2'de hesap anahtarıyla (gerçek ücret kademesi, gerçek funding ödemeleri) kapanacak.
+- **Lot kuralları:** Emir miktarı iki borsanın adım büyüklüğüne aşağı yuvarlanıyor. Borsanın asgari miktarı ya da asgari tutarı altında kalan işlem açılmıyor. Kurallar Lighter, Extended, TxFlow, RISEx ve Arcus'ta kendi API'lerinden, CCXT borsalarında (Hyperliquid) piyasa tanımından geliyor. Yayımlanmayan kural uydurulmuyor.
+- **Ölçülen gecikme:** Her bacak, ayarlanan tabandan (750 ms) ya da o borsanın son 50 defter isteğinde ölçülen p90 gidiş-dönüş süresinden hangisi uzunsa o kadar bekleyip, sonra taze defterden doluyor. Bu süre borsa tablosunda görünüyor.
+
+## Hâlâ modellenmeyenler
+
+- **İki kontrol arasındaki fiyat sıçramaları:** Pozisyonlar her turda defterden işaretleniyor. Turlar arasındaki kısa ani hareket (fitil) görülmüyor. Gerçekte bu hareket likidasyona yol açabilir.
+- **Gerçek ücret kademesi:** Public tarife kullanılıyor; Aşama 2'de hesaptan okunacak.
+- **Dolum doğruluğu:** Paper'ın dolum fiyatının gerçekle ne kadar örtüştüğü ancak gerçek emirle ölçülebilir (Aşama 3, isteğe bağlı mikro emir).
 
 ## Aşama 2 — Bağlantı ve salt okunur hesap
 

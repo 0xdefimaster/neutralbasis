@@ -45,6 +45,10 @@ def book(mid, at, depth=1000.0, half=0.01):
     )
 
 
+def lot_free():
+    return dict(step=None, minimum=None, min_quote=None)
+
+
 class FakeSource:
     def __init__(self):
         self.rows = []
@@ -810,6 +814,51 @@ class WidePaperTests(unittest.TestCase):
             self.desk.closed[0]["close_reason"], "Borsa teminatı riski: Extended"
         )
 
+    def test_order_size_follows_each_venue_lot_rules(self):
+        lots = [dict(step=0.01, minimum=0.05, min_quote=10), dict(step=0.001)]
+        self.assertAlmostEqual(wide_paper.fit_lots(2.3456, 100, lots), 2.34)
+        with self.assertRaisesRegex(ValueError, "asgari emir miktarı"):
+            wide_paper.fit_lots(0.049, 100, lots)
+        with self.assertRaisesRegex(ValueError, "asgari emir tutarı"):
+            wide_paper.fit_lots(0.09, 100, lots)
+        with self.assertRaisesRegex(ValueError, "adımı uyumsuz"):
+            wide_paper.fit_lots(1.0, 100, [dict(step=0.3), dict(step=0.2)])
+        # Unpublished rules do not block; they are not invented either.
+        self.assertEqual(wide_paper.fit_lots(1.2345, 100, [None, lot_free()]), 1.2345)
+
+    def test_entry_quantity_is_rounded_to_the_coarser_step(self):
+        self.setup_pair()
+        self.src.rows = [dict(r, step=0.1, minimum=0.1) for r in self.src.rows]
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        qty = self.desk.positions[0]["legs"][0]["qty"]
+        self.assertAlmostEqual(qty / 0.1, round(qty / 0.1))
+        self.assertTrue(all(l["qty"] == qty for l in self.desk.positions[0]["legs"]))
+
+    def test_entry_below_a_venue_minimum_is_refused(self):
+        self.setup_pair()
+        self.src.rows = [dict(r, minimum=10_000) for r in self.src.rows]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn(
+            "Borsanın asgari emir miktarının altında",
+            self.desk.assessed[0]["reasons"][0],
+        )
+
+    def test_fill_waits_for_the_venue_measured_round_trip(self):
+        self.setup_pair()
+        slept = []
+        self.desk.sleep = slept.append
+        self.desk.rtt["Binance"].extend([0.2] * 9 + [2.5] * 3)
+        self.desk.rtt["Hyperliquid"].extend([0.1] * 20)
+        self.assertAlmostEqual(self.desk.latency("Binance"), 2.5)
+        self.assertAlmostEqual(self.desk.latency("Hyperliquid"), 0.75)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        legs = [l["venue"] for l in self.desk.positions[0]["legs"]]
+        self.assertEqual(slept, [self.desk.latency(v) for v in legs])
+        self.assertIn(2.5, slept)
+
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
 
@@ -829,12 +878,23 @@ class DeskIntegrationTests(unittest.TestCase):
                 e.update_config({"wide_max_positions": 4})
                 self.assertEqual(e.wide_paper.cfg["wide_max_positions"], 4)
                 self.assertNotIn("wide_max_positions", e.cfg)
-                rows = EngineSource(e).market_rows()
+                source = EngineSource(e)
+                rows = source.market_rows()
                 self.assertTrue(rows)
-                self.assertTrue(
-                    all(r["venue"] in ("Lighter", "Extended") for r in rows)
-                )
+                # Feed venues with a known taker fee join; the others say why not.
+                self.assertTrue(all(r["venue"] in wide_paper.FEED_VENUES for r in rows))
                 self.assertTrue(all(r["fee"] == e.fee(r["venue"]) for r in rows))
+                venues = {r["venue"] for r in rows}
+                self.assertIn("Arcus", venues)
+                f.meta["RISEx"] = {"BTC": dict(f.meta["Arcus"]["BTC"], venue="RISEx")}
+                self.assertNotIn("RISEx", {r["venue"] for r in source.market_rows()})
+                self.assertIn("ücret", source.excluded["RISEx"])
+                for r in rows:
+                    m = f.meta[r["venue"]][r["asset"]]
+                    self.assertEqual(r["interval"], m.get("interval") or 3600)
+                    self.assertAlmostEqual(
+                        r["rate"] * r["interval"] / 3600, r["raw_rate"]
+                    )
                 snap = json.loads(json.dumps(e.snapshot()))
                 self.assertIn("wide_paper", snap)
                 self.assertEqual(snap["wide_paper"]["balance"]["cash"], 10000)
