@@ -1514,6 +1514,11 @@ class ExclusiveServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+# A panel action waits for the running scan to finish instead of being refused; a scan
+# across every venue can take minutes.
+ACTION_LOCK_WAIT = 240
+
+
 def serve(engine, port, host="127.0.0.1", password=None):
     """Local by default. A non-loopback bind (hosted deploy) requires a dashboard password."""
     token = uuid.uuid4().hex
@@ -1709,9 +1714,12 @@ def serve(engine, port, host="127.0.0.1", password=None):
                         ),
                     )
                     return self.send({"ok": True})
-                if not engine.lock.acquire(timeout=0.1):
+                if not engine.lock.acquire(timeout=ACTION_LOCK_WAIT):
                     return self.send(
-                        {"error": "Tarama sürüyor; tamamlanınca tekrar deneyin"}, 409
+                        {
+                            "error": "Tarama 4 dakikadan uzun sürüyor; işlem uygulanmadı, birazdan tekrar deneyin"
+                        },
+                        409,
                     )
                 try:
                     if self.path == "/api/start":

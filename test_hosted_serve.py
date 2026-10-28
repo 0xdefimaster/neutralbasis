@@ -1,4 +1,5 @@
-import base64, json, socket, threading, unittest, urllib.error, urllib.request
+import base64, json, socket, threading, time, unittest, urllib.error, urllib.request
+from unittest import mock
 import bot
 
 
@@ -87,6 +88,29 @@ class HostedServeTests(unittest.TestCase):
     def token(self):
         html = self.call("/", "s3cret")[1]
         return html.split("window.paperToken='")[1].split("'")[0]
+
+    def test_action_waits_for_the_running_scan(self):
+        seen = []
+        self.engine.update_config = seen.append
+        token = self.token()
+        self.engine.lock.acquire()
+        threading.Timer(0.3, self.engine.lock.release).start()
+        started = time.monotonic()
+        status, _ = self.call("/api/config", "s3cret", {"wide_min_net": 1}, token)
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertEqual(seen, [{"wide_min_net": 1}])
+
+    def test_action_gives_up_after_the_wait(self):
+        token = self.token()
+        with mock.patch.object(bot, "ACTION_LOCK_WAIT", 0.2):
+            self.engine.lock.acquire()
+            try:
+                status, body = self.call("/api/config", "s3cret", {}, token)
+            finally:
+                self.engine.lock.release()
+        self.assertEqual(status, 409)
+        self.assertIn("4 dakikadan uzun", json.loads(body)["error"])
 
     def test_health_is_open_and_dashboard_needs_password(self):
         self.assertEqual(self.call("/healthz")[0], 200)
