@@ -12,6 +12,8 @@ FIRST_DAYS = 30
 REFRESH_SECONDS = 1800
 RETRY_SECONDS = 1800
 PAUSE_SECONDS = 1.0
+# A worker with nothing due, or after an unexpected error, looks again after this long.
+IDLE_SECONDS = 60
 # Markets are re-listed after each batch so newly prioritized ones go next.
 BATCH = 10
 # A stored window that starts late (a failed or cut-short first fill) is retried
@@ -180,7 +182,8 @@ class HistoryKeeper:
 
     `source` provides: markets() -> [(venue, asset, kind, interval, price_type)],
     candles(v, a, kind, start, end) -> {ts: close}, funding(v, a, start) -> rows,
-    publish(v, a, kind, prices, rates, interval, price_type).
+    publish(v, a, kind, prices, rates, interval, price_type), and optionally group(v):
+    venues sharing a group are filled by one worker (default: one worker per venue).
     """
 
     def __init__(self, store, source, stop, sleep=time.sleep):
@@ -191,6 +194,7 @@ class HistoryKeeper:
         self.state = {}
         self.backfilled = {}
         self.thread = None
+        self.workers = {}
         self.lock = threading.RLock()
 
     def publish_stored(self):
@@ -316,13 +320,18 @@ class HistoryKeeper:
         wait = REFRESH_SECONDS if s["ok"] else RETRY_SECONDS
         return now() - s["ts"] >= wait
 
-    def run_once(self, limit=None):
-        """One pass over the due markets, in the source's priority order; returns how
-        many were synced (at most `limit`)."""
+    def group(self, v):
+        return getattr(self.source, "group", lambda v: v)(v)
+
+    def run_once(self, limit=None, group=None):
+        """One pass over the due markets (of one venue group, or all), in the source's
+        priority order; returns how many were synced (at most `limit`)."""
         done = 0
         for v, a, kind, interval, price_type in self.source.markets():
             if self.stop.is_set() or (limit and done >= limit):
                 break
+            if group is not None and self.group(v) != group:
+                continue
             key = (v, a, kind)
             if not self.due(key):
                 continue
@@ -343,19 +352,40 @@ class HistoryKeeper:
         return done
 
     def start(self):
+        """Each venue group gets its own worker, so one slow or rate-limited venue no
+        longer holds up the rest; new venues get a worker when they are first listed."""
         if self.thread:
             return
 
-        def loop():
+        def work(group):
+            # An unexpected error waits a minute instead of ending the venue's worker.
+            while not self.stop.is_set():
+                try:
+                    done = self.run_once(BATCH, group)
+                except Exception:
+                    done = 0
+                if not done:
+                    self.stop.wait(IDLE_SECONDS)
+
+        def supervise():
             try:
                 self.publish_stored()
             except Exception:
                 pass
             while not self.stop.is_set():
-                if not self.run_once(BATCH):
-                    self.stop.wait(60)
+                try:
+                    groups = {self.group(m[0]) for m in self.source.markets()}
+                except Exception:
+                    groups = set()
+                for g in sorted(groups - set(self.workers), key=str):
+                    t = threading.Thread(
+                        target=work, args=(g,), daemon=True, name="history-%s" % g
+                    )
+                    self.workers[g] = t
+                    t.start()
+                self.stop.wait(IDLE_SECONDS)
 
-        self.thread = threading.Thread(target=loop, daemon=True, name="history")
+        self.thread = threading.Thread(target=supervise, daemon=True, name="history")
         self.thread.start()
 
     def market_state(self, v, a, kind="perp"):

@@ -323,6 +323,11 @@ class DeskHistorySource:
         """Legs of the paper desk's tradeable candidates, rejected-for-history first."""
         return [(v, a, "perp") for v, a in self.engine.wide_paper.history_needs()]
 
+    @staticmethod
+    def group(v):
+        """The desk's own feed venues share one worker; every scanned venue has its own."""
+        return "feed" if v in VENUES else v
+
     def markets(self):
         e = self.engine
         out = []
@@ -352,11 +357,25 @@ class DeskHistorySource:
                 continue
             seen.add(key)
             out.append(key + (interval, "trade"))
+        # Every liquid perp the paper desk could trade (its own OI/volume floor), so a
+        # deep check finds the history already stored instead of waiting for it.
+        from wide_paper import UNIVERSE_MIN_USD
+
+        universe = e.wide.universe_snapshot()
+        for v, entries in universe.items():
+            if v in VENUES:
+                continue
+            for a, x in entries.items():
+                key = (v, a, "perp")
+                depth = x.get("oi") if x.get("oi") is not None else x.get("volume")
+                if key in seen or (depth or 0) < UNIVERSE_MIN_USD:
+                    continue
+                seen.add(key)
+                out.append(key + (x.get("interval"), "trade"))
         # Paper candidate legs outside the lists above (any asset) are added, and all
         # candidate legs go first so missing history is filled where it can lead to a trade.
         priority = self.priority()
         rows_by = {(r["venue"], r["asset"]): r for r in rows if r["kind"] == "perp"}
-        universe = e.wide.universe_snapshot()
         for key in priority:
             if key in seen:
                 continue
@@ -388,6 +407,11 @@ class DeskHistorySource:
         return self.engine.wide.funding_since(v, a, start)
 
     def publish(self, v, a, kind, prices, rates, interval, price_type):
+        # Only the selected assets' price and funding views read history from memory;
+        # every other market (the whole liquid universe) is read from the database, so
+        # memory does not grow with the number of stored markets.
+        if a not in self.engine.cfg["symbols"]:
+            return
         wide = self.engine.wide
         with wide.lock:
             old = wide.histories.get((v, a, kind)) or {}

@@ -202,6 +202,64 @@ class HistoryTests(unittest.TestCase):
         st = self.keeper.status()
         self.assertEqual(st["complete"], 1)
 
+    def test_a_venue_group_is_synced_on_its_own(self):
+        self.assertEqual(self.keeper.run_once(group="Binance"), 1)
+        self.assertEqual({c[1] for c in self.src.calls}, {"Binance"})
+        self.assertEqual(self.keeper.market_state("Lighter", "BTC"), {})
+
+    def test_each_venue_group_gets_its_own_worker(self):
+        self.src.list.append(("Extended", "BTC", "perp", 3600, "trade"))
+        self.src.group = lambda v: "feed" if v in ("Lighter", "Extended") else v
+        stop = threading.Event()
+        keeper = HistoryKeeper(self.store, self.src, stop, sleep=lambda s: None)
+        keeper.start()
+        try:
+            for _ in range(200):
+                if all(
+                    keeper.market_state(v, "BTC").get("ok")
+                    for v in ("Binance", "Lighter", "Extended")
+                ):
+                    break
+                threading.Event().wait(0.02)
+            self.assertEqual(set(keeper.workers), {"Binance", "feed"})
+            for v in ("Binance", "Lighter", "Extended"):
+                self.assertTrue(keeper.market_state(v, "BTC").get("ok"), v)
+        finally:
+            stop.set()
+            for t in [keeper.thread, *keeper.workers.values()]:
+                t.join(5)
+
+    def test_a_worker_survives_an_error_and_carries_on(self):
+        listed = self.src.markets
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if 2 <= len(calls) <= 3:  # the workers' first passes fail
+                raise RuntimeError("liste okunamadı")
+            return listed()
+
+        self.src.markets = flaky
+        stop = threading.Event()
+        keeper = HistoryKeeper(self.store, self.src, stop, sleep=lambda s: None)
+        with mock.patch.object(history_store, "IDLE_SECONDS", 0.02):
+            keeper.start()
+            try:
+                for _ in range(250):
+                    if all(
+                        keeper.market_state(v, "BTC").get("ok")
+                        for v in ("Binance", "Lighter")
+                    ):
+                        break
+                    threading.Event().wait(0.02)
+                self.assertGreaterEqual(len(calls), 4)
+                for v in ("Binance", "Lighter"):
+                    self.assertTrue(keeper.market_state(v, "BTC").get("ok"), v)
+            finally:
+                stop.set()
+                for t in [keeper.thread, *keeper.workers.values()]:
+                    t.join(5)
+
     def test_old_rows_are_pruned(self):
         db = HistoryStore(self.store)
         old = bot.hour(T0) - 40 * 86400
@@ -241,6 +299,43 @@ class DeskSourceTests(unittest.TestCase):
         src = DeskHistorySource(self.engine())
         self.assertEqual(src.markets(), [("Bybit", "IRYS", "perp", 14400, "trade")])
         self.assertEqual(src.candles("Bybit", "IRYS", "perp", 3600, 7200), {3600: 1.0})
+
+    def test_only_selected_assets_are_kept_in_memory(self):
+        from desk_analytics import DeskHistorySource
+
+        e = self.engine()
+        e.wide.lock = threading.RLock()
+        e.wide.histories = {}
+        src = DeskHistorySource(e)
+        src.publish("Bybit", "IRYS", "perp", {1: 1.0}, [], 14400, "trade")
+        src.publish("Bybit", "BTC", "perp", {1: 2.0}, [], 28800, "trade")
+        self.assertEqual(list(e.wide.histories), [("Bybit", "BTC", "perp")])
+
+    def test_every_liquid_perp_is_kept_and_candidate_legs_go_first(self):
+        from desk_analytics import DeskHistorySource
+
+        e = self.engine()
+        e.wide.universe_snapshot = lambda max_age=300: {
+            "Bybit": {
+                "IRYS": dict(interval=14400),
+                "DOOD": dict(interval=14400, oi=2e6),
+                "THIN": dict(interval=14400, oi=1e5, volume=9e9),
+            },
+            "Gate": {"DOOD": dict(interval=28800, volume=3e6)},
+        }
+        src = DeskHistorySource(e)
+        self.assertEqual(
+            src.markets(),
+            [
+                ("Bybit", "IRYS", "perp", 14400, "trade"),
+                ("Bybit", "DOOD", "perp", 14400, "trade"),
+                ("Gate", "DOOD", "perp", 28800, "trade"),
+            ],
+        )
+        self.assertEqual(
+            {src.group(v) for v in ("Lighter", "Extended", "Arcus")}, {"feed"}
+        )
+        self.assertEqual(src.group("Bybit"), "Bybit")
 
 
 if __name__ == "__main__":
