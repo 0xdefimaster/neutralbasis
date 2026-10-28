@@ -157,3 +157,6 @@ TxFlow, RISEx ve Arcus çoklu paper masasına masanın kendi beslemesiyle bağla
 
 ## Borsa başı ücret ve dönem raporu
 Ayarlar'da her borsa için kullanıcının kendi hesabındaki taker ücreti girilebilir; girilmeyen borsada public tarife kullanılır, ücreti bilinmeyen borsa işlem açmaz. Çoklu paper ekranındaki dönem raporu süreyi, kesintiyi, işlem sayısını, ücret sonrası neti, kazanç/kayıp oranını, en iyi 3 işlemin nete payını, girişlerin kapalı kaldığı süreyi, dönem içi ayar değişikliklerini ve borsa teminatı riski kapanışlarını eşikleriyle gösterir. Motor Windows'ta çalışırken uyku modunu engeller; OtomatikBaslat.cmd motoru oturum açılınca ve her 5 dakikada bir kontrol edip gerekirse yeniden başlatır. Adımlar: CANLI-HESAP-PLANI.md.
+
+## Geçmiş verisi: borsa başına paralel, tüm likit perp'ler
+Arka plan geçmiş kaydedicisi artık her borsa için ayrı bir işçiyle çalışır (Lighter, Extended, TxFlow, RISEx ve Arcus kendi beslemeleriyle tek işçide). Yavaş ya da istek sınırına takılan bir borsa diğerlerini bekletmez. Kaydedilen piyasalar: seçili varlıklar, en geniş funding farkları, paper adaylarının bacakları ve paper masasının işlem açabileceği bütün likit perp'ler (her bacakta OI ya da 24 saatlik hacim en az $1M). Paper adaylarının bacakları her işçide önce doldurulur. Beklenmeyen bir hata işçiyi durdurmaz; bir dakika sonra devam eder.
