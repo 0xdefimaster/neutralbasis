@@ -89,6 +89,18 @@ class HostedServeTests(unittest.TestCase):
         html = self.call("/", "s3cret")[1]
         return html.split("window.paperToken='")[1].split("'")[0]
 
+    def test_multi_venue_trades_download_as_csv(self):
+        from types import SimpleNamespace
+
+        self.engine.wide_paper = SimpleNamespace(
+            trade_log=lambda: [dict(id="w1", asset="BTC", net=1.5)]
+        )
+        status, body = self.call("/api/wide-trades.csv", "s3cret")
+        self.assertEqual(status, 200)
+        rows = body.lstrip("\ufeff").splitlines()
+        self.assertTrue(rows[0].startswith("id,asset,strategy"))
+        self.assertTrue(rows[1].startswith("w1,BTC,"))
+
     def test_action_waits_for_the_running_scan(self):
         seen = []
         self.engine.update_config = seen.append

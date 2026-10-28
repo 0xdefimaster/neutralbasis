@@ -9,7 +9,7 @@ Public data only. No order endpoint, no credentials; every fill is simulated aga
 the venue's real public order book. Capital is one pooled paper wallet.
 """
 
-import collections, datetime as dt, itertools, json, math, statistics, time, uuid
+import collections, csv, datetime as dt, io, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
 
 # Native venues whose taker fee is configured; the rest come from the CCXT scanner.
@@ -234,6 +234,54 @@ def venue_choices():
     from wide_markets import CATALOG
 
     return [v for v, c in CATALOG.items() if c["scan"] and v != "LighterCore"]
+
+
+def trades_csv(trades):
+    """The period's closed trades for a spreadsheet; times are UTC epoch seconds."""
+    out = io.StringIO(newline="")
+    writer = csv.writer(out)
+    writer.writerow(
+        [
+            "id",
+            "asset",
+            "strategy",
+            "long",
+            "short",
+            "opened_utc",
+            "closed_utc",
+            "size_usd",
+            "price_pnl_usd",
+            "funding_usd",
+            "estimated_funding_usd",
+            "fees_usd",
+            "net_usd",
+            "pending_funding",
+            "close_reason",
+            "funding_unverified_hours",
+        ]
+    )
+    for x in trades:
+        writer.writerow(
+            [
+                x.get("id"),
+                x.get("asset"),
+                x.get("strategy"),
+                x.get("long"),
+                x.get("short"),
+                x.get("opened"),
+                x.get("closed_at"),
+                x.get("size"),
+                x.get("price_pnl"),
+                x.get("funding"),
+                x.get("estimated_funding"),
+                x.get("fees"),
+                x.get("net"),
+                x.get("pending"),
+                x.get("reason"),
+                x.get("unverified"),
+            ]
+        )
+    return out.getvalue()
 
 
 def lot_of(row):
@@ -1973,7 +2021,14 @@ class WidePaper:
 
     @staticmethod
     def ledger_entry(p):
+        side = {leg.get("side"): leg.get("venue") for leg in p["legs"]}
         return dict(
+            asset=p.get("asset"),
+            long=side.get("long"),
+            short=side.get("short"),
+            opened=p.get("opened"),
+            closed_at=p.get("closed_at"),
+            size=(p.get("decision") or {}).get("size"),
             strategy=p.get("strategy", "funding"),
             net=p.get("net", 0.0),
             price_pnl=p.get("price_pnl", 0.0),
@@ -2002,7 +2057,11 @@ class WidePaper:
         for i, p in enumerate(self.closed):
             if p.get("legs"):
                 trades[p.get("id") or "closed-%d" % i] = self.ledger_entry(p)
-        return list(trades.values())
+        return [dict(x, id=k) for k, x in trades.items()]
+
+    def trade_log(self):
+        """Every closed trade of the period, latest first."""
+        return sorted(self.period_trades(), key=lambda x: -(x.get("closed_at") or 0))
 
     def period_report(self):
         """Is this period's result trustworthy? Each check is shown with its threshold;
@@ -2172,6 +2231,7 @@ class WidePaper:
             review=self.review_snapshot(),
             epochs=self.epochs(),
             period=self.period_report(),
+            trades=self.trade_log()[:200],
             epoch_start=self.store.get("wide_epoch_start", None),
             venues=venues,
             last_cycle=self.last_cycle,

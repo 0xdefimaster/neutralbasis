@@ -1071,8 +1071,61 @@ class WidePaperTests(unittest.TestCase):
         self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
         self.desk.cycle(entries=False)
         entry = self.store.get("wide_ledger", {})[pid]
+        closed = self.desk.closed[-1]
         self.assertEqual(entry["venues"], ["Hyperliquid", "Binance"])
-        self.assertEqual(entry["net"], self.desk.closed[-1]["net"])
+        self.assertEqual(entry["net"], closed["net"])
+        self.assertEqual(
+            (entry["asset"], entry["long"], entry["short"]),
+            ("BTC", "Hyperliquid", "Binance"),
+        )
+        self.assertEqual(
+            (entry["opened"], entry["closed_at"], entry["size"]),
+            (closed["opened"], closed["closed_at"], closed["decision"]["size"]),
+        )
+        (logged,) = self.desk.trade_log()
+        self.assertEqual((logged["id"], logged["net"]), (pid, closed["net"]))
+
+    def test_trade_log_is_latest_first_and_exports_to_csv(self):
+        self.desk.reset(venue_capital=1000)
+        for i, closed_at in enumerate((T0 + 300, T0 + 900, T0 + 600)):
+            p = dict(
+                id="t%d" % i,
+                asset="BTC",
+                strategy="funding",
+                legs=[
+                    dict(side="long", venue="Bybit"),
+                    dict(side="short", venue="Aster"),
+                ],
+                opened=T0,
+                closed_at=closed_at,
+                decision=dict(size=1000.0),
+                net=float(i),
+                price_pnl=-0.5,
+                funding=float(i) + 1,
+                fees=0.5,
+                close_reason="Kâr kilidi",
+            )
+            self.desk.closed.append(p)
+            self.desk.record_close(p)
+        log = self.desk.trade_log()
+        self.assertEqual([x["id"] for x in log], ["t1", "t2", "t0"])
+        self.assertEqual(self.desk.snapshot()["trades"][0]["id"], "t1")
+        rows = wide_paper.trades_csv(log).splitlines()
+        self.assertTrue(rows[0].startswith("id,asset,strategy,long,short,opened_utc"))
+        self.assertEqual(
+            rows[1].split(",")[:8],
+            [
+                "t1",
+                "BTC",
+                "funding",
+                "Bybit",
+                "Aster",
+                str(T0),
+                str(T0 + 900),
+                "1000.0",
+            ],
+        )
+        self.assertEqual(len(rows), 4)
 
     def test_cycles_record_hourly_equity(self):
         self.desk.reset(venue_capital=1000)
