@@ -462,6 +462,69 @@ class WidePaperTests(unittest.TestCase):
         self.assertLess(c["conservative_funding"], 0)
         self.assertEqual(self.desk.positions, [])
 
+    def test_convergence_charges_funding_over_the_longest_hold(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        d = self.desk.positions[0]["decision"]
+        hold, longest, size = d["expected_hours"], d["max_hold_hours"], d["size"]
+        self.assertLess(hold, longest)
+        # An hourly cost the expected hold could absorb, but not the longest one.
+        rate = (d["net"] - self.desk.cfg["wide_min_net"]) / (
+            size * (hold + longest) / 2
+        )
+        store = bot.Store(os.path.join(self.dir.name, "q.sqlite3"))
+        self.addCleanup(store.db.close)
+        fresh = WidePaper(store, self.src, sleep=lambda s: None)
+        fresh.update_config({"wide_funding_enabled": False})
+        self.src.rows[0] = row("Hyperliquid", rate=rate, fee=0.0002, mark=100.0)
+        fresh.cycle()
+        self.assertEqual(fresh.positions, [])
+        x = fresh.assessed[0]
+        self.assertAlmostEqual(
+            x["funding_cost_reserve"], -rate * x["size"] * longest, delta=rate * size
+        )
+
+    def test_a_small_funding_reversal_is_held_through(self):
+        self.setup_pair()
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+
+        def rates(long_rate, short_rate):
+            self.src.rows = [
+                row("Hyperliquid", rate=long_rate, fee=0.00045, at=self.clock),
+                row(
+                    "Binance",
+                    rate=short_rate,
+                    interval=28800,
+                    fee=0.0005,
+                    at=self.clock,
+                ),
+            ]
+            for v in ("Hyperliquid", "Binance"):
+                self.src.books[(v, "BTC")] = book(100.0, self.clock)
+
+        # The carry turns slightly against the position: over the horizon it costs
+        # less than closing now, so the position is held.
+        for step in (60, 31 * 60):
+            self.clock += step
+            rates(0.00001, 0.0)
+            self.desk.cycle(entries=False)
+        self.assertEqual(len(self.desk.positions), 1)
+        p = self.desk.positions[0]
+        self.assertLess(
+            -p["remaining_funding_fraction"] * p["decision"]["size"], p["exit_cost"]
+        )
+        # A reversal that costs more than leaving still closes it.
+        for step in (60, 31 * 60):
+            self.clock += step
+            rates(0.001, -0.0005)
+            self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(
+            self.desk.closed[0]["close_reason"], "Funding avantajı tersine döndü"
+        )
+
     # --- funding profit lock -------------------------------------------------------
     def test_profit_lock_closes_positive_after_pullback(self):
         self.setup_pair()
