@@ -1,6 +1,6 @@
 import argparse, json, os
 from pathlib import Path
-import bot
+import bot, retention
 from desk_analytics import DeskEngine as RiskEngine
 
 if __name__ == "__main__":
@@ -16,9 +16,14 @@ if __name__ == "__main__":
     )
     p.add_argument("--autostart", action="store_true")
     p.add_argument("--once", action="store_true")
+    # One-time full VACUUM and pruning, done while nothing else holds the database.
+    p.add_argument("--maintain", action="store_true")
     a = p.parse_args()
     d = Path(a.data)
     d.mkdir(parents=True, exist_ok=True)
+    retention.maintain(d / "paper.sqlite3")
+    if a.maintain:
+        raise SystemExit(0)
     engine = RiskEngine(d / "paper.sqlite3")
     engine.running = a.autostart
     if a.once:
