@@ -160,7 +160,7 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(legs["short"]["venue"], "Binance")
         self.assertAlmostEqual(legs["short"]["fee_rate"], 0.0005)
         self.assertEqual(legs["short"]["interval"], 28800)
-        self.assertAlmostEqual(self.desk.wallet["cash"], 1000 - p["fees"])
+        self.assertAlmostEqual(self.desk.wallet["cash"], 10000 - p["fees"])
 
     def test_rejects_when_fees_beat_funding(self):
         self.setup_pair(long_rate=0.0, short_rate=0.00005)
@@ -714,7 +714,7 @@ class DeskIntegrationTests(unittest.TestCase):
                 self.assertTrue(all(r["fee"] == e.fee(r["venue"]) for r in rows))
                 snap = json.loads(json.dumps(e.snapshot()))
                 self.assertIn("wide_paper", snap)
-                self.assertEqual(snap["wide_paper"]["balance"]["cash"], 1000)
+                self.assertEqual(snap["wide_paper"]["balance"]["cash"], 10000)
             finally:
                 e.store.db.close()
 
