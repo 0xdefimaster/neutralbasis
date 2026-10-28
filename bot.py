@@ -1640,6 +1640,19 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 )
                 self.end_headers()
                 return self.wfile.write(raw)
+            if self.path == "/api/wide-trades.csv" and hasattr(engine, "wide_paper"):
+                from wide_paper import trades_csv
+
+                trades = engine.wide_paper.trade_log()
+                raw = ("\ufeff" + trades_csv(trades)).encode("utf8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    'attachment; filename="neutralbasis-coklu-paper.csv"',
+                )
+                self.end_headers()
+                return self.wfile.write(raw)
             if self.path == "/api/identity":
                 return self.send(
                     {"pid": os.getpid(), "root": str(ROOT), "mode": "PAPER"}
