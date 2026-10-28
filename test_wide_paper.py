@@ -166,6 +166,19 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(legs["short"]["interval"], 28800)
         self.assertAlmostEqual(self.desk.wallet["cash"], 10000 - p["fees"])
 
+    def test_loss_budget_sizes_down_for_the_book_spread(self):
+        # The budget binds: the entry shrinks until fees, spread and stress fit,
+        # instead of being refused for a spread the first sizing could not see.
+        self.setup_pair()
+        self.desk.cfg["wide_risk"] = 1.0
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        d = self.desk.positions[0]["decision"]
+        worst = d["entry_fee"] + d["exit_fee"] + d["execution_drag"] + d["stress_loss"]
+        self.assertLessEqual(worst, 1.0 + 1e-6)
+        self.assertGreater(d["execution_drag"], 0)
+        self.assertLess(d["size"], 1.0 / d["fee_roundtrip"])
+
     def test_rejects_when_fees_beat_funding(self):
         self.setup_pair(long_rate=0.0, short_rate=0.00005)
         self.desk.cycle()
