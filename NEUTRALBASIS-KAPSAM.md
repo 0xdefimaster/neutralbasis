@@ -94,7 +94,8 @@ Listelenen her piyasa (native DEX'ler ve CCXT perp/spot) için 1h kapanış muml
 
 - Funding arb sekmesi varsayılan olarak **Borsa matrisi** açılır: satırlar varlık, sütunlar borsa; oranlar seçili gösterim periyodunda (1H/8H/24H/APR).
 - Kapsam: toplu funding uç noktası (`fetchFundingRates`) olan her borsada listelenen **tüm** lineer USDT/USDC/USD perp'ler tek çağrıyla taranır. Toplu uç noktası olmayan borsalar ve yerel beslemeler (Lighter RH, Extended, TxFlow, RISEx, Arcus) seçili varlıklarla sınırlı kalır.
-- En geniş fark: çift filtresine (DEX içeren / Yalnız DEX / Yalnız CEX / Hepsi) uyan en yüksek oranlı borsada short, en düşükte long. Hücreler LONG/SHORT olarak işaretlenir.
+- Anlık funding farkı: çift filtresine (DEX içeren / Yalnız DEX / Yalnız CEX / Hepsi) uyan en yüksek oranlı borsada short, en düşükte long; şu anki oranlardır, fiyat farkı değildir. Hücreler LONG/SHORT olarak işaretlenir. Kazanç iki oranın farkıdır: negatif oranda long funding alır, short öder; bu yüzden iki negatif oran da seçilebilir. Filtre daha geniş bir çifti dışarıda bıraktıysa satırda "DEX şartı · filtresiz S …" yazar.
+- ↺ notu: gösterilen yön son 7 günde kaybederken ters yön kazanırdıysa satırda ters yönün 7 günlük sonucu ve bugün açılırsa günde ödeyeceği funding yazar. Bu not oranların yakın zamanda döndüğünü gösterir; ters yönün geçmiş kazancı ileriye taşınmaz. Aynı not İki borsa görünümünde de var.
 - Net son 7g: o çiftin kayıtlı gerçekleşen funding ödemeleri farkı × büyüklük, maliyetler açıksa 4 emir komisyonu düşülür. 7 günlük ödemeler tam kayıtlı değilse "geçmiş eksik" yazar; tahmin yapılmaz.
 - Seçili olmayan varlıklarda funding geçmişi, en geniş farklı ilk 40 varlığın iki ucu için arka plan geçmiş kaydedicisi tarafından doldurulur (yalnız funding, mum çekilmez).
 - İstikrarlı: net 7g > 0. Yüksek getiri: fark ≥ %0,1 / 8s. 50 satır, "100 daha göster".
