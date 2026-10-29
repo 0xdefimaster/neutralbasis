@@ -1,4 +1,4 @@
-import unittest
+import unittest, unittest.mock
 import pair_view as pv
 
 AT = 1_800_000_000
@@ -22,6 +22,8 @@ class MergeLegsTests(unittest.TestCase):
         x = legs["Lighter"]
         self.assertEqual(x["rate"], 0.0001)
         self.assertEqual((x["oi"], x["volume"], x["fee"]), (5e6, 1e7, 0.0004))
+        # When the shown rate and price were read, for the data-age line.
+        self.assertEqual((x["rate_at"], x["mark_at"]), (AT, AT))
 
     def test_stale_rate_and_price_are_not_current(self):
         universe = {
@@ -201,6 +203,26 @@ class PriceHistoryTests(unittest.TestCase):
         self.assertEqual(points, [])
         self.assertIsNone(w["1d"]["mean"])
 
+    def test_window_move_is_long_return_minus_short_return(self):
+        hours = [AT - i * 3600 for i in range(25)]
+        long = {t: 100.0 for t in hours}
+        short = {t: 100.0 for t in hours}
+        long[AT], short[AT] = 101.0, 100.5
+        _, w = pv.price_history(long, short, AT)
+        m = w["1d"]["move"]
+        self.assertEqual((m["start"], m["end"]), (AT - 86400, AT))
+        self.assertAlmostEqual(m["long"], 0.01)
+        self.assertAlmostEqual(m["short"], 0.005)
+        self.assertAlmostEqual(m["pnl"], 0.005)
+        # No close at the window start: no move, never a partial one.
+        self.assertIsNone(w["3d"]["move"])
+        # A close an hour after the window start still counts, with its own start.
+        del long[AT - 86400], short[AT - 86400]
+        _, w = pv.price_history(long, short, AT)
+        self.assertEqual(w["1d"]["move"]["start"], AT - 86400 + 3600)
+        del long[AT - 86400 + 3600]
+        self.assertIsNone(pv.price_history(long, short, AT)[1]["1d"]["move"])
+
     def test_pair_detail_carries_price_windows(self):
         legs = PairDetailTests().legs()
         hours = [AT - i * 3600 for i in range(24)]
@@ -222,6 +244,25 @@ class BookCostTests(unittest.TestCase):
         self.assertAlmostEqual(c["bp"], 105.0)
         self.assertAlmostEqual(c["cost"], 10.5)
         self.assertAlmostEqual(c["half_spread_bp"], 100.0)
+
+    def test_slippage_and_fee_are_kept_apart(self):
+        c = pv.book_cost(self.book, 1000.0, True, 0.0005)
+        self.assertAlmostEqual(c["slip_bp"], 100.0)
+        self.assertAlmostEqual(c["fee_bp"], 5.0)
+        self.assertAlmostEqual(c["slip_bp"] + c["fee_bp"], c["bp"])
+
+    def test_capacity_counts_levels_within_each_limit(self):
+        book = dict(
+            bids=[(99.95, 10.0), (99.8, 100.0)],
+            asks=[(100.05, 10.0), (100.2, 100.0), (100.6, 1000.0)],
+        )
+        cap, depth = pv.capacity(book, True)
+        self.assertAlmostEqual(cap["10"], 1000.5)
+        self.assertAlmostEqual(cap["25"], 1000.5 + 10020.0)
+        self.assertAlmostEqual(cap["50"], cap["25"])
+        self.assertAlmostEqual(depth, 1000.5 + 10020.0 + 100600.0)
+        cap, _ = pv.capacity(book, False)
+        self.assertAlmostEqual(cap["10"], 999.5)
 
     def test_sell_walks_bids_and_too_large_does_not_fit(self):
         c = pv.book_cost(self.book, 10000.0, False, None)
@@ -280,6 +321,47 @@ class EngineLegTests(unittest.TestCase):
         self.assertEqual(out["legs"]["A"]["side"], "long")
         self.assertEqual(
             [s["usd"] for s in out["legs"]["B"]["sizes"]], list(pv.BOOK_SIZES)
+        )
+
+    def test_books_at_the_leg_size_price_entry_and_exit(self):
+        out = self.views(self.engine()).books("ETH", "A", "B", 1000)
+        a = out["legs"]["A"]
+        self.assertEqual(out["size"], 1000)
+        # Long buys the asks to enter and sells the bids to exit.
+        self.assertAlmostEqual(a["entry"]["slip_bp"], 100.0)
+        self.assertAlmostEqual(a["exit"]["slip_bp"], 100.0)
+        self.assertAlmostEqual(a["entry"]["fee_bp"], 5.0)
+        self.assertEqual(set(a["capacity"]), {"10", "25", "50"})
+        self.assertAlmostEqual(a["depth"], 101.0 * 50 + 102.0 * 1000)
+        self.assertIsNone(
+            self.views(self.engine()).books("ETH", "A", "B")["legs"]["A"]["entry"]
+        )
+        with self.assertRaises(ValueError):
+            self.views(self.engine()).books("ETH", "A", "B", 5)
+
+    def test_legs_use_the_fee_entered_for_the_paper_desk(self):
+        e = type("E", (), {})()
+        e.feed = type("F", (), {"meta": {}})()
+        row = dict(rate=0.0001, interval=3600, fee=0.0005, received=AT)
+        e.wide = type(
+            "W",
+            (),
+            {
+                "snapshot": lambda self: ([], {}),
+                "universe_snapshot": lambda self: {
+                    "Binance": {"ETH": row},
+                    "Bybit": {"ETH": row},
+                },
+            },
+        )()
+        e.wide_paper = type("P", (), {"fees": {"Binance": 0.0002}})()
+        with unittest.mock.patch.object(pv, "now", lambda: AT):
+            legs = pv.PairViews(e).legs("ETH")
+        self.assertEqual(
+            (legs["Binance"]["fee"], legs["Binance"]["fee_source"]), (0.0002, "user")
+        )
+        self.assertEqual(
+            (legs["Bybit"]["fee"], legs["Bybit"]["fee_source"]), (0.0005, "public")
         )
 
     def test_book_error_is_reported_per_leg(self):

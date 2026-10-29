@@ -44,6 +44,8 @@ def merge_legs(native, rows, universe, kinds, labels, at=None):
                     volume=None,
                     oi=None,
                     leverage=None,
+                    rate_at=None,
+                    mark_at=None,
                 ),
             )
             received = x.get("received") or 0
@@ -55,6 +57,7 @@ def merge_legs(native, rows, universe, kinds, labels, at=None):
                 and x.get("interval")
             ):
                 leg["rate"], leg["interval"] = x["rate"], x["interval"]
+                leg["rate_at"] = received or None
                 nxt = x.get("next")
                 leg["next"] = nxt if nxt and nxt > at - x["interval"] else None
             if (
@@ -63,6 +66,7 @@ def merge_legs(native, rows, universe, kinds, labels, at=None):
                 and at - received <= PRICE_FRESH_SECONDS
             ):
                 leg["mark"] = x["mark"]
+                leg["mark_at"] = received or None
             for k in ("fee", "volume", "oi", "leverage"):
                 if leg[k] is None and x.get(k) is not None:
                     leg[k] = x[k]
@@ -164,18 +168,39 @@ def price_history(long_prices, short_prices, at):
     if any(abs(p["gap"]) > MAX_PRICE_GAP for p in points):
         points = []
     windows = {}
+    by_ts = {p["ts"]: p for p in points}
+    last = points[-1] if points else None
     for key, span in WINDOWS:
         picked = [p["gap"] for p in points if at - span < p["ts"] <= at]
         expected = int(span / 3600)
         complete = len(picked) >= expected * 0.9
+        # The window's first common close, at most an hour late (a 30-day store holds 720
+        # closes, one short of a close exactly 30 days before the last); the move states
+        # its own start.
+        then = (
+            by_ts.get(last["ts"] - span) or by_ts.get(last["ts"] - span + 3600)
+            if last
+            else None
+        )
         windows[key] = dict(
             mean=sum(picked) / len(picked) if complete else None,
             low=min(picked) if complete else None,
             high=max(picked) if complete else None,
             count=len(picked),
             expected=expected,
+            move=price_move(then, last),
         )
     return points, windows
+
+
+def price_move(then, last):
+    """Both legs' return between two common closes and what long/short made on it per $1
+    notional (long return − short return); None without a close at the window start."""
+    if not then or not last:
+        return None
+    lr = last["long_price"] / then["long_price"] - 1
+    sr = last["short_price"] / then["short_price"] - 1
+    return dict(start=then["ts"], end=last["ts"], long=lr, short=sr, pnl=lr - sr)
 
 
 def book_cost(book, usd, buy, fee):
@@ -189,13 +214,35 @@ def book_cost(book, usd, buy, fee):
 
         vwap = walk(book["asks"] if buy else book["bids"], usd / mid, buy)
     except ValueError:
-        return dict(out, fits=False, bp=None, cost=None)
+        return dict(out, fits=False, bp=None, cost=None, slip_bp=None, fee_bp=None)
     slip = vwap / mid - 1 if buy else 1 - vwap / mid
     bp = (slip + (fee or 0)) * 1e4
-    return dict(out, fits=True, bp=bp, cost=bp / 1e4 * usd, fee_known=fee is not None)
+    return dict(
+        out,
+        fits=True,
+        bp=bp,
+        cost=bp / 1e4 * usd,
+        fee_known=fee is not None,
+        slip_bp=slip * 1e4,
+        fee_bp=(fee or 0) * 1e4,
+    )
 
 
 BOOK_SIZES = (10_000, 100_000, 1_000_000)
+CAPACITY_BPS = (10, 25, 50)
+
+
+def capacity(book, buy):
+    """USD the visible book fills on one side while the worst fill stays within each
+    limit of mid, and the side's whole visible depth."""
+    bid, ask = max(p for p, _ in book["bids"]), min(p for p, _ in book["asks"])
+    mid = (bid + ask) / 2
+    side = book["asks"] if buy else book["bids"]
+    out = {}
+    for bp in CAPACITY_BPS:
+        edge = mid * (1 + bp / 1e4) if buy else mid * (1 - bp / 1e4)
+        out[str(bp)] = sum(p * q for p, q in side if (p <= edge if buy else p >= edge))
+    return out, sum(p * q for p, q in side)
 
 
 def pair_detail(asset, long, short, legs, funding, at=None, prices=None):
@@ -236,8 +283,8 @@ def pair_detail(asset, long, short, legs, funding, at=None, prices=None):
         ts=at,
         price_points=points,
         price_windows=price_windows,
-        long=dict(L, paid=lp),
-        short=dict(S, paid=sp),
+        long=dict(L, paid=lp, last_payment=max((r["ts"] for r in lf), default=None)),
+        short=dict(S, paid=sp, last_payment=max((r["ts"] for r in sf), default=None)),
         funding_gap=S["rate"] - L["rate"],
         price_gap=price_gap(L, S),
         fee_roundtrip=fee,
@@ -300,7 +347,16 @@ class PairViews:
             v: x[asset] for v, x in e.wide.universe_snapshot().items() if asset in x
         }
         kinds = {v: c["kind"] for v, c in CATALOG.items()}
-        return merge_legs(native, selected, universe, kinds, LABELS)
+        legs = merge_legs(native, selected, universe, kinds, LABELS)
+        # The fee the paper desk charges: the user's own account fee where entered.
+        user = getattr(getattr(e, "wide_paper", None), "fees", None) or {}
+        for v, leg in legs.items():
+            if v in user:
+                leg["fee"] = user[v]
+            leg["fee_source"] = (
+                "user" if v in user else "public" if leg["fee"] is not None else None
+            )
+        return legs
 
     def funding(self, asset, venues):
         start = now() - WINDOWS[-1][1]
@@ -407,13 +463,20 @@ class PairViews:
         prices = e.wide.candles_since(v, asset, "perp", start, end)
         return db.add_candles(v, asset, "perp", prices)
 
-    def books(self, asset, long, short):
-        """Current books of both legs and the entry cost at the reference sizes."""
+    def books(self, asset, long, short, size=None):
+        """Current books of both legs: entry and exit cost at the page's leg size (taker
+        fee and slippage from mid apart), the entry cost at the reference sizes, how
+        much each side fills within 10/25/50 bp, and when the book was read."""
         from risk_scan import VENUES
+        from bot import number
 
         asset = str(asset or "").upper()
+        if size is not None:
+            size = number(size)
+            if not 10 <= size <= 10_000_000:
+                raise ValueError("Bacak büyüklüğü 10 ile 10.000.000 $ arasında olmalı")
         legs = self.legs(asset)
-        out = dict(asset=asset, ts=now(), legs={})
+        out = dict(asset=asset, ts=now(), size=size, legs={})
         for v, buy in ((long, True), (short, False)):
             if v not in legs:
                 raise ValueError(v + ": bu varlık için güncel piyasa yok")
@@ -423,12 +486,20 @@ class PairViews:
                     if v in VENUES
                     else self.engine.wide.book(v, asset)
                 )
+                fee = legs[v]["fee"]
+                entry_cap, depth = capacity(book, buy)
+                exit_cap, _ = capacity(book, not buy)
                 out["legs"][v] = dict(
                     side="long" if buy else "short",
-                    fee=legs[v]["fee"],
-                    sizes=[
-                        book_cost(book, usd, buy, legs[v]["fee"]) for usd in BOOK_SIZES
-                    ],
+                    fee=fee,
+                    fee_source=legs[v].get("fee_source"),
+                    received=book.get("received"),
+                    sizes=[book_cost(book, usd, buy, fee) for usd in BOOK_SIZES],
+                    # Round trip: the thinner of the entry and the exit side.
+                    capacity={k: min(entry_cap[k], exit_cap[k]) for k in entry_cap},
+                    depth=depth,
+                    entry=book_cost(book, size, buy, fee) if size else None,
+                    exit=book_cost(book, size, not buy, fee) if size else None,
                 )
             except Exception as ex:
                 out["legs"][v] = dict(
