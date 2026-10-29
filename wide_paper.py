@@ -1881,6 +1881,8 @@ class WidePaper:
         )
 
     def open(self, c):
+        """Fill both legs; returns why nothing was entered when no leg filled, else None
+        (a filled leg is a trade, even when it has to be recovered)."""
         p = dict(
             id="w" + uuid.uuid4().hex,
             asset=c["asset"],
@@ -1986,16 +1988,12 @@ class WidePaper:
         except Exception as ex:
             if not p["legs"]:
                 # Nothing was filled: an entry that did not happen is not a trade.
+                why = "Giriş yapılmadı: " + str(ex)
                 self.positions.remove(p)
-                self.reject(c, ["Giriş yapılmadı: " + str(ex)], now())
+                self.reject(c, [why], now())
                 self.persist()
-                self.events(
-                    "ENTRY_SKIP",
-                    "Giriş yapılmadı: " + str(ex),
-                    asset=c["asset"],
-                    strategy=p["strategy"],
-                )
-                return
+                self.events("ENTRY_SKIP", why, asset=c["asset"], strategy=p["strategy"])
+                return why
             p["status"] = "RECOVERY"
             p["close_reason"] = "Bacak kurtarma: " + str(ex)
             self.persist()
@@ -2532,9 +2530,13 @@ class WidePaper:
                             strategy=best["strategy"],
                         )
                     else:
-                        self.open(best)
-                        self.review["opened"] += 1
-                        self.decide(best, at, "opened", [])
+                        missed = self.open(best)
+                        if missed:
+                            # Eligible, but the orders filled nothing: not a trade.
+                            self.decide(best, at, "skipped", [missed])
+                        else:
+                            self.review["opened"] += 1
+                            self.decide(best, at, "opened", [])
             if rows is not None:
                 self.funnel = self.build_funnel(rows, ranked_rows, at)
             self.last_cycle = now()
