@@ -280,6 +280,8 @@ def trades_csv(trades):
             "entry_reason",
             "close_reason",
             "funding_unverified_hours",
+            "fill_ratio",
+            "slippage_usd",
         ]
     )
     for x in trades:
@@ -302,6 +304,8 @@ def trades_csv(trades):
                 x.get("entry_reason"),
                 x.get("reason"),
                 x.get("unverified"),
+                x.get("fill_ratio", 1.0),
+                x.get("slippage"),
             ]
         )
     return out.getvalue()
@@ -333,6 +337,140 @@ def fit_lots(qty, price, lots):
             raise ValueError("Borsanın asgari emir tutarının altında")
     return qty
 
+
+def lot_floor(qty, price, lots):
+    """The largest quantity at or below qty that every leg's order rules accept; 0 when
+    none does (below a venue's minimum)."""
+    try:
+        return fit_lots(qty, price, lots) if qty > 0 else 0.0
+    except ValueError:
+        return 0.0
+
+
+def ioc(levels, qty, buy, limit, extra=0.0):
+    """An immediate-or-cancel order at `limit` against the visible book: the quantity
+    filled (up to qty) at prices no worse than the limit, and its average price with
+    the extra slippage. Nothing filled returns (0, None); the rest is cancelled."""
+    remain, total = qty, 0.0
+    for p, q in sorted(levels, reverse=not buy):
+        if (p > limit) if buy else (p < limit):
+            break
+        take = min(remain, q)
+        total += take * p
+        remain -= take
+        if remain < 1e-10:
+            break
+    filled = qty - max(remain, 0.0) if remain >= 1e-10 else qty
+    if filled <= 1e-12:
+        return 0.0, None
+    return filled, total / filled * (1 + extra if buy else 1 - extra)
+
+
+def mid_of(book):
+    return (max(p for p, q in book["bids"]) + min(p for p, q in book["asks"])) / 2
+
+
+# Adverse assumptions the period's closed trades are run again under: a sound result
+# survives them, not only the fills and funding the paper happened to get.
+STRESS = (
+    ("Kayma 2 katı", dict(slippage=1.0)),
+    ("Ücret +%50", dict(fees=0.5)),
+    ("Funding geliri −%25", dict(funding=0.25)),
+    ("Tahmini değerlenen funding sayılmaz", dict(estimated=1.0)),
+    ("Hepsi birlikte", dict(slippage=1.0, fees=0.5, funding=0.25, estimated=1.0)),
+)
+
+
+def stressed(trades, slippage=0.0, fees=0.0, funding=0.0, estimated=0.0):
+    """Net of closed trades with extra slippage and fees (shares of what each trade
+    paid), funding income cut by a share, and estimated funding valuations removed.
+    A trade without a recorded slippage adds none."""
+    total = 0.0
+    for x in trades:
+        est = estimated * max(x.get("estimated_funding") or 0.0, 0.0)
+        total += (
+            x["net"]
+            - slippage * (x.get("slippage") or 0.0)
+            - fees * x["fees"]
+            - est
+            - funding * max(x["funding"] - est, 0.0)
+        )
+    return total
+
+
+def scorecard(trades):
+    """Per strategy and per venue pair: trades, net, average, winners, the worst trade
+    and price result, fees against gross income (funding + price before fees), average
+    hold, the deepest fall of the cumulative net from its high, slippage paid, and data
+    reliability (unverified payments, share of funding valued on an estimate)."""
+    groups = {}
+    for x in sorted(trades, key=lambda x: x.get("closed_at") or 0):
+        s = x.get("strategy") or "funding"
+        for key in ((s, None, None), (s, x.get("long"), x.get("short"))):
+            groups.setdefault(key, []).append(x)
+    out = []
+    for (s, lv, sv), xs in groups.items():
+        nets = [x["net"] for x in xs]
+        run = peak = fall = 0.0
+        for n in nets:
+            run += n
+            peak = max(peak, run)
+            fall = max(fall, peak - run)
+        gross = sum(x["funding"] + x["price_pnl"] for x in xs)
+        income = sum(max(x["funding"], 0.0) for x in xs)
+        estimated = sum(max(x.get("estimated_funding") or 0.0, 0.0) for x in xs)
+        holds = [
+            (x["closed_at"] - x["opened"]) / 3600
+            for x in xs
+            if x.get("closed_at") is not None and x.get("opened") is not None
+        ]
+        slips = [x["slippage"] for x in xs if x.get("slippage") is not None]
+        out.append(
+            dict(
+                strategy=s,
+                long=lv,
+                short=sv,
+                pair=lv is not None or sv is not None,
+                trades=len(xs),
+                net=sum(nets),
+                average=sum(nets) / len(xs),
+                wins=sum(n > 0 for n in nets),
+                worst=min(nets),
+                worst_price=min(x["price_pnl"] for x in xs),
+                fees=sum(x["fees"] for x in xs),
+                fee_share=sum(x["fees"] for x in xs) / gross if gross > 0 else None,
+                hold_hours=statistics.mean(holds) if holds else None,
+                drawdown=fall,
+                slippage=sum(slips) if slips else None,
+                unverified=sum(x.get("unverified") or 0 for x in xs),
+                estimated_share=estimated / income if income > 0 else None,
+            )
+        )
+    whole = [x for x in out if not x["pair"]]
+    pairs = sorted(
+        (x for x in out if x["pair"]), key=lambda x: (-x["trades"], -abs(x["net"]))
+    )
+    return whole + pairs[:30]
+
+
+# Decision amounts that scale with the filled quantity when an entry fills partly.
+SIZED_FIELDS = (
+    "qty",
+    "size",
+    "entry_fee",
+    "exit_fee",
+    "execution_drag",
+    "stress_loss",
+    "net",
+    "conservative_funding",
+    "funding_day1",
+    "funding_day3",
+    "risk_reserve",
+    "reversion_cost",
+    "entry_capture",
+    "exit_drag_proxy",
+    "funding_cost_reserve",
+)
 
 RFQ_UNSUPPORTED = "RFQ yürütmesi henüz desteklenmiyor"
 
@@ -1654,6 +1792,45 @@ class WidePaper:
         b = self.book(v, a)
         return walk(b["asks" if buy else "bids"], qty, buy, self.extra_slippage), b
 
+    def fill(self, v, a, qty, buy, limit, lots):
+        """An entry order: immediate-or-cancel at `limit` on the venue's book now. A
+        partial fill keeps what both legs' order sizes allow (the rest is cancelled);
+        returns the quantity, its average price and the book."""
+        b = self.book(v, a)
+        side = b["asks" if buy else "bids"]
+        got, px = ioc(side, qty, buy, limit, self.extra_slippage)
+        if 0 < got < qty * (1 - 1e-9):
+            got = lot_floor(got, px, lots)
+            px = ioc(side, got, buy, limit, self.extra_slippage)[1] if got else None
+        return got, px, b
+
+    def unwind(self, p, leg, qty):
+        """Close at once the part of a filled leg the other leg could not match: a real
+        account would otherwise hold that much open directional exposure."""
+        self.sleep(self.latency(leg["venue"]))
+        px, b = self.quote(leg["venue"], p["asset"], qty, leg["side"] == "short")
+        pnl = qty * (px - leg["entry"]) * (1 if leg["side"] == "long" else -1)
+        fee = qty * px * leg["fee_rate"]
+        self.credit(leg["venue"], pnl - fee)
+        p["price_pnl"] += pnl
+        p["fees"] += fee
+        p["slippage"] = p.get("slippage", 0.0) + qty * abs(px - mid_of(b))
+        leg["margin"] *= (leg["qty"] - qty) / leg["qty"]
+        leg["qty"] -= qty
+        p.setdefault("unwound", []).append(
+            dict(venue=leg["venue"], qty=qty, price=px, pnl=pnl, fee=fee, at=now())
+        )
+        self.persist()
+        self.events(
+            "UNWIND",
+            "Eşleşmeyen bacak kısmı hemen kapatıldı",
+            position=p["id"],
+            venue=leg["venue"],
+            qty=qty,
+            pnl=pnl,
+            fee=fee,
+        )
+
     def open(self, c):
         p = dict(
             id="w" + uuid.uuid4().hex,
@@ -1674,25 +1851,47 @@ class WidePaper:
         )
         self.positions.append(p)
         self.persist()
+        lots = [c.get("lot_long"), c.get("lot_short")]
         try:
+            # Legs fill one after the other, each after its venue's latency, as
+            # immediate-or-cancel orders at the planned price plus the tolerance. A
+            # partial first leg sizes the second; a partial second leg leaves part of
+            # the first unmatched, which is closed at once.
+            qty = c["qty"]
             for venue, side in ((c["long"], "long"), (c["short"], "short")):
+                buy = side == "long"
                 self.sleep(self.latency(venue))
-                px, b = self.quote(venue, c["asset"], c["qty"], side == "long")
-                planned = c["entry_long"] if side == "long" else c["entry_short"]
-                if abs(px / planned - 1) > FILL_TOLERANCE:
-                    raise ValueError("Dolum öncesi fiyat %0,1 sınırını aştı")
-                fee_rate = c["fee_long"] if side == "long" else c["fee_short"]
-                fee = c["qty"] * px * fee_rate
-                margin = c["qty"] * px / c["leverage"]
+                planned = c["entry_long"] if buy else c["entry_short"]
+                limit = planned * (1 + FILL_TOLERANCE if buy else 1 - FILL_TOLERANCE)
+                got, px, b = self.fill(venue, c["asset"], qty, buy, limit, lots)
+                if not got:
+                    raise ValueError(
+                        "Dolum olmadı: defter %0,1 fiyat sınırı içinde emir boyutunu "
+                        "karşılamadı"
+                    )
+                if got < qty * (1 - 1e-9):
+                    self.events(
+                        "FILL_PARTIAL",
+                        "Kısmi dolum",
+                        position=p["id"],
+                        venue=venue,
+                        asked=qty,
+                        filled=got,
+                    )
+                fee_rate = c["fee_long"] if buy else c["fee_short"]
+                fee = got * px * fee_rate
+                slip = got * abs(px - mid_of(b))
+                p["slippage"] = p.get("slippage", 0.0) + slip
+                margin = got * px / c["leverage"]
                 if margin + fee > self.headroom(venue):
                     raise ValueError("Dolum öncesi marjin rezervi yetersiz")
-                interval = c["interval_long"] if side == "long" else c["interval_short"]
-                nxt = c["next_long"] if side == "long" else c["next_short"]
+                interval = c["interval_long"] if buy else c["interval_short"]
+                nxt = c["next_long"] if buy else c["next_short"]
                 entered = now()
                 leg = dict(
                     venue=venue,
                     side=side,
-                    qty=c["qty"],
+                    qty=got,
                     entry=px,
                     entered=entered,
                     fee_rate=fee_rate,
@@ -1704,6 +1903,7 @@ class WidePaper:
                     ),
                     closed=False,
                     price_pnl=0.0,
+                    entry_slippage=slip,
                     audit_id=b.get("audit_id"),
                 )
                 p["legs"].append(leg)
@@ -1711,6 +1911,17 @@ class WidePaper:
                 self.credit(venue, -fee)
                 self.persist()
                 self.events("FILL", "Sanal bacak doldu", position=p["id"], leg=leg)
+                if len(p["legs"]) == 2 and got < qty * (1 - 1e-9):
+                    self.unwind(p, p["legs"][0], qty - got)
+                qty = got
+            ratio = qty / c["qty"]
+            if ratio < 1 - 1e-9:
+                d = p["decision"]
+                d["planned_qty"] = c["qty"]
+                for k in SIZED_FIELDS:
+                    if isinstance(d.get(k), (int, float)):
+                        d[k] *= ratio
+            p["fill_ratio"] = ratio
             p["status"] = "OPEN"
             self.persist()
             self.events(
@@ -1910,6 +2121,8 @@ class WidePaper:
                 self.credit(leg["venue"], pnl - fee)
                 p["price_pnl"] += pnl
                 p["fees"] += fee
+                if "slippage" in p:
+                    p["slippage"] += leg["qty"] * abs(px - mid_of(b))
                 leg.update(
                     closed=True,
                     exit=px,
@@ -2300,6 +2513,8 @@ class WidePaper:
             reason=p.get("close_reason"),
             pending=bool(p.get("pending_funding")),
             unverified=len(p.get("funding_unverified", [])),
+            fill_ratio=p.get("fill_ratio", 1.0),
+            slippage=p.get("slippage"),
         )
 
     def record_close(self, p):
@@ -2360,6 +2575,9 @@ class WidePaper:
         pf = gains / losses if losses else (None if not gains else math.inf)
         top3 = sum(nets[:3]) / total if total > 0 else None
         days = span / 86400
+        stress = [
+            dict(label=label, net=stressed(settled, **kw)) for label, kw in STRESS
+        ]
         t = PERIOD_CHECKS
         checks = [
             ("Süre", f"{days:.1f} / {t['days']} gün", days >= t["days"]),
@@ -2374,6 +2592,11 @@ class WidePaper:
                 len(settled) >= t["trades"],
             ),
             ("Ücretler sonrası net", f"{total:+.2f} $", total > 0),
+            (
+                "Stres altında net (hepsi birlikte)",
+                f"{stress[-1]['net']:+.2f} $",
+                stress[-1]["net"] > 0,
+            ),
             (
                 "Kazanç / kayıp oranı",
                 "—" if pf is None else ("kayıp yok" if pf == math.inf else f"{pf:.2f}"),
@@ -2414,6 +2637,9 @@ class WidePaper:
             venues=dict(sorted(venues.items(), key=lambda kv: -kv[1])),
             checks=[dict(label=a, value=b, ok=bool(c)) for a, b, c in checks],
             ready=all(c for _, _, c in checks),
+            stress=stress,
+            stress_unmeasured=sum(p.get("slippage") is None for p in settled),
+            scorecard=scorecard(settled),
         )
 
     @staticmethod

@@ -33,13 +33,14 @@ Varsayılan hesap borsaları (15 perp): **Lighter, Extended, Hyperliquid, TxFlow
   - kesinti en çok %5;
   - en az 40 kapanmış işlem;
   - ücretler sonrası net pozitif;
+  - stres altında net pozitif: kapanan işlemler kayma 2 katı, ücret +%50, funding geliri −%25 ve tahmini değerlenen funding sayılmadan yeniden hesaplanır; sonuç yalnızca paper'ın kendi dolumlarında pozitifse ölçüt sağlanmaz;
   - kazanç/kayıp oranı en az 1.3;
   - en iyi 3 işlemin nete payı %50'nin altında;
   - yeni girişler kapalı kalan süre en çok %5;
   - dönem içinde ayar değişikliği yok;
   - "Borsa teminatı riski" kapanışı yok.
 
-  Ayrıca açık pozisyonların kapatılırsa netini, en büyük düşüşü, kesinti sayısını ve borsa başı işlem sayısını gösterir.
+  Ayrıca açık pozisyonların kapatılırsa netini, en büyük düşüşü, kesinti sayısını ve borsa başı işlem sayısını gösterir. Kartın altındaki karne her strateji ve borsa çifti için işlem sayısını, neti, işlem başı ortalamayı, en kötü işlemi ve en kötü fiyat sonucunu, ücretin brüt gelire oranını, ödenen kaymayı, ortalama süreyi, en derin düşüşü ve veri güvenilirliğini (doğrulanmamış ödeme, tahmini değerlenen funding payı) gösterir.
 - **Kesinti kaydı:** İki tur arasında 10 dakikadan uzun boşluk kesinti sayılır. Yeni girişlerin kapalı olduğu süre ve dönem içindeki ayar/ücret değişiklikleri de kaydedilir. Sıfırlama bu kayıtları yeni dönem için temizler.
 - **Uyku engelleme:** Motor Windows'ta çalışırken bilgisayarın uykuya geçmesini engeller. Ekran yine kapanabilir.
 - **Otomatik başlatma:** `OtomatikBaslat.cmd` bir kez çalıştırılır. Windows Görev Zamanlayıcı oturum açılınca ve her 5 dakikada bir motoru kontrol eder; motor kapanmış ya da çökmüşse yeniden başlatır. `OtomatikKapat.cmd` görevi kaldırır.
@@ -63,7 +64,7 @@ Varsayılan hesap borsaları (15 perp): **Lighter, Extended, Hyperliquid, TxFlow
 
 - **İki kontrol arasındaki fiyat sıçramaları:** Pozisyonlar her turda defterden işaretleniyor; aradaki kısa ani hareketler görülmüyor. Borsa başı $1000 teminatla etkin kaldıraç düşük olduğundan likidasyon için çok büyük bir hareket gerekir. Ama botun kendi zarar-kes kararları bir tur gecikebilir; gerçek bir bot da aynı gecikmeyi yaşar.
 - **Gerçek ücret kademesi:** Elle girilmezse public tarife kullanılır. Aşama 2'de hesaptan okunacak.
-- **Dolum doğruluğu:** Paper'ın dolum fiyatının gerçekle ne kadar örtüştüğü ancak gerçek emirle ölçülebilir (Aşama 3, isteğe bağlı mikro emir). Paper bu konuda temkinli tarafta: yalnızca taker emir, bacaklar sırayla, en az 750 ms gecikme ve +1 bp ek kayma.
+- **Dolum doğruluğu:** Paper'ın dolum fiyatının gerçekle ne kadar örtüştüğü ancak gerçek emirle ölçülebilir (Aşama 3, isteğe bağlı mikro emir). Paper bu konuda temkinli tarafta: yalnızca taker emir, bacaklar sırayla, en az 750 ms gecikme ve +1 bp ek kayma. Giriş emirleri planlanan fiyatın %0,1 ötesine kadar "hemen ya da iptal" (IOC) emridir: defter yetmezse kısmi dolar; ilk bacak kısmi dolarsa ikincisi o miktarda gönderilir, ikinci bacak kısmi dolarsa ilk bacağın eşleşmeyen kısmı hemen kapatılır ve maliyeti işleme yazılır. Gerçek bir borsada kısmi dolumun boyutu ve sıra önceliği farklı olabilir.
 - **Borsa olayları:** Bakım, listeden çıkma, ADL ve para çekme durdurmaları modellenmez.
 
 ## Aşama 2 — Bağlantı ve salt okunur hesap

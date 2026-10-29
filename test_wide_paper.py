@@ -928,19 +928,82 @@ class WidePaperTests(unittest.TestCase):
             self.desk.assessed[0]["reasons"],
         )
 
+    def books_after_pricing(self, **later):
+        """The first read of each venue's book prices the entry; later reads (the fills,
+        an unwind) see the given books."""
+        seen, base = {}, self.src.book
+
+        def read(v, a):
+            seen[v] = seen.get(v, 0) + 1
+            if seen[v] > 1 and v in later:
+                return dict(later[v], received=bot.now())
+            return base(v, a)
+
+        self.src.book = read
+
     def test_entry_without_any_fill_is_not_a_trade(self):
         self.setup_pair()
-
-        def moved(*a, **k):
-            raise ValueError("Dolum öncesi fiyat %0,1 sınırını aştı")
-
-        self.desk.quote = moved
+        # Between pricing and the fill the long venue's asks moved 0.5% up, past the
+        # order's 0.1% limit: the immediate-or-cancel order fills nothing.
+        self.books_after_pricing(Hyperliquid=book(100.5, T0))
         self.desk.cycle()
         self.assertEqual((self.desk.positions, self.desk.closed), ([], []))
         self.assertEqual(self.desk.report()["funding"]["trades"], 0)
         self.assertEqual(self.desk.wallet["cash"], self.desk.cfg["wide_capital"])
         (r,) = self.desk.rejected.values()
-        self.assertIn("Giriş yapılmadı", r["reason"])
+        self.assertIn("Giriş yapılmadı: Dolum olmadı", r["reason"])
+
+    def test_thin_first_leg_sizes_the_second(self):
+        self.setup_pair()
+        self.books_after_pricing(
+            Hyperliquid=dict(
+                bids=[(99.99, 1000.0)], asks=[(100.01, 5.0), (101.0, 1000.0)]
+            )
+        )
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        planned = p["decision"]["planned_qty"]
+        self.assertGreater(planned, 5.0)
+        self.assertEqual([l["qty"] for l in p["legs"]], [5.0, 5.0])
+        self.assertAlmostEqual(p["fill_ratio"], 5.0 / planned)
+        self.assertAlmostEqual(p["decision"]["qty"], 5.0)
+        kinds = [k for (k,) in self.store.db.execute("select kind from events")]
+        self.assertIn("WIDE_FILL_PARTIAL", kinds)
+        self.assertNotIn("unwound", p)
+
+    def test_thin_second_leg_unwinds_the_unmatched_part(self):
+        self.setup_pair()
+        self.books_after_pricing(
+            Binance=dict(bids=[(99.99, 4.0), (98.0, 1000.0)], asks=[(100.01, 1000.0)])
+        )
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        planned = p["decision"]["planned_qty"]
+        long, short = p["legs"]
+        self.assertEqual((long["qty"], short["qty"]), (4.0, 4.0))
+        (u,) = p["unwound"]
+        self.assertEqual((u["venue"], u["qty"]), ("Hyperliquid", planned - 4.0))
+        # The unmatched part is bought at the ask and sold back at the bid at once:
+        # a real loss plus its fee, both in the trade's result and the wallet.
+        self.assertLess(u["pnl"], 0)
+        self.assertAlmostEqual(p["price_pnl"], u["pnl"])
+        self.assertAlmostEqual(
+            self.desk.wallet["cash"], 10000 - p["fees"] + p["price_pnl"]
+        )
+        self.assertAlmostEqual(
+            long["margin"], 4.0 * long["entry"] / p["decision"]["leverage"]
+        )
+
+    def test_partial_fill_below_a_venue_minimum_is_no_fill(self):
+        self.setup_pair()
+        self.src.rows[0]["minimum"] = 6.0
+        self.books_after_pricing(
+            Hyperliquid=dict(
+                bids=[(99.99, 1000.0)], asks=[(100.01, 5.0), (101.0, 1000.0)]
+            )
+        )
+        self.desk.cycle()
+        self.assertEqual((self.desk.positions, self.desk.closed), ([], []))
 
     def test_old_no_fill_records_are_not_counted(self):
         self.desk.closed.append(
@@ -1349,6 +1412,107 @@ class WidePaperTests(unittest.TestCase):
         self.assertFalse(self.check(r, "En iyi 3 işlemin nete payı")["ok"])
         self.assertFalse(self.check(r, "İşlem sayısı")["ok"])
 
+    def test_fills_record_the_slippage_paid_from_mid(self):
+        self.setup_pair()
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        qty = p["legs"][0]["qty"]
+        # Asks 100.01 and bids 99.99 around a 100 mid, plus the 1 bp extra slippage.
+        one_way = qty * ((100.01 * 1.0001 - 100) + (100 - 99.99 * 0.9999))
+        self.assertAlmostEqual(p["slippage"], one_way)
+        self.desk.manual_close.add(p["id"])
+        self.clock += 60
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.cycle(entries=False)
+        (logged,) = self.desk.trade_log()
+        self.assertAlmostEqual(logged["slippage"], 2 * one_way)
+
+    def test_stress_runs_the_period_under_adverse_assumptions(self):
+        self.desk.reset(venue_capital=1000)
+
+        def trade(net, funding, fees, slippage, estimated=0.0):
+            return dict(
+                asset="X",
+                strategy="funding",
+                legs=[
+                    dict(venue="Binance", side="long"),
+                    dict(venue="Bybit", side="short"),
+                ],
+                net=net,
+                price_pnl=net - funding + fees,
+                funding=funding,
+                estimated_funding=estimated,
+                fees=fees,
+                slippage=slippage,
+                closed_at=self.clock,
+            )
+
+        self.desk.closed = [
+            trade(8.0, 6.0, 1.0, 1.5, estimated=2.0),
+            trade(1.0, 2.0, 0.6, 0.4),
+        ]
+        r = self.desk.period_report()
+        stress = {x["label"]: x["net"] for x in r["stress"]}
+        self.assertAlmostEqual(stress["Kayma 2 katı"], 9.0 - 1.9)
+        self.assertAlmostEqual(stress["Ücret +%50"], 9.0 - 0.8)
+        self.assertAlmostEqual(stress["Funding geliri −%25"], 9.0 - 2.0)
+        self.assertAlmostEqual(stress["Tahmini değerlenen funding sayılmaz"], 7.0)
+        # Together: the estimate removed, then a quarter of the funding left is cut.
+        self.assertAlmostEqual(
+            stress["Hepsi birlikte"], 9.0 - 1.9 - 0.8 - 2.0 - 0.25 * (4.0 + 2.0)
+        )
+        self.assertTrue(self.check(r, "Stres altında net (hepsi birlikte)")["ok"])
+        self.assertEqual(r["stress_unmeasured"], 0)
+        # A result that only holds on the paper's own fills does not pass.
+        self.desk.closed = [trade(1.0, 3.0, 1.0, 1.5)]
+        r = self.desk.period_report()
+        self.assertTrue(self.check(r, "Ücretler sonrası net")["ok"])
+        self.assertFalse(self.check(r, "Stres altında net (hepsi birlikte)")["ok"])
+
+    def test_scorecard_per_strategy_and_pair(self):
+        self.desk.reset(venue_capital=1000)
+
+        def trade(net, long, short, opened, closed, price=0.0, fees=0.5, **kw):
+            return dict(
+                asset="X",
+                strategy="funding",
+                legs=[dict(venue=long, side="long"), dict(venue=short, side="short")],
+                net=net,
+                price_pnl=price,
+                funding=net - price + fees,
+                fees=fees,
+                opened=opened,
+                closed_at=closed,
+                **kw,
+            )
+
+        h = 3600
+        self.desk.closed = [
+            trade(3.0, "Binance", "Bybit", 0, 2 * h, slippage=0.2),
+            trade(-2.0, "Binance", "Bybit", h, 5 * h, price=-4.0, slippage=0.3),
+            trade(1.0, "Binance", "Bybit", 2 * h, 6 * h, funding_unverified=[{}]),
+            trade(0.5, "OKX", "Gate", 0, h, estimated_funding=0.5),
+        ]
+        whole, pair, other = self.desk.period_report()["scorecard"]
+        self.assertEqual(
+            (whole["pair"], whole["trades"], whole["net"]), (False, 4, 2.5)
+        )
+        self.assertEqual(
+            (pair["long"], pair["short"], pair["trades"]), ("Binance", "Bybit", 3)
+        )
+        self.assertAlmostEqual(pair["average"], 2.0 / 3)
+        self.assertEqual(
+            (pair["wins"], pair["worst"], pair["worst_price"]), (2, -2.0, -4.0)
+        )
+        # Fees against funding + price before fees: 1.5 / (2.0 + 3.5) here.
+        self.assertAlmostEqual(pair["fee_share"], 1.5 / 3.5)
+        self.assertAlmostEqual(pair["hold_hours"], (2 + 4 + 4) / 3)
+        # Cumulative net 3, 1, 2 by close time: the deepest fall from a high is 2.
+        self.assertAlmostEqual(pair["drawdown"], 2.0)
+        self.assertAlmostEqual(pair["slippage"], 0.5)
+        self.assertEqual(pair["unverified"], 1)
+        self.assertAlmostEqual(other["estimated_share"], 0.5 / 1.0)
+
     def test_period_report_tracks_drawdown_and_open_positions(self):
         self.desk.reset(venue_capital=1000)
         self.store.put(
@@ -1464,6 +1628,8 @@ class WidePaperTests(unittest.TestCase):
             (row["entry_reason"], row["close_reason"]),
             ("Funding: short Aster, long Bybit", "Kâr kilidi"),
         )
+        # A trade from before partial fills and slippage records: full fill, no slippage.
+        self.assertEqual((row["fill_ratio"], row["slippage_usd"]), ("1.0", ""))
 
     def test_cycles_record_hourly_equity(self):
         self.desk.reset(venue_capital=1000)
