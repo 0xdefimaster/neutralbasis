@@ -33,7 +33,8 @@ Varsayılan hesap borsaları (15 perp): **Lighter, Extended, Hyperliquid, TxFlow
   - kesinti en çok %5;
   - en az 40 kapanmış işlem;
   - ücretler sonrası net pozitif;
-  - stres altında net pozitif: kapanan işlemler kayma 2 katı, ücret +%50, funding geliri −%25 ve tahmini değerlenen funding sayılmadan yeniden hesaplanır; sonuç yalnızca paper'ın kendi dolumlarında pozitifse ölçüt sağlanmaz;
+  - stres altında net pozitif: kapanan işlemler kayma 2 katı, ücret +%50, funding geliri −%25, tahmini değerlenen funding sayılmadan ve doğrulanmamış ödemeler aleyhte sayılarak yeniden hesaplanır; sonuç yalnızca paper'ın kendi dolumlarında pozitifse ölçüt sağlanmaz;
+  - doğrulanmamış funding aleyhte sayılınca net pozitif: borsanın yayımlamadığı ödemeler ödeyen bacakta maliyet sayıldığında da sonuç pozitif kalmalı;
   - kazanç/kayıp oranı en az 1.3;
   - en iyi 3 işlemin nete payı %50'nin altında;
   - yeni girişler kapalı kalan süre en çok %5;
