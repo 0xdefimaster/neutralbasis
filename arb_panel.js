@@ -34,14 +34,16 @@ function apPairChart(d,size){const span=apSpans[ap.range],from=d.ts-span,pts=d.p
  return pairChartSvg(pts.map(p=>({ts:p.ts,gap:p.gap*100})),['gap'],[name(d.short.venue)+' / '+name(d.long.venue)+' − 1'],['#a8c697'],[],levels,'%')}
 
 // The multi-venue paper desk's word on this asset on these two venues: why it opened or why not.
+// Long-window context of a funding decision: never a rejection, it may cut the size.
+const apNotes=d=>d?.notes?.length?`<div class="cell-sub" style="color:var(--amber);white-space:normal">Uzun dönem bağlamı${d.confidence<1?' · büyüklük %'+Math.round(d.confidence*100):''}: ${esc(d.notes.join(' · '))}</div>`:'';
 function apPaper(pv){if(!pv)return '';const clock=t=>t?new Date(t*1000).toLocaleString('tr-TR',{timeZone:'Europe/Istanbul',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';
  const bad=Object.entries(pv.legs||{}).filter(([,r])=>r).map(([v,r])=>`${esc(name(v))}: ${esc(r)}`),label={funding:'Funding',convergence:'Yakınsama'};
  const row=s=>{const d=s.decision,dir=s.long?`<div class="cell-sub">long ${esc(name(s.long))} · short ${esc(name(s.short))}</div>`:'';let st,text;
   if(!s.enabled){st='Kapalı';text='Strateji Çoklu masa ayarlarında kapalı.'}
   else if(bad.length){st='Aday değil';text=bad.join(' · ')}
-  else if(d?.outcome==='opened'){st='Açıldı';text=`${clock(d.at)} · beklenen net ${signedMoney(d.net)}`}
-  else if(d?.outcome==='eligible'){st='Uygun';text=`${clock(d.at)} · beklenen net ${signedMoney(d.net)}`}
-  else if(d?.outcome==='skipped'){st='Açılamadı';text=`${clock(d.at)} · uygun bulundu ama: ${esc(d.reasons.join(' · '))}`}
+  else if(d?.outcome==='opened'){st='Açıldı';text=`${clock(d.at)} · beklenen net ${signedMoney(d.net)}${apNotes(d)}`}
+  else if(d?.outcome==='eligible'){st='Uygun';text=`${clock(d.at)} · beklenen net ${signedMoney(d.net)}${apNotes(d)}`}
+  else if(d?.outcome==='skipped'){st='Açılamadı';text=`${clock(d.at)} · uygun bulundu ama: ${esc(d.reasons.join(' · '))}${apNotes(d)}`}
   else if(d?.outcome==='rejected'){st='Elendi';text=`${clock(d.at)} · ${esc(d.reasons.join(' · '))}${s.retry_at?` · tekrar denenir ${clock(s.retry_at)}`:''}`}
   else if(s.rank&&s.score>0){st='Sırada';text=`Aday sıralamasında ${s.rank}. / ${s.candidates} (ücret sonrası ${(s.score*10000).toFixed(1)} bp); her turda en iyi adaylar incelenir, sırası henüz gelmedi.`}
   else if(s.rank){st='Aday değil';text=`Ücretler sonrası beklenti negatif (${(s.score*10000).toFixed(1)} bp); derin kontrole girmez.`}

@@ -1,7 +1,9 @@
 """Multi-venue paper desk: two strategies over every scanned perp pair.
 
-1. Funding: carry on pairs whose prices stay correlated over 7 and 30 days; profit is
-   locked once a gain starts being given back, and the trade leaves when carry turns.
+1. Funding: carry on pairs whose advantage shows in today's rates and in the payments
+   of the last 1, 3 and 7 days, with prices that moved together over the last 7 days.
+   The longest window (up to 30 days) is context: a contradiction cuts the size. Profit
+   is locked once a gain starts being given back; the trade leaves when carry turns.
 2. Convergence: long the cheaper venue, short the dearer, equal size, when the pair's
    prices crossed regularly over both 7 and 30 days; close when they cross again.
 
@@ -129,6 +131,16 @@ PERIOD_CHECKS = dict(
 )
 # Funding quotes older than this at entry are refreshed or the entry is skipped.
 ENTRY_FUNDING_MAX_AGE = 120
+# Days of published funding payments a funding entry checks: the advantage must hold over
+# the last 3 and 7 days without leaning on a single day.
+PERSIST_DAYS = 7
+# Payments may be up to 8h apart (venues move between 8h, 4h and 1h schedules); a longer
+# stretch without one means the published history is incomplete.
+FUNDING_GAP = 8 * 3600 + 900
+# The longest window is context, not a gate: each contradiction with the short-term
+# signal halves the entry size.
+CONTEXT_DAYS = 30
+CONTEXT_CUT = 0.5
 
 
 def next_payment(row, after):
@@ -502,6 +514,38 @@ def realized_raw(rows, interval, at):
     return statistics.mean(recent)
 
 
+def covered_since(rows, start, end, gap):
+    """Earliest time from which (t, end] has no stretch longer than `gap` without a
+    published payment: `start` when the whole window is covered, `end` when even the
+    latest payment is missing."""
+    ts = sorted({r["ts"] for r in rows if start < r["ts"] <= end}, reverse=True)
+    if not ts or end - ts[0] > gap:
+        return end
+    since = ts[0]
+    for t in ts[1:]:
+        if since - t > gap:
+            break
+        since = t
+    return start if since - start <= gap else since
+
+
+def daily_carry(long_rows, short_rows, at, days):
+    """Realized funding of long/short per $1 notional for each of the last `days` days
+    (index 0 = the last 24h): what the short leg received minus what the long leg paid,
+    summed over the payments each venue published."""
+    out = [0.0] * days
+    for rows, sign in ((short_rows, 1), (long_rows, -1)):
+        for r in rows:
+            age = at - r["ts"]
+            if 0 <= age < days * 86400:
+                out[int(age // 86400)] += sign * r["rate"]
+    return out
+
+
+def usd(x):
+    return ("-" if x < 0 else "+" if x > 0 else "") + "$%.2f" % abs(x)
+
+
 def universe_rows(universe, rows, held=()):
     """Bulk-scan markets for every asset, as desk rows. Markets already covered by the
     native feed or the selected scan are skipped; a leg must carry UNIVERSE_MIN_USD of
@@ -642,6 +686,11 @@ class EngineSource:
             return self.engine.feed.funding_history(v, a, start)
         return self.engine.wide.funding_since(v, a, start)
 
+    def stored_funding(self, v, a, start):
+        """Payments the background history keeper recorded (up to 30 days)."""
+        keeper = getattr(self.engine, "history", None)
+        return keeper.db.funding(v, a, start) if keeper is not None else []
+
 
 # A rejected pair waits this long before it is deep-checked again, so the next ranked
 # pairs get their turn; missing history is retried sooner since the keeper fills it.
@@ -651,9 +700,10 @@ HISTORY_MARKERS = ("mum eksik", "işlem mumu yok", "geçmişi eksik")
 
 
 def reason_group(reason):
+    """A rejection's kind; measured values follow " · " and stay out of the group."""
     if any(m in reason for m in HISTORY_MARKERS):
         return "Geçmiş eksik"
-    return reason
+    return reason.split(" · ")[0]
 
 
 class WidePaper:
@@ -969,6 +1019,31 @@ class WidePaper:
             lambda: self.source.funding(v, a, start),
         )
 
+    def funding_window(self, v, a, at, days):
+        """Published payments in the last `days` days: the venue's own history for the
+        last week, completed by the keeper's stored record; one payment counts once."""
+        start = at - days * 86400
+        merged = {}
+        stored = getattr(self.source, "stored_funding", None)
+        if stored:
+            try:
+                for r in stored(v, a, start):
+                    merged[round(r["ts"] / 60)] = r
+            except Exception:
+                pass
+        try:
+            live = self.funding_rows(v, a, at - min(days, PERSIST_DAYS) * 86400)
+        except Exception:
+            if not merged:
+                raise
+            live = []
+        for r in live:
+            merged[round(r["ts"] / 60)] = r
+        return sorted(
+            (r for r in merged.values() if start < r["ts"] <= at),
+            key=lambda r: r["ts"],
+        )
+
     def price_history(self, v, a):
         return self.cached(
             ("prices", v, a), HISTORY_TTL, lambda: self.source.prices(v, a)
@@ -1107,7 +1182,7 @@ class WidePaper:
         ):
             try:
                 realized = realized_raw(
-                    self.funding_rows(v, c["asset"], at - 2 * 86400), iv, at
+                    self.funding_window(v, c["asset"], at, PERSIST_DAYS), iv, at
                 )
             except Exception:
                 realized = None
@@ -1125,8 +1200,74 @@ class WidePaper:
             return self.assess_convergence(c)
         return self.assess_funding(c)
 
+    def realized_carry(self, c, at):
+        """This direction's realized funding per $1 notional for each of the last 7
+        days (index 0 = the last 24h). A leg whose payments do not cover the week stops
+        the check: persistence is never assumed."""
+        start = at - PERSIST_DAYS * 86400
+        rows = {}
+        for v, iv in (
+            (c["long"], c["interval_long"]),
+            (c["short"], c["interval_short"]),
+        ):
+            r = self.funding_window(v, c["asset"], at, PERSIST_DAYS)
+            if covered_since(r, start, at, max(FUNDING_GAP, (iv or 0) + 900)) > start:
+                raise ValueError(v + ": 7 günlük gerçekleşmiş funding geçmişi eksik")
+            rows[v] = r
+        return daily_carry(rows[c["long"]], rows[c["short"]], at, PERSIST_DAYS)
+
+    def long_context(self, c, at, stats):
+        """The longest window (up to 30 days) as context, never a rejection: notes, and a
+        confidence that halves for each contradiction with the short-term signal."""
+        cfg = self.cfg
+        notes, confidence = [], 1.0
+        days = stats["history_days"]
+        out = dict(price_days=days, corr_long=stats["corr30"])
+        if days > PERSIST_DAYS:
+            if stats["corr30"] < cfg["wide_min_corr"]:
+                confidence *= CONTEXT_CUT
+                notes.append(
+                    "%dg getiri korelasyonu %.3f < %.2f; büyüklük yarıya indi"
+                    % (days, stats["corr30"], cfg["wide_min_corr"])
+                )
+        else:
+            notes.append("Uzun dönem fiyat geçmişi yok (%d gün)" % days)
+        start = at - CONTEXT_DAYS * 86400
+        try:
+            legs, since = {}, start
+            for v, iv in (
+                (c["long"], c["interval_long"]),
+                (c["short"], c["interval_short"]),
+            ):
+                legs[v] = self.funding_window(v, c["asset"], at, CONTEXT_DAYS)
+                since = max(
+                    since,
+                    covered_since(
+                        legs[v], start, at, max(FUNDING_GAP, (iv or 0) + 900)
+                    ),
+                )
+            fdays = int((at - since) // 86400)
+            out["funding_days"] = fdays
+            if fdays > PERSIST_DAYS:
+                total = sum(daily_carry(legs[c["long"]], legs[c["short"]], at, fdays))
+                out["carry"] = total
+                if total <= 0:
+                    confidence *= CONTEXT_CUT
+                    notes.append(
+                        "%dg gerçekleşen funding bu yönün tersine; büyüklük yarıya indi"
+                        % fdays
+                    )
+            else:
+                notes.append("Uzun dönem funding geçmişi yok (%d gün)" % fdays)
+        except Exception:
+            notes.append("Uzun dönem funding geçmişi okunamadı")
+        out.update(confidence=confidence, notes=notes)
+        return out
+
     def assess_funding(self, c):
-        """Carry on a pair whose prices stay correlated over 7 and 30 days."""
+        """Carry on a pair whose advantage shows today and held over the last 3 and 7
+        days, with prices that moved together over the last 7 days. The longest window
+        (up to 30 days) is context: a contradiction cuts the size, it never rejects."""
         cfg = self.cfg
         a, lv, sv = c["asset"], c["long"], c["short"]
         out = dict(c, reasons=list(self.blocked(c)), eligible=False, net=None)
@@ -1140,21 +1281,26 @@ class WidePaper:
                 cfg["wide_min_history_days"],
             )
             out["stats"] = stats
+            # 1 day: each leg at the worse of its current quote and its last 24h payments.
             raw = self.conservative_raw(c, at)
+            # 3 and 7 days: what this direction was really paid, day by day.
+            days = self.realized_carry(c, at)
+            context = self.long_context(c, at, stats)
+            out.update(realized_days=days, context=context)
             q = self.priced(
                 c,
                 cfg["wide_leverage"],
                 stats["stress_fraction"],
-                cfg["wide_size"],
+                cfg["wide_size"] * context["confidence"],
                 stats["vol"],
                 cfg["wide_horizon"],
             )
             counts = c["payment_counts"]
-            funding = (
-                q["qty"]
-                * q["price"]
-                * (raw["short"] * counts[sv] - raw["long"] * counts[lv])
-            )
+            day1 = q["size"] * (raw["short"] * counts[sv] - raw["long"] * counts[lv])
+            # The last 3 days' average over the horizon: an advantage that only appeared
+            # today is not projected at today's level.
+            day3 = q["size"] * sum(days[:3]) / 3 * cfg["wide_horizon"] / 24
+            funding = min(day1, day3)
             # Short the rich leg: reverting to the 7d mean only costs when we enter below it.
             reversion = q["size"] * min(0.0, q["live_spread"] - stats["mean"])
             # Risk reserve: one 7d standard deviation of the price gap widening.
@@ -1167,50 +1313,90 @@ class WidePaper:
                 + reversion
                 - risk_reserve
             )
+            week, three = sum(days), sum(days[:3])
             out.update(
                 q,
                 conservative_funding=funding,
+                funding_day1=day1,
+                funding_day3=day3,
                 conservative_raw=raw,
                 reversion_cost=reversion,
                 risk_reserve=risk_reserve,
                 net=net,
                 entry_reason=(
-                    "Funding: short %s, long %s; muhafazakâr %s saatlik funding $%.2f, "
-                    "korelasyon 7g %.3f / %dg %.3f, fark sd %.1f bp, net $%.2f"
+                    "Funding: short %s, long %s; beklenen %s saatlik funding %s "
+                    "(1g %s, 3g ort. %s), gerçekleşen 3g %s / 7g %s (%d/7 gün pozitif), "
+                    "korelasyon 7g %.3f / %dg %.3f, fark sd %.1f bp, büyüklük $%.0f, net %s%s"
                     % (
                         sv,
                         lv,
                         cfg["wide_horizon"],
-                        funding,
+                        usd(funding),
+                        usd(day1),
+                        usd(day3),
+                        usd(q["size"] * three),
+                        usd(q["size"] * week),
+                        sum(x > 0 for x in days),
                         stats["corr"],
                         stats["history_days"],
                         stats["corr30"],
                         stats["sd"] * 10000,
-                        net,
+                        q["size"],
+                        usd(net),
+                        "".join("; " + n for n in context["notes"]),
                     )
                 ),
             )
-            if min(stats["corr"], stats["corr30"]) < cfg["wide_min_corr"]:
-                out["reasons"].append("7g / 30g getiri korelasyonu sınır altında")
+            if stats["corr"] < cfg["wide_min_corr"]:
+                out["reasons"].append(
+                    "7g getiri korelasyonu sınır altında · %.3f < %.2f"
+                    % (stats["corr"], cfg["wide_min_corr"])
+                )
             if not 0.8 <= stats["beta"] <= 1.25:
-                out["reasons"].append("Hedge beta uyumsuz")
+                out["reasons"].append(
+                    "Hedge beta uyumsuz · %.2f (0,80–1,25 dışında)" % stats["beta"]
+                )
             if abs(stats["z"]) > cfg["wide_max_z"]:
-                out["reasons"].append("Spread z-score sınırı aşıldı")
+                out["reasons"].append(
+                    "Spread z-score sınırı aşıldı · |z| %.1f > %.1f"
+                    % (abs(stats["z"]), cfg["wide_max_z"])
+                )
             if stats["sd"] > cfg["wide_max_spread_sd_bps"] / 10000:
                 out["reasons"].append(
-                    "Fiyat farkı istikrarlı değil (7g sd sınır üstünde)"
+                    "Fiyat farkı istikrarlı değil (7g sd sınır üstünde) · %.1f bp > %.0f bp"
+                    % (stats["sd"] * 10000, cfg["wide_max_spread_sd_bps"])
                 )
-            if funding <= 0:
-                out["reasons"].append("Gerçekleşmiş funding ile kalıcı avantaj yok")
+            if day1 <= 0:
+                out["reasons"].append(
+                    "Gerçekleşmiş funding ile kalıcı avantaj yok · güncel ve son 24 saatin "
+                    "kötüsüyle %s" % usd(day1)
+                )
+            if three <= 0:
+                out["reasons"].append(
+                    "3 günde gerçekleşen funding bu yönde avantaj göstermiyor · %s"
+                    % usd(q["size"] * three)
+                )
+            if week <= 0:
+                out["reasons"].append(
+                    "7 günde gerçekleşen funding bu yönde avantaj göstermiyor · %s"
+                    % usd(q["size"] * week)
+                )
+            elif week - max(days) <= 0:
+                out["reasons"].append(
+                    "Avantaj tek bir güne dayanıyor · 7g %s, en iyi gün hariç %s"
+                    % (usd(q["size"] * week), usd(q["size"] * (week - max(days))))
+                )
             if net < cfg["wide_min_net"]:
                 out["reasons"].append(
-                    "Funding geliri ücret + kayma + spread riski payını karşılamıyor"
+                    "Funding geliri ücret + kayma + spread riski payını karşılamıyor · "
+                    "net %s < $%.2f" % (usd(net), cfg["wide_min_net"])
                 )
-            if (
-                q["entry_fee"] + q["exit_fee"] + q["execution_drag"] + q["stress_loss"]
-                > q["budget"] + 1e-6
-            ):
-                out["reasons"].append("İşlem kayıp bütçesi aşılıyor")
+            worst = self.worst_loss(q)
+            if worst > q["budget"] + 1e-6:
+                out["reasons"].append(
+                    "İşlem kayıp bütçesi aşılıyor · en kötü $%.2f > $%.2f"
+                    % (worst, q["budget"])
+                )
         except Exception as ex:
             out["reasons"].append(str(ex))
         out["reasons"] = list(dict.fromkeys(out["reasons"]))
@@ -1787,8 +1973,10 @@ class WidePaper:
             stats = None
         if stats:
             p["live_stats"] = {k: stats[k] for k in ("corr", "corr30", "z", "sd")}
+            # The hedge is judged on the last 7 days, as at entry; the long window
+            # is context and never closes a position.
             if (
-                min(stats["corr"], stats["corr30"]) < cfg["wide_min_corr"]
+                stats["corr"] < cfg["wide_min_corr"]
                 or abs(stats["z"]) > cfg["wide_max_z"] + 1
             ):
                 return "Fiyat uyumu bozuldu"
@@ -2202,9 +2390,11 @@ class WidePaper:
         but not entered) or opened, with the reasons and the expected net."""
         if reasons is None:
             reasons = x.get("reasons") or []
-        self.decisions[self.pair_key(x)] = dict(
-            at=at, outcome=outcome, reasons=list(reasons)[:4], net=x.get("net")
-        )
+        d = dict(at=at, outcome=outcome, reasons=list(reasons)[:4], net=x.get("net"))
+        context = x.get("context") or {}
+        if context.get("notes"):
+            d.update(notes=context["notes"][:3], confidence=context["confidence"])
+        self.decisions[self.pair_key(x)] = d
         if len(self.decisions) > 5000:
             for k in sorted(self.decisions, key=lambda k: self.decisions[k]["at"])[
                 :1000
@@ -2363,9 +2553,14 @@ class WidePaper:
             method=(
                 "İki strateji, taranan tüm borsa çiftleri ve tüm varlıklar (seçili liste dışındakiler OI veya "
                 "hacmi ≥ $1M bacaklarla); net = iki bacağın fiyat PnL'si + net funding − "
-                "komisyon, kayma dolum fiyatlarında. Funding: 7g/30g korele ve farkı istikrarlı çiftler, "
-                "aralıkları eşitlenmiş short − long funding; ücret, kayma ve fark riski payını karşılarsa "
-                "açılır; zayıflık kalıcıysa, uyum bozulursa veya bacak marjini riske girerse çıkılır. "
+                "komisyon, kayma dolum fiyatlarında. Funding: bugünkü oran ve son 24 saatte ödenen "
+                "funding (bacak başına kötüsü) avantaj göstermeli; son 3 ve 7 günde bu yönde gerçekten "
+                "ödenen funding pozitif olmalı ve tek bir güne dayanmamalı; fiyatlar son 7 günde birlikte "
+                "hareket etmeli (korelasyon, beta, z, fark sd). Beklenen funding 1g tahmini ile 3g "
+                "ortalamasından düşük olanı; ücret, kayma ve fark riski payını karşılarsa açılır. 30 güne "
+                "kadar uzun dönem yalnızca bağlamdır: korelasyon ya da funding kısa dönemle çelişirse "
+                "büyüklük yarıya iner. Zayıflık kalıcıysa, 7g uyum bozulursa veya bacak marjini riske "
+                "girerse çıkılır. "
                 "Yakınsama: çiftin normal fiyat farkı (7g/30g medyanı; sıfır olması gerekmez) etrafında 7g ve "
                 "30g düzenli kesişim ve dönüş süresi; ucuzda long, pahalıda short, eşit miktar, en fazla 5x; "
                 "fark normal seviyesine dönünce kapanış sonrası nete bakılarak kapanır; normal fark "
