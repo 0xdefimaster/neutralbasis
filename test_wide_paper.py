@@ -331,6 +331,14 @@ class WidePaperTests(unittest.TestCase):
         venues = {x["venue"] for x in p.get("funding_unverified", [])}
         self.assertIn("Binance", venues)
         self.assertEqual(p["funding"], 0)
+        # Binance would have paid the short leg: a missing income is no hidden gain.
+        self.assertTrue(
+            all(
+                x["risk"] == 0
+                for x in p["funding_unverified"]
+                if x["venue"] == "Binance"
+            )
+        )
 
     def test_closes_when_carry_flips(self):
         self.setup_pair()
@@ -1145,6 +1153,70 @@ class WidePaperTests(unittest.TestCase):
         self.assertAlmostEqual(
             closed["net"], closed["price_pnl"] + closed["funding"] - closed["fees"]
         )
+
+    def test_unpublished_cost_on_a_paying_leg_is_charged_in_the_stress(self):
+        # The long leg pays 0.01% an hour; the short receives 0.30% every 8h.
+        self.setup_pair(long_rate=0.0001, short_rate=0.003)
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        qty = p["legs"][0]["qty"]
+        pay = T0 + 8 * 3600
+        self.src.rates[("Binance", "BTC")].append(
+            dict(ts=pay, rate=0.003, value=None, audit_id=None)
+        )
+        self.store.mark("Binance", "BTC", pay - 10, 100.0)
+        for h in range(1, 11):
+            self.store.mark("Hyperliquid", "BTC", T0 + h * 3600 - 10, 100.0)
+        # Hyperliquid publishes none of its hourly payments before the close.
+        self.clock = pay + 3600 + bot.FUNDING_UNVERIFIED_AFTER + 60
+        self.desk.cache.clear()
+        for v in ("Hyperliquid", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.manual_close.add(p["id"])
+        self.desk.cycle(entries=False)
+        closed = self.desk.closed[-1]
+        # The last hourly payment before the close settles an hour later.
+        self.clock += 3700
+        self.desk.cache.clear()
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.cycle(entries=False)
+        # Booked as 0, each would have cost qty * 100 * 0.01%.
+        self.assertAlmostEqual(closed["funding"], qty * 100 * 0.003)
+        (entry,) = self.desk.trade_log()
+        self.assertFalse(entry["pending"])
+        self.assertEqual(entry["unverified"], 10)
+        self.assertAlmostEqual(entry["unverified_risk"], -10 * qty * 100 * 0.0001)
+        r = self.desk.period_report()
+        stress = {x["label"]: x["net"] for x in r["stress"]}
+        self.assertAlmostEqual(
+            stress["Doğrulanmamış ödemeler aleyhte"],
+            r["net"] + entry["unverified_risk"],
+        )
+        check = self.check(r, "Doğrulanmamış funding aleyhte sayılınca net")
+        self.assertEqual(check["ok"], r["net"] + entry["unverified_risk"] > 0)
+        self.assertIn("10 ödeme", check["value"])
+        import csv, io
+
+        rows = list(
+            csv.reader(io.StringIO(wide_paper.trades_csv(self.desk.trade_log())))
+        )
+        row = dict(zip(rows[0], rows[1]))
+        self.assertAlmostEqual(
+            float(row["unverified_risk_usd"]), entry["unverified_risk"]
+        )
+        # Published late, the payments replace the zeros and the charge goes away.
+        self.src.rates[("Hyperliquid", "BTC")] += [
+            dict(ts=T0 + h * 3600, rate=0.0001, value=None, audit_id=None)
+            for h in range(1, 11)
+        ]
+        self.clock += 600
+        self.desk.cache.clear()
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.cycle(entries=False)
+        (entry,) = self.desk.trade_log()
+        self.assertEqual((entry["unverified"], entry["unverified_risk"]), (0, 0))
+        self.assertAlmostEqual(closed["funding"], qty * 100 * (0.003 - 10 * 0.0001))
 
     def test_leverage_settings_capped_at_five(self):
         for key in ("wide_leverage", "wide_conv_leverage"):

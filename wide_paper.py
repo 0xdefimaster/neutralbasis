@@ -288,6 +288,7 @@ def trades_csv(trades):
             "funding_unverified_hours",
             "fill_ratio",
             "slippage_usd",
+            "unverified_risk_usd",
         ]
     )
     for x in trades:
@@ -312,6 +313,7 @@ def trades_csv(trades):
                 x.get("unverified"),
                 x.get("fill_ratio", 1.0),
                 x.get("slippage"),
+                x.get("unverified_risk"),
             ]
         )
     return out.getvalue()
@@ -383,13 +385,20 @@ STRESS = (
     ("Ücret +%50", dict(fees=0.5)),
     ("Funding geliri −%25", dict(funding=0.25)),
     ("Tahmini değerlenen funding sayılmaz", dict(estimated=1.0)),
-    ("Hepsi birlikte", dict(slippage=1.0, fees=0.5, funding=0.25, estimated=1.0)),
+    ("Doğrulanmamış ödemeler aleyhte", dict(unverified=1.0)),
+    (
+        "Hepsi birlikte",
+        dict(slippage=1.0, fees=0.5, funding=0.25, estimated=1.0, unverified=1.0),
+    ),
 )
 
 
-def stressed(trades, slippage=0.0, fees=0.0, funding=0.0, estimated=0.0):
+def stressed(
+    trades, slippage=0.0, fees=0.0, funding=0.0, estimated=0.0, unverified=0.0
+):
     """Net of closed trades with extra slippage and fees (shares of what each trade
-    paid), funding income cut by a share, and estimated funding valuations removed.
+    paid), funding income cut by a share, estimated funding valuations removed, and
+    every unpublished payment charged as the cost it would have been on a paying leg.
     A trade without a recorded slippage adds none."""
     total = 0.0
     for x in trades:
@@ -400,6 +409,7 @@ def stressed(trades, slippage=0.0, fees=0.0, funding=0.0, estimated=0.0):
             - fees * x["fees"]
             - est
             - funding * max(x["funding"] - est, 0.0)
+            + unverified * (x.get("unverified_risk") or 0.0)
         )
     return total
 
@@ -2081,7 +2091,12 @@ class WidePaper:
                             ).fetchone()
                             if not exists:
                                 p.setdefault("funding_unverified", []).append(
-                                    dict(payment_time=tm, venue=v, recorded=now())
+                                    dict(
+                                        payment_time=tm,
+                                        venue=v,
+                                        recorded=now(),
+                                        risk=self.unverified_risk(p, leg, rows, tm),
+                                    )
                                 )
                                 self.store.db.execute(
                                     "insert into payments values(?,?,?)",
@@ -2113,6 +2128,26 @@ class WidePaper:
                         pending.append(v + ": " + str(tm))
                     t += iv
         p["pending_funding"] = pending
+
+    def unverified_risk(self, p, leg, rows, t):
+        """What an unpublished payment would have cost this leg at its last known rate
+        (the latest payment it published, else the rate the entry was decided on); zero
+        when it would have been income. The paper books the payment as 0, so on a paying
+        leg its net looks better than it was; this is how much better at most."""
+        known = [r for r in rows if r["ts"] < t and r.get("rate") is not None]
+        if known:
+            rate = max(known, key=lambda r: r["ts"])["rate"]
+        else:
+            d = p.get("decision") or {}
+            rate = d.get("raw_long" if leg["side"] == "long" else "raw_short")
+            if rate is None:
+                rate = (self.rows.get((leg["venue"], p["asset"])) or {}).get("raw_rate")
+        if rate is None:
+            return 0.0
+        seen = self.store.before(leg["venue"], p["asset"], t)
+        price = seen[1] if seen else leg["entry"]
+        cash = leg["qty"] * price * rate * (-1 if leg["side"] == "long" else 1)
+        return min(0.0, cash)
 
     def mark_position(self, p, books):
         unrealized = exit_fee = slippage = 0.0
@@ -2552,6 +2587,9 @@ class WidePaper:
             reason=p.get("close_reason"),
             pending=bool(p.get("pending_funding")),
             unverified=len(p.get("funding_unverified", [])),
+            unverified_risk=sum(
+                x.get("risk") or 0.0 for x in p.get("funding_unverified", [])
+            ),
             fill_ratio=p.get("fill_ratio", 1.0),
             slippage=p.get("slippage"),
         )
@@ -2611,6 +2649,7 @@ class WidePaper:
             str(p["reason"] or "").startswith("Borsa teminatı riski") for p in done
         )
         unverified = sum(p["unverified"] for p in done)
+        unverified_risk = sum(p.get("unverified_risk") or 0.0 for p in settled)
         pf = gains / losses if losses else (None if not gains else math.inf)
         top3 = sum(nets[:3]) / total if total > 0 else None
         days = span / 86400
@@ -2651,6 +2690,11 @@ class WidePaper:
                 f"%{paused / span * 100:.1f} kapalı (sınır %{t['paused_share'] * 100:.0f})",
                 paused / span <= t["paused_share"],
             ),
+            (
+                "Doğrulanmamış funding aleyhte sayılınca net",
+                f"{unverified} ödeme · {total + unverified_risk:+.2f} $",
+                total + unverified_risk > 0,
+            ),
             ("Dönem içinde ayar değişikliği", str(len(changes)), not changes),
             ("Borsa teminatı riski kapanışı", str(collateral), collateral == 0),
         ]
@@ -2673,6 +2717,7 @@ class WidePaper:
             capital=self.cfg["wide_capital"],
             collateral_closes=collateral,
             unverified_payments=unverified,
+            unverified_risk=unverified_risk,
             venues=dict(sorted(venues.items(), key=lambda kv: -kv[1])),
             checks=[dict(label=a, value=b, ok=bool(c)) for a, b, c in checks],
             ready=all(c for _, _, c in checks),
