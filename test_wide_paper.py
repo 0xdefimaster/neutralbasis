@@ -1072,6 +1072,88 @@ class WidePaperTests(unittest.TestCase):
             long["margin"], 4.0 * long["entry"] / p["decision"]["leverage"]
         )
 
+    def test_failed_unwind_keeps_the_hedge_and_shrinks_the_excess(self):
+        self.setup_pair()
+        # The short fills 4 of 10; unwinding the 6 unmatched long finds 1 bid only.
+        seen, base = {}, self.src.book
+        thin = {
+            "Binance": dict(
+                bids=[(99.99, 4.0), (98.0, 1000.0)], asks=[(100.01, 1000.0)]
+            ),
+            "Hyperliquid": dict(bids=[(99.99, 1.0)], asks=[(100.01, 1000.0)]),
+        }
+
+        def read(v, a):
+            seen[v] = seen.get(v, 0) + 1
+            if seen[v] > (1 if v == "Binance" else 2):
+                return dict(thin[v], received=bot.now())
+            return base(v, a)
+
+        self.src.book = read
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        long, short = p["legs"]
+        # One unit of the excess sold; the 4 matched units stay hedged, not closed.
+        self.assertEqual((long["qty"], short["qty"]), (9.0, 4.0))
+        self.assertFalse(long["closed"] or short["closed"])
+        self.assertEqual(p["status"], "RECOVERY")
+        self.assertEqual(
+            (p["exposure"]["venue"], p["exposure"]["side"], p["exposure"]["qty"]),
+            ("Hyperliquid", "long", 5.0),
+        )
+        self.assertEqual(self.desk.entry_halt(), "açık pozisyon RECOVERY durumunda")
+        self.assertAlmostEqual(
+            self.desk.wallet["cash"], 10000 - p["fees"] + p["price_pnl"]
+        )
+        # With the books back the rest closes and the record adds up.
+        self.src.book = base
+        self.clock += 60
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        c = self.desk.closed[-1]
+        self.assertAlmostEqual(c["net"], c["price_pnl"] + c["funding"] - c["fees"])
+        self.assertAlmostEqual(self.desk.wallet["cash"] - 10000, c["net"])
+
+    def test_a_close_never_leaves_one_leg_alone(self):
+        self.setup_pair()
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        base = self.src.book
+
+        def read(v, a):
+            if v == "Binance":
+                raise ValueError("borsa yanıt vermiyor")
+            return base(v, a)
+
+        self.src.book = read
+        self.desk.close(p, "Kullanıcı paper kapatma talebi")
+        # The Hyperliquid leg could close, but alone it would leave the short unhedged.
+        self.assertEqual([l["closed"] for l in p["legs"]], [False, False])
+        self.assertEqual((p["status"], p["exposure"]), ("RECOVERY", None))
+        self.src.book = base
+        self.desk.close(p, "Kullanıcı paper kapatma talebi")
+        self.assertEqual(self.desk.positions, [])
+
+    def test_thin_books_close_the_matched_part_on_both_legs(self):
+        self.setup_pair()
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        self.src.books[("Hyperliquid", "BTC")] = dict(
+            bids=[(99.99, 3.0)], asks=[(100.01, 1000.0)], received=T0
+        )
+        self.src.books[("Binance", "BTC")] = dict(
+            bids=[(99.99, 1000.0)], asks=[(100.01, 5.0)], received=T0
+        )
+        self.desk.close(p, "Kâr hedefi alındı")
+        long, short = p["legs"]
+        self.assertEqual((long["qty"], short["qty"]), (7.0, 7.0))
+        self.assertEqual((p["status"], p["exposure"]), ("RECOVERY", None))
+        self.assertEqual([x["qty"] for x in long["partial_exits"]], [3.0])
+        self.assertAlmostEqual(
+            self.desk.wallet["cash"], 10000 - p["fees"] + p["price_pnl"]
+        )
+
     def test_partial_fill_below_a_venue_minimum_is_no_fill(self):
         self.setup_pair()
         self.src.rows[0]["minimum"] = 6.0

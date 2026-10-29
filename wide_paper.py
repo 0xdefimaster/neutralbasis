@@ -2184,31 +2184,65 @@ class WidePaper:
         # What closing now costs: exit fees plus crossing both books from mid.
         p["exit_cost"] = exit_fee + slippage
         p["net_if_closed"] = p["price_pnl"] + p["funding"] - p["fees"] + p["unrealized"]
+        p["exposure"] = self.exposure(p, books)
         p["last_mark"] = now()
 
     def close(self, p, reason):
+        """Close the open legs as far as each venue's book takes them now, keeping the
+        hedge. The part of one leg the other cannot match is closed first, then the
+        matched part on both legs together; a leg is never closed alone while the
+        other could not be. Whatever a book cannot take now stays open (RECOVERY) and
+        is retried next round, so a failure never leaves a fresh unhedged position."""
         p["status"] = "CLOSING"
         p["close_reason"] = reason
         self.persist()
-        for leg in p["legs"]:
-            if leg["closed"]:
-                continue
+        legs = [leg for leg in p["legs"] if not leg["closed"]]
+        books, room, errors = {}, {}, []
+        for i, leg in enumerate(legs):
+            room[i] = 0.0
             try:
                 self.sleep(self.latency(leg["venue"]))
-                px, b = self.quote(
-                    leg["venue"], p["asset"], leg["qty"], leg["side"] == "short"
-                )
-                pnl = (
-                    leg["qty"]
-                    * (px - leg["entry"])
-                    * (1 if leg["side"] == "long" else -1)
-                )
-                fee = leg["qty"] * px * leg["fee_rate"]
-                self.credit(leg["venue"], pnl - fee)
-                p["price_pnl"] += pnl
-                p["fees"] += fee
-                if "slippage" in p:
-                    p["slippage"] += leg["qty"] * abs(px - mid_of(b))
+                b = self.book(leg["venue"], p["asset"])
+                side = b["asks" if leg["side"] == "short" else "bids"]
+                books[i] = b
+                room[i] = min(leg["qty"], sum(q for _, q in side))
+            except Exception as ex:
+                errors.append(leg["venue"] + ": " + str(ex)[:120])
+        amount = {i: 0.0 for i in range(len(legs))}
+        longs = [i for i, leg in enumerate(legs) if leg["side"] == "long"]
+        shorts = [i for i, leg in enumerate(legs) if leg["side"] == "short"]
+        if longs and shorts:
+            lo, sh = longs[0], shorts[0]
+            excess = legs[lo]["qty"] - legs[sh]["qty"]
+            big = lo if excess > 0 else sh
+            first = min(abs(excess), room[big])
+            amount[big] += first
+            room[big] -= first
+            matched = min(legs[lo]["qty"], legs[sh]["qty"], room[lo], room[sh])
+            amount[lo] += matched
+            amount[sh] += matched
+        else:
+            for i in range(len(legs)):
+                amount[i] = room[i]
+        for i, leg in enumerate(legs):
+            qty = amount[i]
+            if qty <= 1e-12:
+                continue
+            b = books[i]
+            px = walk(
+                b["asks" if leg["side"] == "short" else "bids"],
+                qty,
+                leg["side"] == "short",
+                self.extra_slippage,
+            )
+            pnl = qty * (px - leg["entry"]) * (1 if leg["side"] == "long" else -1)
+            fee = qty * px * leg["fee_rate"]
+            self.credit(leg["venue"], pnl - fee)
+            p["price_pnl"] += pnl
+            p["fees"] += fee
+            if "slippage" in p:
+                p["slippage"] += qty * abs(px - mid_of(b))
+            if qty >= leg["qty"] - 1e-12:
                 leg.update(
                     closed=True,
                     exit=px,
@@ -2216,17 +2250,33 @@ class WidePaper:
                     price_pnl=0.0,
                     exit_audit_id=b.get("audit_id"),
                 )
-                self.persist()
-            except Exception as ex:
-                p["status"] = "RECOVERY"
-                self.events(
-                    "RECOVERY",
-                    "Kapatılamayan sanal bacak; sonraki taramada tekrar",
-                    position=p["id"],
-                    error=str(ex),
+            else:
+                leg["margin"] *= (leg["qty"] - qty) / leg["qty"]
+                leg["qty"] -= qty
+                leg.setdefault("partial_exits", []).append(
+                    dict(qty=qty, price=px, pnl=pnl, fee=fee, at=now())
                 )
-                self.persist()
-                return
+            self.persist()
+        if not all(leg["closed"] for leg in p["legs"]):
+            p["status"] = "RECOVERY"
+            p["exposure"] = self.exposure(
+                p, {legs[i]["venue"]: b for i, b in books.items()}
+            )
+            self.events(
+                "RECOVERY",
+                "Bacak tam kapatılamadı; defterin aldığı kısım kapatıldı, kalan "
+                "sonraki taramada",
+                position=p["id"],
+                error="; ".join(errors) or "Defter tüm miktarı almadı",
+                open=[
+                    dict(venue=leg["venue"], side=leg["side"], qty=leg["qty"])
+                    for leg in p["legs"]
+                    if not leg["closed"]
+                ],
+            )
+            self.persist()
+            return
+        p["exposure"] = None
         p["unrealized"] = 0.0
         self.settle(p)
         p["status"] = "CLOSED"
@@ -2238,6 +2288,27 @@ class WidePaper:
         self.persist()
         self.record_close(p)
         self.events("CLOSE", reason, position=p["id"], net=p["net"])
+
+    @staticmethod
+    def exposure(p, books):
+        """Open directional risk when the legs no longer match: the side and quantity
+        one leg holds beyond the other, valued at that leg's book mid; None when they
+        match."""
+        net = sum(
+            leg["qty"] * (1 if leg["side"] == "long" else -1)
+            for leg in p["legs"]
+            if not leg["closed"]
+        )
+        if abs(net) <= 1e-12:
+            return None
+        side = "long" if net > 0 else "short"
+        leg = max(
+            (l for l in p["legs"] if not l["closed"] and l["side"] == side),
+            key=lambda l: l["qty"],
+        )
+        b = books.get(leg["venue"])
+        price = mid_of(b) if b else leg["entry"]
+        return dict(venue=leg["venue"], side=side, qty=abs(net), usd=abs(net) * price)
 
     def exit_reason(self, p, books):
         cfg, d = self.cfg, p["decision"]
