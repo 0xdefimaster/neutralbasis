@@ -874,6 +874,62 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.positions, [])
         self.assertEqual(self.reasons(), ["Geçmiş eksik"])
 
+    def test_sparse_hourly_history_is_incomplete_not_cheaper(self):
+        self.setup_pair()
+        # Hyperliquid pays hourly; before the last day only every 8th payment came back.
+        # Each gap is 8 hours, so a gap test alone passed and the missing payments read
+        # as a smaller cost.
+        self.src.rates[("Hyperliquid", "BTC")] = [
+            r
+            for r in self.src.rates[("Hyperliquid", "BTC")]
+            if T0 - r["ts"] < 86400 or (T0 - r["ts"]) % 28800 == 0
+        ]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        (x,) = self.desk.assessed
+        self.assertEqual(self.reasons(), ["Geçmiş eksik"])
+        self.assertIn("42/168 ödeme", x["reasons"][0])
+
+    def test_one_missing_payment_in_a_week_is_tolerated(self):
+        self.setup_pair()
+        rates = self.src.rates[("Hyperliquid", "BTC")]
+        rates.remove(next(r for r in rates if r["ts"] == T0 - 3 * 86400))
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+
+    def test_a_venue_that_moved_to_a_shorter_schedule_waits_for_its_week(self):
+        self.setup_pair()
+        # Binance paid every 8h until two days ago and hourly since: the week does not
+        # yet hold the hourly schedule, so the pair waits instead of guessing.
+        self.src.rows[1].update(interval=3600, rate=0.0008 / 8, raw_rate=0.0008 / 8)
+        self.src.rows[1]["next"] = T0 + 3600
+        self.src.rates[("Binance", "BTC")] = [
+            dict(ts=t, rate=0.0008, value=None, audit_id=None)
+            for t in range(T0 - 30 * 86400 + 28800, T0 - 2 * 86400 + 1, 28800)
+        ] + [
+            dict(ts=t, rate=0.0001, value=None, audit_id=None)
+            for t in range(T0 - 2 * 86400 + 3600, T0 + 1, 3600)
+        ]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(self.reasons(), ["Geçmiş eksik"])
+
+    def test_sparse_long_window_is_noted_without_cutting_the_size(self):
+        self.setup_pair()
+        self.set_carry(set(range(30)), stored=True)
+        # The keeper's record holds only every 8th hourly payment older than 8 days.
+        self.src.stored[("Hyperliquid", "BTC")] = [
+            r
+            for r in self.src.stored[("Hyperliquid", "BTC")]
+            if T0 - r["ts"] < 8 * 86400 or (T0 - r["ts"]) % 28800 == 0
+        ]
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        ctx = self.desk.positions[0]["decision"]["context"]
+        self.assertEqual(ctx["confidence"], 1.0)
+        self.assertNotIn("carry", ctx)
+        self.assertTrue(any("geçmişi eksik" in n for n in ctx["notes"]), ctx["notes"])
+
     def test_funnel_says_why_markets_never_reach_the_ranking(self):
         self.setup_pair()
         self.src.rows += [
