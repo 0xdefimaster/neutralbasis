@@ -101,7 +101,10 @@ class RotationTests(unittest.TestCase):
         self.assertEqual((f["candidates"], f["positive"]), (7, 7))
         # A, B and C were checked this round; D is the first not yet reached.
         self.assertEqual((f["reached"], f["checked"], f["waiting"]), (3, 3, 3))
-        self.assertEqual(f["round"], {"rejected": 3})
+        self.assertEqual(
+            f["round"],
+            dict(examined=3, eligible=0, opened=0, skipped=0, rejected=3),
+        )
         self.clock += 60
         self.desk.cycle()
         f = self.desk.funnel["strategies"]["funding"]

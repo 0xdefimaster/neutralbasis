@@ -374,6 +374,19 @@ def ioc(levels, qty, buy, limit, extra=0.0):
     return filled, total / filled * (1 + extra if buy else 1 - extra)
 
 
+def round_counts(outcomes):
+    """Pairs a round deep-checked, by final outcome; opened and skipped pairs were
+    eligible, a pair rejected at entry (stale funding) was not."""
+    final = list(outcomes.values())
+    return dict(
+        examined=len(final),
+        eligible=sum(o in ("eligible", "opened", "skipped") for o in final),
+        opened=final.count("opened"),
+        skipped=final.count("skipped"),
+        rejected=final.count("rejected"),
+    )
+
+
 def mid_of(book):
     return (max(p for p, q in book["bids"]) + min(p for p, q in book["asks"])) / 2
 
@@ -935,7 +948,8 @@ class WidePaper:
         self.review = dict(
             rounds=0, examined=0, eligible=0, skipped=0, opened=0, reasons={}
         )
-        # Last deep check per pair, and what the latest round did, for the funnel.
+        # Last deep check per pair, and each pair's final outcome in the latest round
+        # ({strategy: {pair: outcome}}), for the funnel.
         self.checked = {}
         self.round = {}
         self.funnel = None
@@ -2746,8 +2760,11 @@ class WidePaper:
         but not entered) or opened, with the reasons and the expected net."""
         if reasons is None:
             reasons = x.get("reasons") or []
-        r = self.round.setdefault(x.get("strategy") or "funding", {})
-        r[outcome] = r.get(outcome, 0) + 1
+        # A pair passes through several outcomes in one round (eligible, then opened,
+        # skipped or rejected at entry); the round counts its last one only.
+        self.round.setdefault(x.get("strategy") or "funding", {})[
+            self.pair_key(x)
+        ] = outcome
         d = dict(at=at, outcome=outcome, reasons=list(reasons)[:4], net=x.get("net"))
         context = x.get("context") or {}
         if context.get("notes"):
@@ -2909,7 +2926,7 @@ class WidePaper:
                 reached=reached,
                 checked=sum(k[0] == key for k in self.checked),
                 waiting=sum(x["strategy"] == key for x in waiting),
-                round=dict(self.round.get(key, {})),
+                round=round_counts(self.round.get(key, {})),
             )
         return out
 

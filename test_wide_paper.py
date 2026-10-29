@@ -991,6 +991,11 @@ class WidePaperTests(unittest.TestCase):
             "Girişte funding yenilendi: avantaj kalmadı",
             self.desk.assessed[0]["reasons"],
         )
+        # One pair examined, refused at entry: not counted as eligible as well.
+        self.assertEqual(
+            self.desk.funnel["strategies"]["funding"]["round"],
+            dict(examined=1, eligible=0, opened=0, skipped=0, rejected=1),
+        )
 
     def books_after_pricing(self, **later):
         """The first read of each venue's book prices the entry; later reads (the fills,
@@ -1021,7 +1026,10 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(d["decision"]["outcome"], "skipped")
         self.assertIn("Giriş yapılmadı: Dolum olmadı", d["decision"]["reasons"][0])
         self.assertEqual(self.desk.review["opened"], 0)
-        self.assertNotIn("opened", self.desk.funnel["strategies"]["funding"]["round"])
+        self.assertEqual(
+            self.desk.funnel["strategies"]["funding"]["round"],
+            dict(examined=1, eligible=1, opened=0, skipped=1, rejected=0),
+        )
 
     def test_thin_first_leg_sizes_the_second(self):
         self.setup_pair()
