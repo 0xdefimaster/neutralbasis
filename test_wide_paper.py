@@ -1016,6 +1016,12 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.wallet["cash"], self.desk.cfg["wide_capital"])
         (r,) = self.desk.rejected.values()
         self.assertIn("Giriş yapılmadı: Dolum olmadı", r["reason"])
+        # The pair page and the funnel say it was not entered, never "opened".
+        d = self.desk.verdict("BTC", "Hyperliquid", "Binance")["strategies"][0]
+        self.assertEqual(d["decision"]["outcome"], "skipped")
+        self.assertIn("Giriş yapılmadı: Dolum olmadı", d["decision"]["reasons"][0])
+        self.assertEqual(self.desk.review["opened"], 0)
+        self.assertNotIn("opened", self.desk.funnel["strategies"]["funding"]["round"])
 
     def test_thin_first_leg_sizes_the_second(self):
         self.setup_pair()
