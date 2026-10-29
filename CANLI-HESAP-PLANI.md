@@ -98,7 +98,7 @@ Gerçek işleme ancak paper ve mikro canlı sonuçları belirlenen eşikleri ge�
 
 - **Mod:** Borsa başı "paper / gerçek" anahtarı. Varsayılan paper.
 - **Sınırlar:** Pozisyon başına, borsa başına ve günlük kayıp için sert sınırlar. "Tümünü kapat" (acil durdurma) düğmesi.
-- **Tek bacak riski:** Bir bacak dolup öbürü dolmazsa dolan bacak hemen kapatılır. Bu mantık paper'da zaten var; gerçekte de aynısı uygulanır.
+- **Tek bacak riski:** Bir bacak dolup öbürü dolmazsa dolan bacak hemen kapatılır. Kapanışta bir borsanın defteri yetmezse önce eşleşmeyen kısım defterin aldığı kadar azaltılır, eşleşen kısım iki bacakta birlikte kapatılır; bir bacak tek başına kapatılmaz. Bu mantık paper'da zaten var; gerçekte de aynısı uygulanır.
 - **Mutabakat:** Her turda borsadaki gerçek pozisyon okunur. Motorun kaydıyla uyuşmazsa yeni giriş durur ve kullanıcıya uyarı çıkar.
 
 ## Gerçek paraya geçiş için önerilen eşikler
