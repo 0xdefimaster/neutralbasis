@@ -221,7 +221,7 @@ function funnelTable(w){const f=w.funnel;if(!f)return '';const n=x=>x==null?'—
  const row=(label,fn,sub)=>`<tr>${lead(label,sub)}${keys.map(k=>`<td class="num mono">${!S[k]?'—':S[k].enabled?fn(S[k]):'<span class="muted">kapalı</span>'}</td>`).join('')}</tr>`;
  const both=(label,v,sub)=>`<tr>${lead(label,sub)}<td class="mono" colspan="2" style="text-align:center">${v}<div class="cell-sub">iki strateji için ortak</div></td></tr>`;
  const ex=Object.entries(f.excluded||{}).map(([k,v])=>`${esc(k)} ${n(v)}`).join(' · '),last=x=>{const o=x.round||{};return `${n(o.examined||0)} / ${n(o.eligible||0)} / ${n(o.opened||0)} / ${n(o.skipped||0)}`};
- return `<div class="table-wrap"><table aria-label="Aday hunisi"><thead><tr><th>Aday hunisi · ${new Date(f.at*1000).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul'})}</th><th class="num">FUNDING</th><th class="num">YAKINSAMA</th></tr></thead><tbody>`
+ return `<div class="table-wrap"><table aria-label="Aday hunisi"><thead><tr><th>Aday hunisi · ${new Date(f.at*1000).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul'})}${w.cycle_seconds?` · <span class="${w.cycle_seconds>w.downtime_gap?'bad':''}" title="Açık pozisyonlar her turda bir kez kontrol edilir; ${Math.round(w.downtime_gap/60)} dakikadan uzun ara dönem raporunda kesinti sayılır.">son iki tur arası ${(w.cycle_seconds/60).toLocaleString('tr-TR',{maximumFractionDigits:1})} dk</span>`:''}</th><th class="num">FUNDING</th><th class="num">YAKINSAMA</th></tr></thead><tbody>`
   +both('Taranan perp piyasası',n(f.markets))
   +both('İşlem görebilir piyasa',n(f.usable),ex?'Dışarıda kalan: '+ex:'')
   +both('İki borsada işlem görebilen varlık / borsa çifti',`${n(f.assets)} / ${n(f.pairs)}`)

@@ -198,3 +198,10 @@ Paper zaten emir göndermeyen bir gölge paper: canlı public veride çalışır
 
 Testler: 262 (1 atlanan).
 
+
+## Veritabanı kilidi: tur süresi
+Motorun bütün iş parçacıkları (borsa tarayıcıları, geçmiş kaydedici, ~170 Extended RFQ akışı, karar döngüsü) tek SQLite bağlantısına tek kilitle yazar. Canlı motordan alınan yığın dökümünde 200'den fazla iş parçacığı bu kilidin önünde bekliyordu ve bir tur bir saati aştı. Düzeltme:
+- WAL modunda `synchronous=NORMAL`: her yazımda diske senkron yapılmaz, yalnızca checkpoint'te yapılır. Elektrik kesintisinde son birkaç kayıt kaybolabilir; dosya bozulmaz.
+- RFQ mesajları bellekte toplanır ve yaklaşık saniyede bir tek işlemde yazılır. Bir akış başka akışın yazmasını beklemez. Süresi dolan mesajlar saatte bir, ayrı bir iş parçacığında kimlik aralıklarıyla silinir. Eskiden bu silme indekssiz olduğu için tablonun tamamını kilit altında tarıyordu.
+- Retention (eski HTTP cevaplarının gövdesini silme) kesim noktasının kimliğini ikiye bölerek bulur ve yalnızca o noktaya kadar 500'lük kimlik aralıklarında ilerler. Kaldığı yeri veritabanına kaydeder. Eskiden her çalışmada tablonun sonuna kadar yürüyordu.
+- Aday hunisinin başlığında son iki tur arasındaki süre görünür. 10 dakikayı aşarsa kırmızıdır, çünkü dönem raporu bunu kesinti sayar. Üst şerit tarama sürerken de son verinin saatini gösterir.
