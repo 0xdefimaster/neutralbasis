@@ -55,6 +55,8 @@ class FakeSource:
         self.books = {}
         self.history = {}
         self.rates = {}
+        # Payments the history keeper recorded, by (venue, asset).
+        self.stored = {}
 
     def market_rows(self):
         return [dict(r) for r in self.rows]
@@ -68,6 +70,9 @@ class FakeSource:
 
     def funding(self, v, a, start):
         return [r for r in self.rates.get((v, a), []) if r["ts"] >= start]
+
+    def stored_funding(self, v, a, start):
+        return [r for r in self.stored.get((v, a), []) if r["ts"] >= start]
 
 
 def candles(at, drift=0.0, noise=0.0):
@@ -100,10 +105,10 @@ class WidePaperTests(unittest.TestCase):
         self.store.db.close()
         self.dir.cleanup()
 
-    def fund_history(self, venue, per_payment, interval):
+    def fund_history(self, venue, per_payment, interval, days=30):
         self.src.rates[(venue, "BTC")] = [
             dict(ts=t, rate=per_payment, value=None, audit_id=None)
-            for t in range(T0 - 3 * 86400 + interval, T0 + 1, interval)
+            for t in range(T0 - days * 86400 + interval, T0 + 1, interval)
         ]
 
     def setup_pair(self, long_rate=-0.0001, short_rate=0.0008, short_interval=28800):
@@ -192,8 +197,10 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(f["decision"]["outcome"], "rejected")
         self.assertIn(
             "Funding geliri ücret + kayma + spread riski payını karşılamıyor",
-            f["decision"]["reasons"],
+            [wide_paper.reason_group(r) for r in f["decision"]["reasons"]],
         )
+        # The measured net and the threshold follow the reason.
+        self.assertTrue(any("< $1000.00" in r for r in f["decision"]["reasons"]))
         self.assertEqual(f["retry_at"], T0 + wide_paper.REJECT_COOLDOWN)
         self.assertEqual((f["long"], f["short"]), ("Hyperliquid", "Binance"))
 
@@ -697,6 +704,175 @@ class WidePaperTests(unittest.TestCase):
         self.assertTrue(
             any("istikrarlı değil" in r for r in self.desk.assessed[0]["reasons"])
         )
+
+    # --- funding decision: 1, 3 and 7 days; the long window is context ---------------
+    def carry_history(self, venue, interval, rate_of, days=30):
+        """Payments whose rate depends on their age in whole days (0 = the last 24h)."""
+        return [
+            dict(ts=t, rate=rate_of((T0 - t) // 86400), value=None, audit_id=None)
+            for t in range(T0 - days * 86400 + interval, T0 + 1, interval)
+        ]
+
+    def set_carry(self, good_days, stored=False):
+        """Default pair (long Hyperliquid 1h, short Binance 8h): days in `good_days` pay
+        this direction 0.48% a day, the other days the same against it."""
+        for v, iv, good in (
+            ("Hyperliquid", 3600, -0.0001),
+            ("Binance", 28800, 0.0008),
+        ):
+            rows = self.carry_history(
+                v, iv, lambda d: good if d in good_days else -good
+            )
+            self.src.rates[(v, "BTC")] = rows
+            if stored:
+                self.src.stored[(v, "BTC")] = rows
+
+    def reasons(self):
+        (x,) = self.desk.assessed
+        return [wide_paper.reason_group(r) for r in x["reasons"]]
+
+    def test_advantage_resting_on_one_day_is_refused(self):
+        self.setup_pair()
+        # Today pays well; the six days before paid a little against this direction.
+        for v, iv, today, before in (
+            ("Hyperliquid", 3600, -0.0001, 0.00002),
+            ("Binance", 28800, 0.0008, -0.0001),
+        ):
+            self.src.rates[(v, "BTC")] = self.carry_history(
+                v, iv, lambda d: today if d == 0 else before
+            )
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        (x,) = self.desk.assessed
+        self.assertGreater(sum(x["realized_days"]), 0)
+        self.assertIn("Avantaj tek bir güne dayanıyor", self.reasons())
+
+    def test_direction_that_turned_this_week_is_refused(self):
+        self.setup_pair()
+        # The last two days favour this direction; the five before paid against it.
+        self.set_carry({0, 1})
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertGreater(sum(self.desk.assessed[0]["realized_days"][:3]), 0)
+        self.assertIn(
+            "7 günde gerçekleşen funding bu yönde avantaj göstermiyor", self.reasons()
+        )
+
+    def test_last_three_days_against_the_direction_are_refused(self):
+        self.setup_pair()
+        self.set_carry({0, 3, 4, 5, 6})
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        reasons = self.reasons()
+        self.assertIn(
+            "3 günde gerçekleşen funding bu yönde avantaj göstermiyor", reasons
+        )
+        self.assertNotIn(
+            "7 günde gerçekleşen funding bu yönde avantaj göstermiyor", reasons
+        )
+
+    def test_expected_funding_takes_the_three_day_average_when_lower(self):
+        self.setup_pair()
+        # Today pays twice what the two days before did.
+        for v, iv, rate in (("Hyperliquid", 3600, -0.0001), ("Binance", 28800, 0.0008)):
+            self.src.rates[(v, "BTC")] = self.carry_history(
+                v, iv, lambda d: rate if d == 0 else rate / 2
+            )
+        self.desk.cycle()
+        (x,) = self.desk.assessed
+        self.assertLess(x["funding_day3"], x["funding_day1"])
+        self.assertAlmostEqual(x["conservative_funding"], x["funding_day3"])
+        self.assertAlmostEqual(
+            x["funding_day3"], x["size"] * (0.0048 + 2 * 0.0024) / 3, places=6
+        )
+
+    def test_weak_long_window_correlation_halves_the_size(self):
+        self.setup_pair()
+        end = bot.hour(T0)
+        h = candles(T0)
+        # Older than 8 days, Binance printed noise the other venue never saw.
+        self.src.history[("Binance", "BTC")] = dict(
+            h,
+            prices={
+                t: p + (0.5 if t < end - 8 * 86400 and (t // 3600) % 2 else 0.0)
+                for t, p in h["prices"].items()
+            },
+        )
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        p = self.desk.positions[0]
+        ctx = p["decision"]["context"]
+        self.assertEqual(ctx["price_days"], 30)
+        self.assertLess(ctx["corr_long"], 0.9)
+        self.assertGreater(self.desk.assessed[0]["stats"]["corr"], 0.9)
+        self.assertEqual(ctx["confidence"], 0.5)
+        self.assertLessEqual(p["decision"]["size"], 500 + 1e-6)
+        self.assertIn("büyüklük yarıya indi", p["entry_reason"])
+        # The long window never closes the position either.
+        self.clock = T0 + 60
+        self.desk.cache.clear()
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        for v in ("Hyperliquid", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.desk.cycle(entries=False)
+        self.assertEqual(len(self.desk.positions), 1)
+        d = self.desk.verdict("BTC", "Hyperliquid", "Binance")["strategies"][0]
+        self.assertEqual(d["decision"]["confidence"], 0.5)
+        self.assertTrue(any("korelasyonu" in n for n in d["decision"]["notes"]))
+
+    def test_long_window_funding_against_the_direction_halves_the_size(self):
+        self.setup_pair()
+        # The last week pays this direction; the three weeks before paid against it.
+        self.set_carry(set(range(7)), stored=True)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        ctx = self.desk.positions[0]["decision"]["context"]
+        self.assertEqual(ctx["funding_days"], 30)
+        self.assertLess(ctx["carry"], 0)
+        self.assertEqual(ctx["confidence"], 0.5)
+        self.assertLessEqual(self.desk.positions[0]["decision"]["size"], 500 + 1e-6)
+
+    def test_long_window_agreeing_keeps_the_full_size(self):
+        self.setup_pair()
+        self.set_carry(set(range(30)), stored=True)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        ctx = self.desk.positions[0]["decision"]["context"]
+        self.assertEqual((ctx["confidence"], ctx["notes"]), (1.0, []))
+        self.assertGreater(self.desk.positions[0]["decision"]["size"], 900)
+
+    def test_missing_week_of_payments_waits_for_history(self):
+        self.setup_pair()
+        self.fund_history("Binance", 0.0008, 28800, days=3)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        (x,) = self.desk.assessed
+        self.assertTrue(any("7 günlük" in r for r in x["reasons"]), x["reasons"])
+        self.assertEqual(self.reasons(), ["Geçmiş eksik"])
+        (r,) = self.desk.rejected.values()
+        self.assertEqual(r["until"], T0 + wide_paper.HISTORY_RETRY)
+
+    def test_stored_payments_complete_a_short_venue_history(self):
+        self.setup_pair()
+        full = list(self.src.rates[("Binance", "BTC")])
+        self.src.stored[("Binance", "BTC")] = full
+        # The venue's API only returns the last 3 days.
+        self.src.rates[("Binance", "BTC")] = [
+            r for r in full if r["ts"] > T0 - 3 * 86400
+        ]
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+
+    def test_hole_in_the_week_of_payments_is_incomplete(self):
+        self.setup_pair()
+        self.src.rates[("Binance", "BTC")] = [
+            r
+            for r in self.src.rates[("Binance", "BTC")]
+            if not T0 - 4 * 86400 < r["ts"] < T0 - 3 * 86400
+        ]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(self.reasons(), ["Geçmiş eksik"])
 
     def test_leverage_is_a_ceiling_cut_by_leg_volatility(self):
         self.setup_pair()
