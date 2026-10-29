@@ -137,6 +137,12 @@ PERSIST_DAYS = 7
 # Payments may be up to 8h apart (venues move between 8h, 4h and 1h schedules); a longer
 # stretch without one means the published history is incomplete.
 FUNDING_GAP = 8 * 3600 + 900
+# Share of the payments a leg's current schedule implies that its published history must
+# hold over a window. One missing payment in twenty is tolerated (an API drops one now and
+# then); fewer means the history is incomplete: a missing payment is never read as a
+# smaller cost or income. A venue that moved to a shorter schedule inside the window also
+# falls short until the window holds the new schedule.
+PAYMENT_COVERAGE = 0.95
 # The longest window is context, not a gate: each contradiction with the short-term
 # signal halves the entry size.
 CONTEXT_DAYS = 30
@@ -674,6 +680,21 @@ def covered_since(rows, start, end, gap):
             break
         since = t
     return start if since - start <= gap else since
+
+
+def payment_shortfall(rows, start, end, interval):
+    """None when (start, end] holds at least PAYMENT_COVERAGE of the payments the venue's
+    interval implies and no stretch longer than the allowed gap without one; otherwise
+    (payments held, payments expected)."""
+    have = sum(start < r["ts"] <= end for r in rows)
+    expected = int((end - start) // interval) if interval else 0
+    gap = max(FUNDING_GAP, (interval or 0) + 900)
+    if (
+        have >= expected * PAYMENT_COVERAGE
+        and covered_since(rows, start, end, gap) <= start
+    ):
+        return None
+    return have, expected
 
 
 def daily_carry(long_rows, short_rows, at, days):
@@ -1388,8 +1409,12 @@ class WidePaper:
             (c["short"], c["interval_short"]),
         ):
             r = self.funding_window(v, c["asset"], at, PERSIST_DAYS)
-            if covered_since(r, start, at, max(FUNDING_GAP, (iv or 0) + 900)) > start:
-                raise ValueError(v + ": 7 günlük gerçekleşmiş funding geçmişi eksik")
+            short = payment_shortfall(r, start, at, iv)
+            if short:
+                raise ValueError(
+                    "%s: 7 günlük gerçekleşmiş funding geçmişi eksik · %d/%d ödeme"
+                    % ((v,) + short)
+                )
             rows[v] = r
         return daily_carry(rows[c["long"]], rows[c["short"]], at, PERSIST_DAYS)
 
@@ -1425,7 +1450,21 @@ class WidePaper:
                 )
             fdays = int((at - since) // 86400)
             out["funding_days"] = fdays
-            if fdays > PERSIST_DAYS:
+            # The covered span must also hold the payments each schedule implies.
+            short = [
+                payment_shortfall(legs[v], at - fdays * 86400, at, iv)
+                for v, iv in (
+                    (c["long"], c["interval_long"]),
+                    (c["short"], c["interval_short"]),
+                )
+            ]
+            if fdays > PERSIST_DAYS and any(short):
+                have, expected = next(x for x in short if x)
+                notes.append(
+                    "Uzun dönem funding geçmişi eksik (%dg, %d/%d ödeme)"
+                    % (fdays, have, expected)
+                )
+            elif fdays > PERSIST_DAYS:
                 total = sum(daily_carry(legs[c["long"]], legs[c["short"]], at, fdays))
                 out["carry"] = total
                 if total <= 0:
