@@ -199,21 +199,30 @@ def rank(rows, cfg, at):
     return out
 
 
-def usable_rows(rows, at):
-    """One fresh perp market per venue and asset with a known taker fee and schedule."""
+def usable_rows(rows, at, why=None):
+    """One fresh perp market per venue and asset with a known taker fee and schedule;
+    `why` (a dict) counts the markets left out, by reason."""
     groups = {}
     for r in rows:
-        if (
-            r.get("kind", "perp") == "perp"
-            and r.get("rate") is not None
-            and r.get("raw_rate") is not None
-            and r.get("interval")
-            and r.get("fee") is not None
-            and (r.get("mark") or 0) > 0
-            and r.get("price_type") != "last_trade"
-            and at - r["received"] <= ROW_MAX_AGE
-        ):
+        if r.get("kind", "perp") != "perp":
+            continue
+        if r.get("rate") is None or r.get("raw_rate") is None:
+            reason = "Funding oranı yok"
+        elif not r.get("interval"):
+            reason = "Funding aralığı yok"
+        elif r.get("fee") is None:
+            reason = "Taker ücreti bilinmiyor"
+        elif not (r.get("mark") or 0) > 0:
+            reason = "Fiyat yok"
+        elif r.get("price_type") == "last_trade":
+            reason = "Yalnızca son işlem fiyatı"
+        elif at - r["received"] > ROW_MAX_AGE:
+            reason = "Veri eski"
+        else:
             groups.setdefault(r["asset"], {}).setdefault(r["venue"], r)
+            continue
+        if why is not None:
+            why[reason] = why.get(reason, 0) + 1
     return groups
 
 
@@ -697,6 +706,30 @@ class EngineSource:
 REJECT_COOLDOWN = 1800
 HISTORY_RETRY = 900
 HISTORY_MARKERS = ("mum eksik", "işlem mumu yok", "geçmişi eksik")
+# Reasons measured over days change slowly: such a pair waits longer, so its deep-check
+# slot goes to pairs further down the list. A pair waits for its slowest reason, since
+# it cannot qualify before every reason clears.
+SLOW_REASONS = {
+    "3 günde gerçekleşen funding bu yönde avantaj göstermiyor": 3 * 3600,
+    "7 günde gerçekleşen funding bu yönde avantaj göstermiyor": 6 * 3600,
+    "Avantaj tek bir güne dayanıyor": 6 * 3600,
+    "7g getiri korelasyonu sınır altında": 6 * 3600,
+    "7g / 30g getiri korelasyonu sınır altında": 6 * 3600,
+    "Hedge beta uyumsuz": 6 * 3600,
+    "Normal fiyat farkı kayıyor": 3 * 3600,
+}
+
+
+def reason_wait(group):
+    """How long a pair rejected for this kind of reason waits (keys match as prefixes,
+    since some reasons name their window)."""
+    return next(
+        (t for k, t in SLOW_REASONS.items() if group.startswith(k)), REJECT_COOLDOWN
+    )
+
+
+# Deep checks are counted per pair over this window for the funnel.
+CHECKED_WINDOW = 3600
 
 
 def reason_group(reason):
@@ -730,7 +763,13 @@ class WidePaper:
         self.rejected = {}
         # The latest decision per pair, kept past the cooldown for the pair pages.
         self.decisions = {}
-        self.review = dict(rounds=0, examined=0, eligible=0, skipped=0, reasons={})
+        self.review = dict(
+            rounds=0, examined=0, eligible=0, skipped=0, opened=0, reasons={}
+        )
+        # Last deep check per pair, and what the latest round did, for the funnel.
+        self.checked = {}
+        self.round = {}
+        self.funnel = None
         self.rows = {}
         self.last_cycle = None
         self.error = None
@@ -2120,6 +2159,7 @@ class WidePaper:
                     k: x for k, x in self.rejected.items() if x["until"] > at
                 }
                 self.review["rounds"] += 1
+                self.round = {}
                 top = self.cfg["wide_deep_top"]
                 for ranked in (self.candidates, self.conv_candidates):
                     picked, counted = [], 0
@@ -2136,6 +2176,7 @@ class WidePaper:
                             self.review["skipped"] += 1
                             continue
                         x = self.assess(c)
+                        self.checked[self.pair_key(c)] = at
                         picked.append(x)
                         if not any(
                             reason_group(r) == "Geçmiş eksik" for r in x["reasons"]
@@ -2205,7 +2246,10 @@ class WidePaper:
                         )
                     else:
                         self.open(best)
+                        self.review["opened"] += 1
                         self.decide(best, at, "opened", [])
+            if rows is not None:
+                self.funnel = self.build_funnel(rows, ranked_rows, at)
             self.last_cycle = now()
             self.record_run(self.last_cycle, entries and self.cfg["wide_enabled"])
             self.persist()
@@ -2390,6 +2434,8 @@ class WidePaper:
         but not entered) or opened, with the reasons and the expected net."""
         if reasons is None:
             reasons = x.get("reasons") or []
+        r = self.round.setdefault(x.get("strategy") or "funding", {})
+        r[outcome] = r.get(outcome, 0) + 1
         d = dict(at=at, outcome=outcome, reasons=list(reasons)[:4], net=x.get("net"))
         context = x.get("context") or {}
         if context.get("notes"):
@@ -2485,6 +2531,11 @@ class WidePaper:
         groups = list(dict.fromkeys(reason_group(t) for t in reasons))
         for g in groups:
             self.review["reasons"][g] = self.review["reasons"].get(g, 0) + 1
+        wait = (
+            HISTORY_RETRY
+            if groups[0] == "Geçmiş eksik"
+            else max(reason_wait(g) for g in groups)
+        )
         self.rejected[self.pair_key(x)] = dict(
             strategy=x.get("strategy") or "funding",
             asset=x["asset"],
@@ -2493,9 +2544,62 @@ class WidePaper:
             reason=reasons[0],
             group=groups[0],
             at=at,
-            until=at
-            + (HISTORY_RETRY if groups[0] == "Geçmiş eksik" else REJECT_COOLDOWN),
+            until=at + wait,
         )
+
+    def build_funnel(self, rows, ranked_rows, at):
+        """From the scan to an opened trade, with counts at every step: perp markets
+        scanned, markets left out (by reason), venue pairs, ranked candidates and those
+        positive after fees, pairs deep-checked in the last hour, how far down each list
+        the deep check has reached, and what the latest round decided."""
+        self.checked = {
+            k: t for k, t in self.checked.items() if at - t < CHECKED_WINDOW
+        }
+        waiting = [x for x in self.rejected.values() if x["until"] > at]
+        perps = [r for r in rows if r.get("kind", "perp") == "perp"]
+        why = {}
+        if len(ranked_rows) < len(rows):
+            why["Hesap borsası değil"] = sum(
+                r.get("kind", "perp") == "perp" for r in rows
+            ) - sum(r.get("kind", "perp") == "perp" for r in ranked_rows)
+        groups = usable_rows(ranked_rows, at, why)
+        out = dict(
+            at=at,
+            markets=len(perps),
+            usable=sum(len(g) for g in groups.values()),
+            excluded=dict(sorted(why.items(), key=lambda kv: -kv[1])),
+            assets=sum(len(g) > 1 for g in groups.values()),
+            pairs=sum(len(g) * (len(g) - 1) // 2 for g in groups.values()),
+            strategies={},
+        )
+        for key, ranked, flag in (
+            ("funding", self.candidates, "wide_funding_enabled"),
+            ("convergence", self.conv_candidates, "wide_conv_enabled"),
+        ):
+            positive = [c for c in ranked if c["score"] > 0]
+            # How far down the list the deep check has reached: leading candidates that
+            # were checked within the cooldown, are set aside, or are blocked.
+            reached = 0
+            for c in positive:
+                k = self.pair_key(c)
+                if (
+                    self.rejected.get(k, {}).get("until", 0) > at
+                    or at - self.checked.get(k, -math.inf) < REJECT_COOLDOWN
+                    or self.blocked(c)
+                ):
+                    reached += 1
+                    continue
+                break
+            out["strategies"][key] = dict(
+                enabled=bool(self.cfg[flag]),
+                candidates=len(ranked),
+                positive=len(positive),
+                reached=reached,
+                checked=sum(k[0] == key for k in self.checked),
+                waiting=sum(x["strategy"] == key for x in waiting),
+                round=dict(self.round.get(key, {})),
+            )
+        return out
 
     def review_snapshot(self):
         waiting = {}
@@ -2543,6 +2647,7 @@ class WidePaper:
             rfq_review_count=len(self.rfq_review),
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
             review=self.review_snapshot(),
+            funnel=self.funnel,
             epochs=self.epochs(),
             period=self.period_report(),
             trades=self.trade_log()[:200],

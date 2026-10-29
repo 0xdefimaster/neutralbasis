@@ -874,6 +874,32 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.positions, [])
         self.assertEqual(self.reasons(), ["Geçmiş eksik"])
 
+    def test_funnel_says_why_markets_never_reach_the_ranking(self):
+        self.setup_pair()
+        self.src.rows += [
+            row("Bybit", rate=0.0002, fee=None),
+            dict(row("OKX", rate=0.0002), received=T0 - 3600),
+            dict(row("Gate", rate=0.0002), price_type="last_trade"),
+        ]
+        self.desk.cycle(entries=False)
+        f = self.desk.funnel
+        self.assertEqual((f["markets"], f["usable"]), (5, 2))
+        self.assertEqual(
+            f["excluded"],
+            {
+                "Taker ücreti bilinmiyor": 1,
+                "Veri eski": 1,
+                "Yalnızca son işlem fiyatı": 1,
+            },
+        )
+        self.assertEqual((f["assets"], f["pairs"]), (1, 1))
+        self.assertEqual(f["strategies"]["funding"]["positive"], 1)
+        # With per-venue accounts, a venue without one is counted apart.
+        self.desk.reset(venue_capital=1000, venues=["Hyperliquid", "Extended"])
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.funnel["excluded"]["Hesap borsası değil"], 4)
+        self.assertEqual(self.desk.funnel["pairs"], 0)
+
     def test_leverage_is_a_ceiling_cut_by_leg_volatility(self):
         self.setup_pair()
         self.desk.cycle(entries=False)

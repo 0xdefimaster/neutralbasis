@@ -209,11 +209,29 @@ if(!location.hash.slice(1)){tab='home';render()}window.addEventListener('hashcha
 
 // Why the desk is (not) trading, in one line: deep checks, eligible pairs, the most common reason now.
 function wideWhy(w){const r=w.review;if(!r||!r.examined)return '';const top=Object.entries(r.waiting||{}).sort((a,b)=>b[1]-a[1])[0];return ` · ${r.examined} aday incelendi, ${r.eligible} uygun${top?` · en sık eleme: ${esc(top[0])} (${top[1]})`:''}`}
+// From the scan to an opened trade: counts at every step, why markets drop out, and how far down each
+// ranked list the deep check has reached; candidates below that point have not had their turn yet.
+function funnelTable(w){const f=w.funnel;if(!f)return '';const n=x=>x==null?'—':Number(x).toLocaleString('tr-TR'),S=f.strategies,keys=['funding','convergence'];
+ const lead=(label,sub)=>`<td style="white-space:normal">${label}${sub?`<div class="cell-sub" style="white-space:normal">${sub}</div>`:''}</td>`;
+ const row=(label,fn,sub)=>`<tr>${lead(label,sub)}${keys.map(k=>`<td class="num mono">${!S[k]?'—':S[k].enabled?fn(S[k]):'<span class="muted">kapalı</span>'}</td>`).join('')}</tr>`;
+ const both=(label,v,sub)=>`<tr>${lead(label,sub)}<td class="mono" colspan="2" style="text-align:center">${v}<div class="cell-sub">iki strateji için ortak</div></td></tr>`;
+ const ex=Object.entries(f.excluded||{}).map(([k,v])=>`${esc(k)} ${n(v)}`).join(' · '),last=x=>{const o=x.round||{};return `${n((o.eligible||0)+(o.rejected||0))} / ${n(o.eligible||0)} / ${n(o.opened||0)} / ${n(o.skipped||0)}`};
+ return `<div class="table-wrap"><table aria-label="Aday hunisi"><thead><tr><th>Aday hunisi · ${new Date(f.at*1000).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul'})}</th><th class="num">FUNDING</th><th class="num">YAKINSAMA</th></tr></thead><tbody>`
+  +both('Taranan perp piyasası',n(f.markets))
+  +both('İşlem görebilir piyasa',n(f.usable),ex?'Dışarıda kalan: '+ex:'')
+  +both('İki borsada işlem görebilen varlık / borsa çifti',`${n(f.assets)} / ${n(f.pairs)}`)
+  +row('Aday',x=>n(x.candidates),'funding: short bacağın oranı yüksek olan çiftler; yakınsama: tüm çiftler')
+  +row('Ücret sonrası pozitif skor',x=>n(x.positive),'derin kontrole girebilenler')
+  +row('Son 1 saatte derin kontrol',x=>n(x.checked),'benzersiz çift')
+  +row('Kontrol derinliği',x=>x.positive?`ilk ${n(x.reached)} / ${n(x.positive)}`:'—','listenin başından kaçıncı adaya kadar incelendi, kenara alındı ya da engellendi; sonrakilerin sırası henüz gelmedi')
+  +row('Kenarda bekleyen',x=>n(x.waiting),'elenip tekrar denenmeyi bekleyen çift')
+  +row('Son tur',last,'incelendi / uygun / açıldı / uygun ama açılamadı')
+  +`</tbody></table></div>`}
 // Candidate review: how many pairs were deep-checked, why they were rejected, and which wait their turn again.
 function reviewCard(w){const r=w.review;if(!r)return '';const hs=state.history_status||{},clock=t=>new Date(t*1000).toLocaleTimeString('tr-TR',{timeZone:'Europe/Istanbul',hour:'2-digit',minute:'2-digit'});
  const reasons=Object.entries(r.reasons).map(([k,n])=>`<tr><td>${esc(k)}</td><td class="num">${n}</td><td class="num">${r.waiting[k]||0}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">Henüz elenen aday yok.</td></tr>';
  const recent=r.rejected.slice(0,15).map(x=>`<tr><td><b>${esc(x.asset)}</b> <small class="muted">${stratLabel(x.strategy)}</small></td><td>${legs(x.long,x.short)}</td><td>${esc(x.reason)}</td><td class="num mono">${clock(x.until)}</td></tr>`).join('');
- return `<div class="card"><div class="card-head"><h2>Aday inceleme · ${r.rounds} tur · ${r.examined} derin kontrol · ${r.eligible} uygun · ${r.skipped} atlandı</h2></div><p class="tooltip" style="padding:0 16px">Elenen çift ${Math.round(r.cooldown/60)} dk (geçmiş eksikse ${Math.round(r.history_retry/60)} dk) kenara alınır; sonraki turlar sıradaki adaylara geçer. Geçmiş kaydedici önce bu adayların bacaklarını doldurur${hs.priority!=null?` · öncelikli piyasa ${hs.priority}, bekleyen ${hs.priority_missing}`:''}.</p>
+ return `<div class="card"><div class="card-head"><h2>Aday inceleme · ${r.rounds} tur · ${r.examined} derin kontrol · ${r.eligible} uygun · ${r.opened||0} açıldı · ${r.skipped} beklemede geçildi</h2></div>${funnelTable(w)}<p class="tooltip" style="padding:0 16px">Elenen çift ${Math.round(r.cooldown/60)} dk (geçmiş eksikse ${Math.round(r.history_retry/60)} dk; günlerle ölçülen nedenlerde, örn. 7 günlük funding ya da korelasyon, 3–6 saat) kenara alınır; sonraki turlar sıradaki adaylara geçer. Geçmiş kaydedici önce bu adayların bacaklarını doldurur${hs.priority!=null?` · öncelikli piyasa ${hs.priority}, bekleyen ${hs.priority_missing}`:''}.</p>
  <div class="table-wrap"><table><thead><tr><th>Elenme nedeni</th><th class="num">Toplam</th><th class="num">Şu an bekleyen</th></tr></thead><tbody>${reasons}</tbody></table></div>${recent?`<div class="table-wrap"><table><thead><tr><th>Son elenen</th><th>Bacaklar</th><th>Neden</th><th class="num">Tekrar denenir</th></tr></thead><tbody>${recent}</tbody></table></div>`:''}</div>`}
 const reviewBaseMulti=multiScreen;multiScreen=function(){const html=reviewBaseMulti(),w=state.wide_paper;if(!w?.review)return html;const at=html.indexOf('<div class="card"><div class="card-head"><h2>Funding fırsatları');return at<0?html+reviewCard(w):html.slice(0,at)+reviewCard(w)+html.slice(at)};
 

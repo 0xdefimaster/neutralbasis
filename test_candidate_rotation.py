@@ -32,7 +32,8 @@ class RotationTests(unittest.TestCase):
         def assess(c):
             self.seen.append(c["asset"])
             reason = self.reasons.get(
-                c["asset"], "7g / 30g getiri korelasyonu sınır altında"
+                c["asset"],
+                "Funding geliri ücret + kayma + spread riski payını karşılamıyor",
             )
             return dict(c, reasons=[reason], eligible=False, net=None)
 
@@ -53,7 +54,12 @@ class RotationTests(unittest.TestCase):
         r = self.desk.review_snapshot()
         self.assertEqual((r["rounds"], r["examined"], r["eligible"]), (2, 7, 0))
         self.assertEqual(r["reasons"]["Geçmiş eksik"], 1)
-        self.assertEqual(r["reasons"]["7g / 30g getiri korelasyonu sınır altında"], 6)
+        self.assertEqual(
+            r["reasons"][
+                "Funding geliri ücret + kayma + spread riski payını karşılamıyor"
+            ],
+            6,
+        )
         self.assertEqual(r["waiting"]["Geçmiş eksik"], 1)
         # History retry comes back sooner than an ordinary rejection.
         self.clock = T0 + wide_paper.HISTORY_RETRY + 1
@@ -63,6 +69,43 @@ class RotationTests(unittest.TestCase):
         self.clock = T0 + wide_paper.REJECT_COOLDOWN + 1
         self.desk.cycle()
         self.assertEqual(self.seen[8:], ["A", "C", "D"])
+
+    def test_slow_reasons_wait_longer_so_the_list_moves_on(self):
+        # Seven days of funding against the direction cannot change in half an hour.
+        self.reasons["A"] = (
+            "7 günde gerçekleşen funding bu yönde avantaj göstermiyor · -$4.10"
+        )
+        self.desk.cycle()
+        self.clock = T0 + wide_paper.REJECT_COOLDOWN + 1
+        self.desk.cycle()
+        # B, C and D come back after the usual wait; A waits for its slow reason.
+        self.assertEqual(self.seen[3:], ["B", "C", "D"])
+        (a,) = [x for x in self.desk.rejected.values() if x["asset"] == "A"]
+        self.assertEqual(a["until"], T0 + 6 * 3600)
+
+    def test_a_reason_naming_its_window_still_waits_longer(self):
+        self.assertEqual(
+            wide_paper.reason_wait(
+                "Normal fiyat farkı kayıyor: 7g ve 12g medyanı uyuşmuyor"
+            ),
+            3 * 3600,
+        )
+        self.assertEqual(
+            wide_paper.reason_wait("İşlem kayıp bütçesi aşılıyor"),
+            wide_paper.REJECT_COOLDOWN,
+        )
+
+    def test_funnel_counts_every_step_and_how_far_the_list_was_checked(self):
+        self.desk.cycle()
+        f = self.desk.snapshot()["funnel"]["strategies"]["funding"]
+        self.assertEqual((f["candidates"], f["positive"]), (7, 7))
+        # A, B and C were checked this round; D is the first not yet reached.
+        self.assertEqual((f["reached"], f["checked"], f["waiting"]), (3, 3, 3))
+        self.assertEqual(f["round"], {"rejected": 3})
+        self.clock += 60
+        self.desk.cycle()
+        f = self.desk.funnel["strategies"]["funding"]
+        self.assertEqual((f["reached"], f["checked"]), (6, 6))
 
     def test_history_needs_put_history_rejections_first(self):
         self.reasons["C"] = "B: 24 saat gerçekleşmiş funding geçmişi eksik"
