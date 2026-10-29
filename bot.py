@@ -103,11 +103,35 @@ def walk(levels, qty, buy, extra=0):
     return total / qty * (1 + extra if buy else 1 - extra)
 
 
+def first_at(db, table, column, cutoff):
+    """The smallest id from which `table` rows are at or after `cutoff`, found by
+    bisection over the id (rows are written in time order) instead of a table scan.
+    Rows with a smaller id are older; 0 when the table is empty."""
+    lo = db.execute(f"select min(id) from {table}").fetchone()[0]
+    if lo is None:
+        return 0
+    hi = db.execute(f"select max(id) from {table}").fetchone()[0] + 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        i, t = db.execute(
+            f"select id, {column} from {table} where id>=? order by id limit 1", (mid,)
+        ).fetchone()
+        if t >= cutoff:
+            hi = mid
+        else:
+            lo = i + 1
+    return lo
+
+
 class Store:
     def __init__(self, path):
         self.lock = threading.RLock()
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.execute("pragma journal_mode=WAL")
+        # Every public response and stream message is written here under one lock. In
+        # WAL mode NORMAL skips the disk flush on each commit (a power cut can lose the
+        # last commits, never corrupt the file); a flush per write queued the engine.
+        self.db.execute("pragma synchronous=NORMAL")
         self.db.executescript(
             """create table if not exists kv(k text primary key,v text);
    create table if not exists audit(id integer primary key,ts real,url text,sha text,raw blob);

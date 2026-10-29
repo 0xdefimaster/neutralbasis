@@ -55,28 +55,48 @@ def referenced(store):
     return refs
 
 
-def prune(store, at=None, deadline=None, pause=0):
-    """Trim old rows in small batches, giving the lock back between them. With a
-    deadline it stops early and reports done=False; the next run picks up the rest."""
+def prune(store, at=None, deadline=None, pause=0, progress=None):
+    """Trim old rows in small batches, giving the lock back between them. Old audit rows
+    are walked in id windows up to the first id at the cutoff (found by bisection),
+    starting where the last run stopped (`progress`), so no lock hold scans the table.
+    With a deadline it stops early and reports done=False; the next run picks up the
+    rest."""
     at = at or now()
     keep = referenced(store)
+    progress = {} if progress is None else progress
     out = dict(audit_stripped=0, audit_dropped=0, marks=0, events=0, done=True)
 
-    def audit_pass(sql, change, key):
-        last = 0
-        while True:
+    def audit_pass(cutoff, change, key, mark, body):
+        with store.lock:
+            first = store.db.execute("select min(id) from audit").fetchone()[0] or 0
+            end = bot.first_at(store.db, "audit", "ts", cutoff)
+        start = max(progress.get(mark, 0), first)
+        # A row written late (an older id holding a newer time) is not due when walked
+        # past; the next run starts again from the first such row.
+        later = None
+        while start < end:
             if deadline and time.monotonic() > deadline:
+                progress[mark] = start if later is None else later
                 return False
+            stop = min(start + BATCH, end)
             with store.lock:
-                rows = store.db.execute(sql, (last, BATCH)).fetchall()
-                if not rows:
-                    return True
-                last = rows[-1][0]
-                ids = [(i,) for (i,) in rows if i not in keep]
+                rows = store.db.execute(
+                    "select id, ts, raw is not null from audit where id>=? and id<?",
+                    (start, stop),
+                ).fetchall()
+                ids = []
+                for i, ts, has_raw in rows:
+                    if ts >= cutoff:
+                        later = i if later is None else later
+                    elif (has_raw or not body) and i not in keep:
+                        ids.append((i,))
                 store.db.executemany(change, ids)
                 store.db.commit()
             out[key] += len(ids)
+            start = stop
             time.sleep(pause)
+        progress[mark] = end if later is None else later
+        return True
 
     def rows_pass(table, cutoff, key):
         while True:
@@ -98,15 +118,10 @@ def prune(store, at=None, deadline=None, pause=0):
     old = at - AUDIT_KEEP_DAYS * 86400
     out["done"] = (
         audit_pass(
-            f"select id from audit where id>? and ts<{raw!r} and raw is not null"
-            " order by id limit ?",
-            "update audit set raw=null where id=?",
-            "audit_stripped",
+            raw, "update audit set raw=null where id=?", "audit_stripped", "strip", True
         )
         and audit_pass(
-            f"select id from audit where id>? and ts<{old!r} order by id limit ?",
-            "delete from audit where id=?",
-            "audit_dropped",
+            old, "delete from audit where id=?", "audit_dropped", "drop", False
         )
         and rows_pass("marks", at - MARK_DAYS * 86400, "marks")
         and rows_pass("events", at - EVENT_DAYS * 86400, "events")
@@ -184,11 +199,19 @@ class Retention:
         self.stop = stop
         self.status = dict(status="idle")
         self.thread = None
+        # Where the audit passes stopped, kept across restarts so a run never walks
+        # the rows it already handled.
+        self.progress = None
 
     def run_once(self):
         deadline = time.monotonic() + RUN_SECONDS
         before = size(self.store)
-        counts = prune(self.store, deadline=deadline, pause=PAUSE)
+        if self.progress is None:
+            self.progress = self.store.get("retention_progress", {})
+        counts = prune(
+            self.store, deadline=deadline, pause=PAUSE, progress=self.progress
+        )
+        self.store.put("retention_progress", self.progress)
         freed = release(self.store, deadline=deadline, pause=PAUSE)
         self.status = dict(
             status="ok",

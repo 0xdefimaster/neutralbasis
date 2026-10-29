@@ -378,5 +378,35 @@ class PaperTests(unittest.TestCase):
         self.assertFalse(self.e.connections.view()["Extended"]["has_key"])
 
 
+class StoreTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.store = bot.Store(Path(self.dir.name) / "s.sqlite3")
+
+    def tearDown(self):
+        self.store.db.close()
+        self.dir.cleanup()
+
+    def test_commits_do_not_flush_the_disk_each_time(self):
+        # WAL + NORMAL: one disk flush per checkpoint, not per write.
+        mode = self.store.db.execute("pragma synchronous").fetchone()[0]
+        self.assertEqual(mode, 1)
+
+    def test_first_at_bisects_ids_with_gaps(self):
+        db = self.store.db
+        for t in (10, 20, 30, 40, 50, 60):
+            db.execute("insert into marks values('A','B',?,1)", (t,))
+        db.execute("create table t(id integer primary key, ts real)")
+        db.executemany(
+            "insert into t values(?,?)", [(1, 10), (2, 20), (5, 30), (9, 40), (12, 50)]
+        )
+        self.assertEqual(bot.first_at(db, "t", "ts", 5), 1)
+        self.assertEqual(bot.first_at(db, "t", "ts", 30), 3)  # ids 3, 4 do not exist
+        self.assertEqual(bot.first_at(db, "t", "ts", 35), 6)
+        self.assertEqual(bot.first_at(db, "t", "ts", 99), 13)
+        db.execute("delete from t")
+        self.assertEqual(bot.first_at(db, "t", "ts", 30), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

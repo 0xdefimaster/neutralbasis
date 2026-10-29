@@ -158,6 +158,15 @@ class WidePaperTests(unittest.TestCase):
         ]
         self.assertEqual(rank(rows, wide_paper.WIDE_DEFAULTS, T0), [])
 
+    def test_snapshot_shows_time_between_cycles(self):
+        self.desk.cycle()
+        self.assertIsNone(self.desk.snapshot()["cycle_seconds"])
+        self.clock += 420
+        self.desk.cycle()
+        snap = self.desk.snapshot()
+        self.assertEqual(snap["cycle_seconds"], 420)
+        self.assertEqual(snap["downtime_gap"], wide_paper.DOWNTIME_GAP)
+
     def test_opens_best_pair_with_real_fees(self):
         self.setup_pair()
         self.desk.cycle()

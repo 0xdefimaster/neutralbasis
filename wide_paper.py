@@ -955,6 +955,7 @@ class WidePaper:
         self.funnel = None
         self.rows = {}
         self.last_cycle = None
+        self.cycle_seconds = None
         self.error = None
         self.cache = {}
         self.latency_ms = 750
@@ -2624,7 +2625,10 @@ class WidePaper:
                             self.decide(best, at, "opened", [])
             if rows is not None:
                 self.funnel = self.build_funnel(rows, ranked_rows, at)
-            self.last_cycle = now()
+            previous, self.last_cycle = self.last_cycle, now()
+            # Open positions are checked once a cycle; a gap over DOWNTIME_GAP between two
+            # cycles counts as downtime in the period report.
+            self.cycle_seconds = self.last_cycle - previous if previous else None
             self.record_run(self.last_cycle, entries and self.cfg["wide_enabled"])
             self.persist()
         except Exception as ex:
@@ -3054,6 +3058,8 @@ class WidePaper:
             epoch_start=self.store.get("wide_epoch_start", None),
             venues=venues,
             last_cycle=self.last_cycle,
+            cycle_seconds=self.cycle_seconds,
+            downtime_gap=DOWNTIME_GAP,
             error=self.error,
             method=(
                 "İki strateji, taranan tüm borsa çiftleri ve tüm varlıklar (seçili liste dışındakiler OI veya "

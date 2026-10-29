@@ -234,5 +234,71 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(got["pong"], (0xA, b"hi"))
 
 
+class RfqRecorderTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.store = bot.Store(os.path.join(self.dir.name, "r.sqlite3"))
+        self.rec = RfqRecorder(self.store)
+
+    def tearDown(self):
+        self.store.db.close()
+        self.dir.cleanup()
+
+    def count(self):
+        return self.store.db.execute("select count(*) from rfq_messages").fetchone()[0]
+
+    def test_messages_are_written_in_batches_in_order(self):
+        self.rec.pruned = T0  # no expiry check in this test
+        for seq in range(1, 4):
+            self.rec.record("BTW-USD", msg("DELTA", seq), "{}", T0 + seq)
+        self.assertEqual(self.count(), 0)  # within the flush interval: nothing written
+        self.rec.flushed -= extended_rfq.FLUSH_SECONDS
+        self.rec.record("BTW-USD", msg("DELTA", 4), "{}", T0 + 4)
+        self.assertEqual(self.count(), 4)
+        self.rec.record("BTW-USD", msg("DELTA", 5), "{}", T0 + 5)
+        # Reading writes what is pending first.
+        rows = self.rec.messages("BTW-USD", T0, T0 + 10)
+        self.assertEqual([r["seq"] for r in rows], [1, 2, 3, 4, 5])
+
+    def test_stream_does_not_wait_for_another_streams_write(self):
+        self.rec.flushed -= extended_rfq.FLUSH_SECONDS
+        with self.rec.flushing:  # another stream is writing
+            done = threading.Event()
+
+            def other():
+                self.rec.record("BTW-USD", msg("DELTA", 1), "{}", T0)
+                done.set()
+
+            threading.Thread(target=other, daemon=True).start()
+            self.assertTrue(done.wait(2))
+        self.assertEqual(len(self.rec.pending), 1)
+
+    def test_expired_messages_are_deleted_in_id_windows(self):
+        rows = [
+            ("BTW-USD", i, "DELTA", None, t, "{}")
+            for i, t in enumerate([T0 - 5 * 86400] * 7 + [T0 - 60, T0 - 4 * 86400, T0])
+        ]
+        self.store.db.executemany(
+            "insert into rfq_messages(market,seq,kind,exchange_ts,received,raw)"
+            " values(?,?,?,?,?,?)",
+            rows,
+        )
+        self.store.db.commit()
+        deletes = []
+        self.store.db.set_trace_callback(
+            lambda q: deletes.append(q) if q.startswith("delete") else None
+        )
+        with mock.patch.object(extended_rfq, "PRUNE_ROWS", 3):
+            self.rec.prune(T0 - extended_rfq.KEEP_SECONDS)
+        self.store.db.set_trace_callback(None)
+        left = self.store.db.execute(
+            "select seq from rfq_messages order by id"
+        ).fetchall()
+        # Every expired row goes; the newer one between them (seq 7) stays.
+        self.assertEqual([s for (s,) in left], [7, 9])
+        self.assertEqual(len(deletes), 3)
+        self.assertTrue(all("id>=" in q for q in deletes))
+
+
 if __name__ == "__main__":
     unittest.main()

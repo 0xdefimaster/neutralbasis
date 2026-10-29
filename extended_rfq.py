@@ -14,7 +14,7 @@ Stdlib only: a minimal RFC 6455 client, so no new package is needed.
 """
 
 import base64, hashlib, json, os, socket, ssl, threading, time, urllib.parse
-from bot import now, number
+from bot import now, number, first_at
 
 STREAM = (
     "wss://api.starknet.extended.exchange/stream.extended.exchange/v1/orderbooks/rfq/"
@@ -25,6 +25,12 @@ SILENT_AFTER = 30
 RECONNECT_MIN, RECONNECT_MAX = 2, 60
 # Recorded raw messages are kept this long.
 KEEP_SECONDS = 3 * 86400
+# Messages are written in batches (one commit about every second, not one per message),
+# so the streams do not queue on the store lock the whole engine shares.
+FLUSH_SECONDS = 1.0
+FLUSH_ROWS = 2000
+# Expired messages are deleted in id windows of this size, one short lock hold each.
+PRUNE_ROWS = 5000
 # Book views older than this (since the last frame of a live connection) are refused.
 VIEW_MAX_AGE = 30
 WAITING = "RFQ defteri yeni snapshot bekliyor"
@@ -221,6 +227,11 @@ class RfqRecorder:
     def __init__(self, store):
         self.store = store
         self.pruned = 0
+        self.pending = []
+        self.flushed = time.monotonic()
+        self.lock = threading.Lock()
+        # One flush at a time, so batches (and each market's messages) keep their order.
+        self.flushing = threading.Lock()
         with store.lock:
             store.db.executescript(
                 """create table if not exists rfq_messages(id integer primary key,
@@ -231,27 +242,78 @@ class RfqRecorder:
 
     def record(self, market, msg, raw, received):
         ts = msg.get("ts")
-        with self.store.lock:
-            self.store.db.execute(
-                "insert into rfq_messages(market,seq,kind,exchange_ts,received,raw) values(?,?,?,?,?,?)",
-                (
-                    market,
-                    msg.get("seq"),
-                    msg.get("type") or "",
-                    number(ts) / 1000 if ts is not None else None,
-                    received,
-                    raw,
-                ),
+        row = (
+            market,
+            msg.get("seq"),
+            msg.get("type") or "",
+            number(ts) / 1000 if ts is not None else None,
+            received,
+            raw,
+        )
+        with self.lock:
+            self.pending.append(row)
+            due = (
+                len(self.pending) >= FLUSH_ROWS
+                or time.monotonic() - self.flushed >= FLUSH_SECONDS
             )
-            if received - self.pruned > 3600:
-                self.store.db.execute(
-                    "delete from rfq_messages where received<?",
-                    (received - KEEP_SECONDS,),
+        if due:
+            # A stream never waits for another stream's write; it reads its socket on.
+            self.flush(wait=False)
+
+    def flush(self, wait=True):
+        """Write the pending messages in one transaction; expired ones are deleted
+        about once an hour, in the background."""
+        if not self.flushing.acquire(blocking=wait):
+            return
+        try:
+            with self.lock:
+                rows, self.pending = self.pending, []
+                self.flushed = time.monotonic()
+            if not rows:
+                return
+            with self.store.lock:
+                self.store.db.executemany(
+                    "insert into rfq_messages(market,seq,kind,exchange_ts,received,raw)"
+                    " values(?,?,?,?,?,?)",
+                    rows,
                 )
+                self.store.db.commit()
+            received = rows[-1][4]
+            if received - self.pruned > 3600:
                 self.pruned = received
-            self.store.db.commit()
+                cutoff = received - KEEP_SECONDS
+                with self.store.lock:
+                    oldest = self.store.db.execute(
+                        "select received from rfq_messages order by id limit 1"
+                    ).fetchone()
+                if oldest and oldest[0] < cutoff:
+                    threading.Thread(
+                        target=self.prune, args=(cutoff,), daemon=True, name="rfq-prune"
+                    ).start()
+        finally:
+            self.flushing.release()
+
+    def prune(self, cutoff):
+        """Delete messages received before `cutoff`, in id windows up to the first id at
+        the cutoff, so no lock hold scans the table."""
+        with self.store.lock:
+            end = first_at(self.store.db, "rfq_messages", "received", cutoff)
+            start = (
+                self.store.db.execute("select min(id) from rfq_messages").fetchone()[0]
+                or 0
+            )
+        while start < end:
+            stop = min(start + PRUNE_ROWS, end)
+            with self.store.lock:
+                self.store.db.execute(
+                    "delete from rfq_messages where id>=? and id<? and received<?",
+                    (start, stop, cutoff),
+                )
+                self.store.db.commit()
+            start = stop
 
     def messages(self, market, start, end=None):
+        self.flush()
         with self.store.lock:
             rows = self.store.db.execute(
                 "select seq,kind,exchange_ts,received,raw from rfq_messages "
