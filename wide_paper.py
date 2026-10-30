@@ -276,6 +276,35 @@ def venue_choices():
     return [v for v, c in CATALOG.items() if c["scan"] and v != "LighterCore"]
 
 
+def workspace_venues():
+    """Perp DEXs a paper workspace may select: the initial universe, where scanned.
+    Centralized exchanges stay read-only reference markets."""
+    from wide_markets import CATALOG
+
+    return [
+        v
+        for v in capabilities.PERP_DEXES
+        if (CATALOG.get(v) or {}).get("scan") or v in FEED_VENUES
+    ]
+
+
+# Settings a workspace sets at its start and shows for its whole period.
+WORKSPACE_FIELDS = (
+    "wide_size",
+    "wide_leverage",
+    "wide_max_positions",
+    "wide_risk",
+    "wide_daily_loss",
+    "wide_min_net",
+    "wide_conv_leverage",
+    "wide_conv_stop_pct",
+    "wide_conv_hard_stop_pct",
+    "wide_conv_stop_minutes",
+    "wide_funding_enabled",
+    "wide_conv_enabled",
+)
+
+
 def trades_csv(trades):
     """The period's closed trades for a spreadsheet; times are UTC epoch seconds."""
     out = io.StringIO(newline="")
@@ -1211,7 +1240,8 @@ class WidePaper:
             self.store.put("wide_daily", base)
         return equity - base["equity"]
 
-    def update_config(self, changes):
+    def validated(self, changes):
+        """The config with `changes` applied, each value checked against its limits."""
         fresh = dict(self.cfg)
         for k, v in changes.items():
             if k in BOOLS:
@@ -1226,6 +1256,10 @@ class WidePaper:
             if not lo <= n <= hi:
                 raise ValueError(k + " sınır dışında")
             fresh[k] = int(n) if isinstance(WIDE_DEFAULTS[k], int) else n
+        return fresh
+
+    def update_config(self, changes):
+        fresh = self.validated(changes)
         if fresh["wide_capital"] != self.cfg["wide_capital"]:
             if self.per_venue():
                 raise ValueError(
@@ -1297,16 +1331,24 @@ class WidePaper:
             raise ValueError("Açık pozisyonlar kapanmadan paper sıfırlanamaz")
         lo, hi = LIMITS["wide_capital"]
         if venue_capital is not None:
-            venue_capital = number(venue_capital)
-            venues = list(dict.fromkeys(venues or ACCOUNT_VENUES))
-            unknown = [v for v in venues if v not in venue_choices()]
+            # One amount for every listed venue, or {venue: amount} per venue.
+            if isinstance(venue_capital, dict):
+                amounts = {v: number(x) for v, x in venue_capital.items()}
+            else:
+                amounts = {
+                    v: number(venue_capital)
+                    for v in dict.fromkeys(venues or ACCOUNT_VENUES)
+                }
+            venues = list(amounts)
+            known = set(venue_choices()) | set(workspace_venues())
+            unknown = [v for v in venues if v not in known]
             if unknown:
                 raise ValueError("Taranmayan borsa: " + ", ".join(map(str, unknown)))
             if len(venues) < 2:
                 raise ValueError("En az iki borsa gerekli")
-            if not lo <= venue_capital <= hi:
+            if any(not lo <= x <= hi for x in amounts.values()):
                 raise ValueError("Borsa başı teminat sınır dışında")
-            capital = venue_capital * len(venues)
+            capital = sum(amounts.values())
         else:
             capital = (
                 WIDE_DEFAULTS["wide_capital"] if capital is None else number(capital)
@@ -1327,9 +1369,12 @@ class WidePaper:
                 report=self.report(),
                 period=self.period_report(),
                 closed=self.closed,
+                workspace=self.store.get("wide_workspace", None),
+                config={k: self.cfg.get(k) for k in WORKSPACE_FIELDS},
             )
         )
         self.store.put("wide_epochs", epochs)
+        self.store.put("wide_workspace", None)
         self.store.put("wide_epoch_start", now())
         self.store.put("wide_run", {})
         self.store.put("wide_equity", [])
@@ -1339,7 +1384,7 @@ class WidePaper:
         self.cfg["wide_capital"] = capital
         self.wallet = {"cash": capital}
         if venue_capital is not None:
-            self.wallet["venues"] = {v: venue_capital for v in venues}
+            self.wallet["venues"] = dict(amounts)
         self.store.put("wide_daily", {})
         self.persist()
         self.events(
@@ -1349,6 +1394,113 @@ class WidePaper:
             venue_capital=venue_capital,
             archived=len(trades),
         )
+
+    def start_workspace(self, venues, strategies, config=None):
+        """A new paper period on selected perp DEXs only, each with its own collateral,
+        with the chosen strategies and settings applied at the start (so they are the
+        period's configuration, not a change inside it). The current period is archived
+        with its own configuration first; nothing is reset without this explicit call.
+        """
+        if not isinstance(venues, dict) or not venues:
+            raise ValueError("Çalışma alanı için borsa seçilmedi")
+        allowed = workspace_venues()
+        outside = [v for v in venues if v not in allowed]
+        if outside:
+            raise ValueError(
+                "Çalışma alanında yalnızca taranan perp DEX'ler seçilebilir: "
+                + ", ".join(map(str, outside))
+            )
+        strategies = strategies or {}
+        if strategies.get("hybrid"):
+            raise ValueError("Hibrit strateji henüz yok (Faz 2)")
+        funding = bool(strategies.get("funding"))
+        conv = bool(strategies.get("convergence"))
+        if not (funding or conv):
+            raise ValueError("En az bir strateji seçin")
+        config = dict(config or {})
+        fixed = [k for k in config if k not in WORKSPACE_FIELDS or k in BOOLS]
+        if fixed:
+            raise ValueError("Çalışma alanında ayarlanamaz: " + ", ".join(fixed))
+        fresh = self.validated(config)
+        self.reset(venue_capital=venues)
+        self.cfg = {
+            **self.cfg,
+            **{k: fresh[k] for k in config},
+            "wide_funding_enabled": funding,
+            "wide_conv_enabled": conv,
+            "wide_enabled": True,
+        }
+        ws = dict(
+            started=now(),
+            venues=dict(self.wallet["venues"]),
+            strategies=dict(funding=funding, convergence=conv, hybrid=False),
+            config={k: self.cfg[k] for k in WORKSPACE_FIELDS},
+            disabled=[],
+        )
+        self.store.put("wide_workspace", ws)
+        self.persist()
+        self.events(
+            "WORKSPACE",
+            "Yeni paper çalışma alanı başlatıldı",
+            venues=ws["venues"],
+            strategies=ws["strategies"],
+        )
+        return ws
+
+    def workspace(self):
+        return self.store.get("wide_workspace", None)
+
+    def set_venue_enabled(self, venue, enabled):
+        """Stop (or resume) new entries on one workspace venue. Its collateral and open
+        legs stay; the change is recorded as a settings change of the period."""
+        ws = self.workspace()
+        if not ws:
+            raise ValueError("Önce bir çalışma alanı başlatın")
+        if venue not in ws["venues"]:
+            raise ValueError("Çalışma alanında olmayan borsa: " + str(venue))
+        off = set(ws.get("disabled", []))
+        before = set(off)
+        if enabled:
+            off.discard(venue)
+        else:
+            off.add(venue)
+        if off == before:
+            return ws
+        ws["disabled"] = sorted(off)
+        self.store.put("wide_workspace", ws)
+        self.note_change()
+        self.events(
+            "VENUE",
+            ("Yeni girişler açıldı: " if enabled else "Yeni girişler kapatıldı: ")
+            + venue,
+        )
+        return ws
+
+    def close_all(self):
+        """Ask every open paper position to close on the next round."""
+        ids = [p["id"] for p in self.positions]
+        self.manual_close.update(ids)
+        self.events(
+            "CLOSE_ALL", "Tüm paper pozisyonları için kapanış istendi", count=len(ids)
+        )
+        return len(ids)
+
+    def workspace_choices(self):
+        """Every initial perp DEX, whether a workspace may select it, and what its
+        capabilities allow."""
+        allowed = set(workspace_venues())
+        out = []
+        for v in capabilities.PERP_DEXES:
+            entry = self.registry.get(v) or {}
+            out.append(
+                dict(
+                    venue=v,
+                    selectable=v in allowed,
+                    connector=entry.get("connector"),
+                    blocked=entry.get("strategies", {}),
+                )
+            )
+        return out
 
     def epochs(self):
         return [
@@ -2852,6 +3004,10 @@ class WidePaper:
                 if rows is not None and self.per_venue()
                 else rows
             )
+            # A workspace venue switched off takes no new entries.
+            off = set((self.workspace() or {}).get("disabled", []))
+            if off and ranked_rows is not None:
+                ranked_rows = [r for r in ranked_rows if r["venue"] not in off]
             self.candidates = (
                 rank(ranked_rows, self.cfg, at)
                 if rows is not None and self.cfg["wide_funding_enabled"]
@@ -3347,7 +3503,7 @@ class WidePaper:
         perps = [r for r in rows if r.get("kind", "perp") == "perp"]
         why = {}
         if len(ranked_rows) < len(rows):
-            why["Hesap borsası değil"] = sum(
+            why["Çalışma alanı dışında"] = sum(
                 r.get("kind", "perp") == "perp" for r in rows
             ) - sum(r.get("kind", "perp") == "perp" for r in ranked_rows)
         groups = usable_rows(ranked_rows, at, why)
@@ -3452,6 +3608,8 @@ class WidePaper:
             venues=venues,
             last_cycle=self.last_cycle,
             capabilities=self.capability_summary(),
+            workspace=self.workspace(),
+            workspace_choices=self.workspace_choices(),
             cycle_seconds=self.cycle_seconds,
             downtime_gap=DOWNTIME_GAP,
             error=self.error,

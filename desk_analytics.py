@@ -489,6 +489,22 @@ class DeskEngine(RiskEngine):
         self.read_lock = threading.RLock()
         self.read_jobs = {}
 
+    def start_workspace(self, body):
+        """Start a perp DEX paper workspace; the old two-venue desk stops taking new
+        entries so two paper universes never run side by side."""
+        ws = self.wide_paper.start_workspace(
+            body.get("venues"), body.get("strategies"), body.get("config")
+        )
+        if self.cfg.get("legacy_entries", True):
+            self.cfg["legacy_entries"] = False
+            self.persist()
+            self.events(
+                "LEGACY_OFF",
+                "Eski Lighter RH–Extended masası yeni giriş açmıyor; açık pozisyonları "
+                "izlemeye devam ediyor",
+            )
+        return ws
+
     def capability_registry(self):
         """The full capability registry: every venue, capability, status and evidence."""
         from capabilities import CAPABILITIES, LABELS, STATUSES, REQUIRED

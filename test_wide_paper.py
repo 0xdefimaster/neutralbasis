@@ -1152,7 +1152,7 @@ class WidePaperTests(unittest.TestCase):
         # With per-venue accounts, a venue without one is counted apart.
         self.desk.reset(venue_capital=1000, venues=["Hyperliquid", "Extended"])
         self.desk.cycle(entries=False)
-        self.assertEqual(self.desk.funnel["excluded"]["Hesap borsası değil"], 4)
+        self.assertEqual(self.desk.funnel["excluded"]["Çalışma alanı dışında"], 4)
         self.assertEqual(self.desk.funnel["pairs"], 0)
 
     def test_leverage_is_a_ceiling_cut_by_leg_volatility(self):
@@ -2061,6 +2061,116 @@ class WidePaperTests(unittest.TestCase):
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
 
 
+class WorkspaceTests(unittest.TestCase):
+    """Perp DEX paper workspaces on the fixture desk."""
+
+    tearDown = WidePaperTests.tearDown
+    setup_pair = WidePaperTests.setup_pair
+    fund_history = WidePaperTests.fund_history
+
+    def setUp(self):
+        WidePaperTests.setUp(self)
+        self.venues = {"Hyperliquid": 1000.0, "Paradex": 750.0, "Extended": 1500.0}
+
+    def start(self, **kw):
+        args = dict(
+            venues=self.venues,
+            strategies=dict(funding=True, convergence=False),
+            config={"wide_size": 400.0, "wide_risk": 20.0},
+        )
+        args.update(kw)
+        return self.desk.start_workspace(**args)
+
+    def test_start_sets_each_venue_and_the_period_configuration(self):
+        old_epochs = len(self.desk.epochs())
+        ws = self.start()
+        self.assertEqual(self.desk.wallet["venues"], self.venues)
+        self.assertEqual(self.desk.wallet["cash"], 3250.0)
+        self.assertEqual(self.desk.cfg["wide_capital"], 3250.0)
+        self.assertEqual(
+            (self.desk.cfg["wide_size"], self.desk.cfg["wide_risk"]), (400.0, 20.0)
+        )
+        self.assertEqual(
+            (self.desk.cfg["wide_funding_enabled"], self.desk.cfg["wide_conv_enabled"]),
+            (True, False),
+        )
+        self.assertEqual(ws["config"]["wide_size"], 400.0)
+        self.assertEqual(self.desk.snapshot()["workspace"], ws)
+        # Settings set at the start are the period's, not a change inside it.
+        self.assertEqual(self.store.get("wide_run", {}).get("changes", []), [])
+        self.assertEqual(len(self.desk.epochs()), old_epochs + 1)
+
+    def test_the_previous_period_is_archived_with_its_configuration(self):
+        first = self.start()
+        self.start(venues={"Lighter": 500.0, "Extended": 500.0})
+        last = self.store.get("wide_epochs", [])[-1]
+        self.assertEqual(last["workspace"], first)
+        self.assertEqual(last["config"]["wide_size"], 400.0)
+        self.assertEqual(last["venues"], self.venues)
+
+    def test_only_scanned_perp_dexs_with_a_strategy_and_valid_settings(self):
+        for bad in (
+            dict(venues={"Binance": 1000.0, "Paradex": 1000.0}),
+            dict(venues={"Variational": 1000.0, "Paradex": 1000.0}),
+            dict(venues={"Paradex": 1000.0}),
+            dict(venues={"Paradex": 5.0, "Extended": 1000.0}),
+            dict(strategies=dict(funding=False, convergence=False)),
+            dict(strategies=dict(funding=True, hybrid=True)),
+            dict(config={"wide_capital": 99999.0}),
+            dict(config={"wide_enabled": False}),
+            dict(config={"wide_size": -1.0}),
+            dict(config={"nonsense": 1}),
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.start(**bad)
+        self.assertIsNone(self.desk.workspace())
+
+    def test_open_positions_block_a_new_workspace(self):
+        self.setup_pair()
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1)
+        with self.assertRaises(ValueError):
+            self.start()
+
+    def test_a_switched_off_venue_takes_no_new_entries(self):
+        # The fixture pair trades on Binance, so the workspace record is written
+        # directly instead of through start_workspace (which refuses a CEX).
+        self.desk.reset(venue_capital={"Hyperliquid": 10000.0, "Binance": 10000.0})
+        self.store.put(
+            "wide_workspace",
+            dict(venues={"Hyperliquid": 10000.0, "Binance": 10000.0}, disabled=[]),
+        )
+        self.desk.set_venue_enabled("Binance", False)
+        self.assertEqual(len(self.store.get("wide_run", {})["changes"]), 1)
+        self.setup_pair()
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn("Çalışma alanı dışında", self.desk.funnel["excluded"])
+        self.desk.set_venue_enabled("Binance", True)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1)
+        with self.assertRaises(ValueError):
+            self.desk.set_venue_enabled("OKX", False)
+
+    def test_close_all_closes_every_position_next_round(self):
+        self.setup_pair()
+        self.desk.cycle()
+        self.assertEqual(self.desk.close_all(), 1)
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(
+            self.desk.closed[-1]["close_reason"], "Kullanıcı paper kapatma talebi"
+        )
+
+    def test_choices_list_every_initial_dex_and_only_dexs_are_selectable(self):
+        choices = {x["venue"]: x for x in self.desk.workspace_choices()}
+        self.assertEqual(set(choices), set(wide_paper.capabilities.PERP_DEXES))
+        self.assertFalse(choices["Variational"]["selectable"])
+        self.assertTrue(choices["Hyperliquid"]["selectable"])
+        self.assertTrue(choices["LighterCore"]["selectable"])
+        self.assertNotIn("Binance", choices)
+
+
 REAL_BLOCKERS = wide_paper.capabilities.blockers
 
 
@@ -2121,6 +2231,39 @@ class CapabilityGateTests(unittest.TestCase):
             "Binance: funding aralığı ödemelerle uyuşmuyor",
             self.desk.candidates[0]["research"],
         )
+
+
+class LegacyDeskTests(unittest.TestCase):
+    def test_a_workspace_stops_the_two_venue_desk_taking_entries(self):
+        from test_risk_scan import FiveFixture
+        from desk_analytics import DeskEngine
+
+        with tempfile.TemporaryDirectory() as d:
+            f = FiveFixture()
+            f.markets()
+            f.history = {}
+            path = os.path.join(d, "t.db")
+            e = DeskEngine(path, f)
+            try:
+                self.assertTrue(e.cfg.get("legacy_entries", True))
+                e.start_workspace(
+                    dict(
+                        venues={"Lighter": 1000.0, "Extended": 1000.0},
+                        strategies=dict(funding=True, convergence=True),
+                    )
+                )
+                self.assertFalse(e.cfg["legacy_entries"])
+                self.assertEqual(
+                    e.wide_paper.wallet["venues"],
+                    {"Lighter": 1000.0, "Extended": 1000.0},
+                )
+            finally:
+                e.store.db.close()
+            again = DeskEngine(path, f)
+            try:
+                self.assertFalse(again.cfg["legacy_entries"])
+            finally:
+                again.store.db.close()
 
 
 class DeskIntegrationTests(unittest.TestCase):
