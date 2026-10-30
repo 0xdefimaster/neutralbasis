@@ -269,3 +269,21 @@ Hepsinin çağrıları aynıdır: piyasalar, defter, gerçekleşmiş funding, g�
 `EngineSource` artık yönlendirmeyi bağlayıcılara bırakıyor. Davranış değişmedi: bir test, yeni katmanın eski algoritmayla birebir aynı satırları ürettiğini doğrular. Yeni bir derin bağlayıcı (WebSocket defter, hesap okuma) stratejilere dokunmadan bu arayüze takılabilir.
 
 Bu sırada bir hata düzeltildi: canlı mum okuması başarısız olunca kayıtlı geçmişe düşülen yol, Arcus'un oracle kapanışlarını "trade" diye etiketliyordu. Artık kaynağın etiketi korunuyor.
+
+## Sürümlü migration ve normalleştirilmiş kayıtlar (Faz 0.6)
+- **`migrations.py`:** veritabanı her açıldığında bekleyen migration'lar sırayla uygulanır. Sürüm `schema_migrations` tablosunda tutulur.
+  - **Yedek:** dolu bir veritabanında her migration'dan önce paper kayıtları (kv, ödemeler, olaylar) veritabanının yanına yedeklenir: `paper.sqlite3.backup-v1-<zaman>.sqlite3`. Büyük `audit` tablosu kopyalanmaz; migration ona dokunmaz.
+  - **Tek işlem:** migration tek bir işlem içinde çalışır. Hata verirse hiçbir değişiklik kalmaz ve sürüm kaydedilmez.
+  - **Geri alma:** `rollback` geri alma fonksiyonlarını çalıştırır.
+  - **Yalnız ekler:** migration'lar mevcut tabloları ve JSON kayıtları değiştirmez; eski dönemler aynen okunur.
+- **Migration 1 yeni tablolar:**
+  - `paper_periods`: dönemler; çalışma alanı ve ayarlarıyla.
+  - `paper_trades`: işlemler.
+  - `ledger_events`: yalnız eklenen nakit olayları; her olay tekil anahtarlı olduğu için tekrar yazılsa bile iki kez sayılmaz.
+  - **Geriye dönük doldurma:** arşivlenmiş dönemler ve tuttukları işlemler, açık dönem ve defteri, kayıtlı her funding ödemesi.
+- **Bundan sonra (`ledger.py`):**
+  - Kapanan her işlemin fiyat PnL'i ve ücreti yazılır.
+  - Her funding ödemesi yazılır. Doğrulanmamış sıfır ve sonradan gelen gerçek oran iki ayrı olaydır.
+  - Her sıfırlama ve çalışma alanı başlangıcı dönem satırını günceller.
+- **Mutabakat:** kapanan bir işlemin olayları toplamı netine eşit olmalı. Dönem raporunda "Muhasebe defteri işlemlerle tutarlı" ölçütü bunu kontrol eder.
+- **Kaynak:** paper motorunun çalışan durumu hâlâ kv JSON'da. Normalleştirilmiş tablolar şimdilik denetim için tutulan bir aynadır; motorun ana kaynağı yapılmadı.

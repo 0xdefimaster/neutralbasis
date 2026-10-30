@@ -14,6 +14,7 @@ the venue's real public order book. Capital is one pooled paper wallet.
 import collections, csv, datetime as dt, io, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
 import capabilities
+from ledger import Ledger
 from connectors import (
     FEED_VENUES,
     NATIVE,
@@ -1006,6 +1007,8 @@ class WidePaper:
         self.extra_slippage = 0.0001
         # Measured round trips of each venue's public book request, in seconds.
         self.rtt = collections.defaultdict(lambda: collections.deque(maxlen=50))
+        # Normalized trades, periods and append-only cash events (migration 1).
+        self.ledger = Ledger(store)
         # What each venue's connector is verified to support, from live evidence.
         self.capabilities = capabilities.Registry(store.get("capability_state", {}))
         self.registry = self.capabilities.evaluate(now())
@@ -1298,6 +1301,14 @@ class WidePaper:
             self.wallet["venues"] = dict(amounts)
         self.store.put("wide_daily", {})
         self.persist()
+        self.ledger.new_period(
+            epochs[-1],
+            self.store.get("wide_epoch_start", None),
+            self.wallet,
+            None,
+            {k: self.cfg.get(k) for k in WORKSPACE_FIELDS + ("wide_capital",)},
+            now(),
+        )
         self.events(
             "RESET",
             "Paper yeni dönemle sıfırlandı; önceki dönem arşivlendi",
@@ -1350,6 +1361,7 @@ class WidePaper:
         )
         self.store.put("wide_workspace", ws)
         self.persist()
+        self.ledger.set_workspace(ws, ws["config"])
         self.events(
             "WORKSPACE",
             "Yeni paper çalışma alanı başlatıldı",
@@ -2481,6 +2493,7 @@ class WidePaper:
                         "insert or replace into payments values(?,?,?)",
                         (key, r["ts"], json.dumps(body)),
                     )
+                    self.ledger.record_payment(key, r["ts"], body, late=late)
                     self.persist()
                 self.events(
                     "FUNDING_LATE" if late else "FUNDING",
@@ -2512,22 +2525,18 @@ class WidePaper:
                                         risk=self.unverified_risk(p, leg, rows, tm),
                                     )
                                 )
+                                zero = dict(
+                                    position=p["id"],
+                                    venue=v,
+                                    asset=a,
+                                    rate=None,
+                                    cash=0.0,
+                                    unverified=True,
+                                )
+                                self.ledger.record_payment(key, tm, zero)
                                 self.store.db.execute(
                                     "insert into payments values(?,?,?)",
-                                    (
-                                        key,
-                                        tm,
-                                        json.dumps(
-                                            dict(
-                                                position=p["id"],
-                                                venue=v,
-                                                asset=a,
-                                                rate=None,
-                                                cash=0.0,
-                                                unverified=True,
-                                            )
-                                        ),
-                                    ),
+                                    (key, tm, json.dumps(zero)),
                                 )
                                 self.persist()
                         if not exists:
@@ -3146,6 +3155,7 @@ class WidePaper:
         if ledger.get(p["id"]) != entry:
             ledger[p["id"]] = entry
             self.store.put("wide_ledger", ledger)
+        self.ledger.record_trade(p)
 
     def period_trades(self):
         trades = dict(self.store.get("wide_ledger", {}))
@@ -3199,6 +3209,9 @@ class WidePaper:
             dict(label=label, net=stressed(settled, **kw)) for label, kw in STRESS
         ]
         t = PERIOD_CHECKS
+        # Every closed trade's ledger events (price, fees, each payment) must sum to
+        # its net; a database before migration 1 has no ledger to check.
+        mismatched = self.ledger.reconcile() if self.ledger.ready() else []
         checks = [
             ("Süre", f"{days:.1f} / {t['days']} gün", days >= t["days"]),
             (
@@ -3238,6 +3251,11 @@ class WidePaper:
                 total + unverified_risk > 0,
             ),
             ("Dönem içinde ayar değişikliği", str(len(changes)), not changes),
+            (
+                "Muhasebe defteri işlemlerle tutarlı",
+                f"{len(mismatched)} uyumsuz işlem",
+                not mismatched,
+            ),
             ("Borsa teminatı riski kapanışı", str(collateral), collateral == 0),
         ]
         return dict(
