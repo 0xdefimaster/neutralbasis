@@ -14,9 +14,15 @@ the venue's real public order book. Capital is one pooled paper wallet.
 import collections, csv, datetime as dt, io, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
 import capabilities
+from connectors import (
+    FEED_VENUES,
+    NATIVE,
+    UNIVERSE_MIN_USD,
+    Connectors,
+    universe_rows,
+)
 
 # Native venues whose taker fee is configured; the rest come from the CCXT scanner.
-NATIVE = ("Lighter", "Extended")
 # Default account venues: fifteen perp venues. In per-venue mode each one has its own
 # paper collateral, as a real account would: a leg is margined only by its own venue.
 ACCOUNT_VENUES = (
@@ -37,7 +43,6 @@ ACCOUNT_VENUES = (
     "GRVT",
 )
 # Venues whose public data comes from the desk's own feed instead of the CCXT scanner.
-FEED_VENUES = ("Lighter", "Extended", "TxFlow", "RISEx", "Arcus")
 WIDE_DEFAULTS = dict(
     wide_enabled=True,
     wide_capital=10000.0,
@@ -120,7 +125,6 @@ HISTORY_TTL = 1800
 ROW_MAX_AGE = 300
 # Assets outside the selected list join the desk from the bulk scan when a leg has at
 # least this much open interest (24h volume where OI is unpublished).
-UNIVERSE_MIN_USD = 1_000_000
 FUNDING_TTL = 120
 MIN_NOTIONAL = 10
 LATE_FUNDING_WINDOW = 7 * 86400
@@ -844,113 +848,22 @@ def usd(x):
     return ("-" if x < 0 else "+" if x > 0 else "") + "$%.2f" % abs(x)
 
 
-def universe_rows(universe, rows, held=()):
-    """Bulk-scan markets for every asset, as desk rows. Markets already covered by the
-    native feed or the selected scan are skipped; a leg must carry UNIVERSE_MIN_USD of
-    open interest (or volume) unless the desk already holds that asset."""
-    have = {(r["venue"], r["asset"]) for r in rows}
-    out = []
-    for v, entries in universe.items():
-        if v in NATIVE:
-            continue
-        for a, x in entries.items():
-            if (v, a) in have:
-                continue
-            depth = x.get("oi") if x.get("oi") is not None else x.get("volume")
-            if a not in held and (depth or 0) < UNIVERSE_MIN_USD:
-                continue
-            out.append(
-                dict(
-                    asset=a,
-                    venue=v,
-                    kind="perp",
-                    symbol=x["symbol"],
-                    mark=x.get("mark"),
-                    price_type="mark",
-                    rate=x["rate"],
-                    raw_rate=x["raw_rate"],
-                    interval=x["interval"],
-                    next=x.get("next"),
-                    received=x["received"],
-                    funding_received=x["received"],
-                    fee=x.get("fee"),
-                    leverage=x.get("leverage"),
-                    volume=x.get("volume"),
-                    oi=x.get("oi"),
-                    execution=False,
-                    step=x.get("step"),
-                    minimum=x.get("minimum"),
-                    min_quote=x.get("min_quote"),
-                    contract_size=x.get("contract_size"),
-                    index=x.get("index"),
-                )
-            )
-    return out
-
-
 class EngineSource:
-    """Routes market data to the native feed or the CCXT scanner."""
+    """The paper desk's data source: every venue through its connector (connectors.py),
+    plus the history keeper's stored record."""
 
     def __init__(self, engine):
         self.engine = engine
+        self.connectors = Connectors(engine)
+        self.excluded = {}
 
     def market_rows(self):
-        e = self.engine
-        rows = []
-        self.excluded = {}
-        for v in FEED_VENUES:
-            try:
-                fee = e.fee(v)
-            except ValueError as ex:
-                # Listed without a fee: ranking skips it until the user enters one.
-                fee = None
-                if e.feed.meta.get(v):
-                    self.excluded[v] = str(ex)
-            for a, m in list(e.feed.meta.get(v, {}).items()):
-                if not m or m.get("rate") is None:
-                    continue
-                # An unknown schedule stays unknown: the row is left out of the desk
-                # ("Funding aralığı yok") instead of being taken for an hourly one.
-                interval = m.get("interval")
-                raw = m.get("raw_rate")
-                if raw is None and interval:
-                    raw = m["rate"] * interval / 3600
-                rows.append(
-                    dict(
-                        asset=a,
-                        venue=v,
-                        kind="perp",
-                        mark=m["mark"],
-                        rate=m["rate"],
-                        raw_rate=raw,
-                        interval=interval,
-                        # The native APIs quote sizes in base units.
-                        contract_size=1.0,
-                        index=m.get("index"),
-                        next=m.get("next"),
-                        received=m["received"],
-                        fee=fee,
-                        leverage=m.get("max_leverage"),
-                        price_type="mark",
-                        rfq=bool(m.get("rfq")),
-                        step=m.get("step"),
-                        minimum=m.get("minimum"),
-                        min_quote=m.get("min_quote"),
-                    )
-                )
-        extra, _ = e.wide.snapshot()
-        rows += [
-            r for r in extra if r["kind"] == "perp" and r["venue"] not in FEED_VENUES
-        ]
-        held = {
-            p["asset"] for p in getattr(getattr(e, "wide_paper", None), "positions", [])
-        }
-        return rows + universe_rows(e.wide.universe_snapshot(), rows, held)
+        rows = self.connectors.market_rows()
+        self.excluded = dict(self.connectors.excluded)
+        return rows
 
     def book(self, v, a):
-        if v in FEED_VENUES:
-            return self.engine.feed.book(v, a)
-        return self.engine.wide.book(v, a)
+        return self.connectors.get(v).book(a)
 
     def history_states(self):
         """The history keeper's per-market state (coverage, complete), by key."""
@@ -969,13 +882,7 @@ class EngineSource:
             if stored:
                 return stored
         try:
-            if v in NATIVE:
-                live = {**self.engine.feed.candles(v, a), "price_type": "trade"}
-            elif v in FEED_VENUES:
-                # Oracle-priced candles stay labelled; history checks refuse them.
-                live = self.engine.feed.candles(v, a)
-            else:
-                live, _, _ = self.engine.wide.history(v, a, 30)
+            live = self.connectors.get(v).candles(a)
         except Exception as ex:
             live, error = None, ex
         # A venue with a short public history still has what the keeper recorded.
@@ -987,20 +894,24 @@ class EngineSource:
         if live is None:
             if not kept:
                 raise error
-            return dict(prices=kept, price_type="trade", audit_ids=[], end=hour(now()))
+            # Stored closes keep their source's label (Arcus stays "oracle").
+            from desk_analytics import DeskHistorySource
+
+            return dict(
+                prices=kept,
+                price_type=DeskHistorySource(self.engine).price_type(v, a),
+                audit_ids=[],
+                end=hour(now()),
+            )
         if kept and live.get("price_type") == "trade":
             live = dict(live, prices={**kept, **live["prices"]})
         return live
 
     def current_funding(self, v, a):
-        if v in FEED_VENUES:
-            raise ValueError(v + ": yerel besleme kendi tazeliğini tutar")
-        return self.engine.wide.current_funding(v, a)
+        return self.connectors.get(v).current_funding(a)
 
     def funding(self, v, a, start):
-        if v in FEED_VENUES:
-            return self.engine.feed.funding_history(v, a, start)
-        return self.engine.wide.funding_since(v, a, start)
+        return self.connectors.get(v).funding(a, start)
 
     def stored_funding(self, v, a, start):
         """Payments the background history keeper recorded (up to 30 days)."""
