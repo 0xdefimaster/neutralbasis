@@ -97,7 +97,7 @@ class WidePaperTests(unittest.TestCase):
             mock.patch.object(wide_paper, "now", lambda: self.clock),
             # The fixture venues stand in for verified ones; the capability gate
             # itself is tested in test_capabilities and CapabilityGateTests.
-            mock.patch.object(wide_paper.capabilities, "blockers", lambda *a: []),
+            mock.patch.object(wide_paper.capabilities, "pair_blockers", lambda *a: []),
         ]
         for p in patcher:
             p.start()
@@ -1189,13 +1189,14 @@ class WidePaperTests(unittest.TestCase):
         )
 
     def books_after_pricing(self, **later):
-        """The first read of each venue's book prices the entry; later reads (the fills,
-        an unwind) see the given books."""
+        """The first read of each venue's book prices the entry and the second is the
+        re-check right before it; later reads (the fills, an unwind) see the given
+        books: the book moved in the latency between the re-check and the order."""
         seen, base = {}, self.src.book
 
         def read(v, a):
             seen[v] = seen.get(v, 0) + 1
-            if seen[v] > 1 and v in later:
+            if seen[v] > 2 and v in later:
                 return dict(later[v], received=bot.now())
             return base(v, a)
 
@@ -1276,7 +1277,8 @@ class WidePaperTests(unittest.TestCase):
 
         def read(v, a):
             seen[v] = seen.get(v, 0) + 1
-            if seen[v] > (1 if v == "Binance" else 2):
+            # Pricing and the entry re-check see the normal books.
+            if seen[v] > (2 if v == "Binance" else 3):
                 return dict(thin[v], received=bot.now())
             return base(v, a)
 
@@ -2171,36 +2173,74 @@ class WorkspaceTests(unittest.TestCase):
         self.assertNotIn("Binance", choices)
 
 
-REAL_BLOCKERS = wide_paper.capabilities.blockers
+REAL_PAIR_BLOCKERS = wide_paper.capabilities.pair_blockers
+DEX = ("Hyperliquid", "LighterCore")
 
 
 class CapabilityGateTests(unittest.TestCase):
     """The real capability gate on the fixture desk (WidePaperTests' fixture, without
-    the stand-in that treats the fixture venues as verified)."""
+    the stand-in that treats the fixture venues as verified), on two perp DEX venues
+    whose declared funding model is periodic."""
 
     tearDown = WidePaperTests.tearDown
-    setup_pair = WidePaperTests.setup_pair
     fund_history = WidePaperTests.fund_history
+    setup_convergence = WidePaperTests.setup_convergence
 
     def setUp(self):
         WidePaperTests.setUp(self)
-        p = mock.patch.object(wide_paper.capabilities, "blockers", REAL_BLOCKERS)
+        p = mock.patch.object(
+            wide_paper.capabilities, "pair_blockers", REAL_PAIR_BLOCKERS
+        )
         p.start()
         self.addCleanup(p.stop)
 
-    def evidence(self, venues):
+    def setup_pair(self, assets=("BTC",)):
+        """WidePaperTests.setup_pair on Hyperliquid (hourly) and LighterCore (8h)."""
+        self.src.rows = []
+        for a in assets:
+            self.src.rows += [
+                row("Hyperliquid", a, rate=-0.0001, fee=0.00045, contract_size=1.0),
+                row(
+                    "LighterCore",
+                    a,
+                    rate=0.0008,
+                    interval=28800,
+                    fee=0.0005,
+                    contract_size=1.0,
+                ),
+            ]
+            for v, per, iv in (
+                ("Hyperliquid", -0.0001, 3600),
+                ("LighterCore", 0.0008, 28800),
+            ):
+                self.src.books[(v, a)] = book(100.0, T0)
+                self.src.history[(v, a)] = candles(T0)
+                self.src.rates[(v, a)] = [
+                    dict(ts=t, rate=per, value=None, audit_id=None)
+                    for t in range(T0 - 30 * 86400 + iv, T0 + 1, iv)
+                ]
+
+    def evidence(self, markets, at=T0, venues=DEX):
+        """Each market's own evidence: complete history, enough settled payments on
+        its published interval, and published rates that matched them; plus the venue
+        premium heuristic."""
         reg = self.desk.capabilities
         for v in venues:
-            reg.history[v] = dict(markets=1, complete=1)
-            for a in ("BTC", "X1", "X2"):
-                reg.intervals["%s|%s" % (v, a)] = dict(
-                    at=T0, published=3600, gap=3600, match=True
-                )
-            reg.signs[v] = {"S%d|0" % i: [T0, True] for i in range(10)}
+            reg.signs[v] = {"S%d|0" % i: [at, True] for i in range(10)}
+        for v, a in markets:
+            r = next(x for x in self.src.rows if (x["venue"], x["asset"]) == (v, a))
+            iv, rate = r["interval"], r["raw_rate"]
+            reg.observe_history({(v, a, "perp"): dict(complete=True, ts=at)}, at)
+            for h in range(4, 0, -1):
+                seen = at - h * iv + iv / 2
+                reg.observe_prediction(dict(r, received=seen, next=None), seen)
+            self.src.stored[(v, a)] = [
+                dict(ts=at - i * iv, rate=rate) for i in range(12)
+            ]
+            reg.check_market(v, a, iv, self.src.stored_funding, at, at - 7 * 86400)
 
     def test_unverified_venues_stay_research_only(self):
         self.setup_pair()
-        self.src.rows = [dict(r, contract_size=1.0) for r in self.src.rows]
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
         self.assertEqual(self.desk.assessed, [])
@@ -2210,10 +2250,9 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertEqual((f["research"], f["reached"]), (1, 1))
         self.assertIn("Funding işareti doğrulanmadı", f["research_reasons"])
 
-    def test_verified_venues_trade(self):
+    def test_verified_markets_trade(self):
         self.setup_pair()
-        self.src.rows = [dict(r, contract_size=1.0) for r in self.src.rows]
-        self.evidence(("Hyperliquid", "Binance"))
+        self.evidence([(v, "BTC") for v in DEX])
         self.desk.cycle()
         self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
         self.assertNotIn("research", self.desk.candidates[0])
@@ -2222,15 +2261,244 @@ class CapabilityGateTests(unittest.TestCase):
 
     def test_a_market_whose_payments_contradict_its_interval_is_research(self):
         self.setup_pair()
-        self.src.rows = [dict(r, contract_size=1.0) for r in self.src.rows]
-        self.evidence(("Hyperliquid", "Binance"))
-        self.desk.capabilities.intervals["Binance|BTC"].update(gap=3600, match=False)
+        self.evidence([(v, "BTC") for v in DEX])
+        self.desk.capabilities.intervals["LighterCore|BTC"].update(
+            gap=3600, match=False
+        )
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
         self.assertIn(
-            "Binance: funding aralığı ödemelerle uyuşmuyor",
+            "LighterCore: funding aralığı ödemelerle uyuşmuyor",
             self.desk.candidates[0]["research"],
         )
+
+    def test_verified_btc_does_not_authorize_unverified_eth(self):
+        self.setup_pair(("BTC", "ETH"))
+        self.evidence([(v, "BTC") for v in DEX] + [("LighterCore", "ETH")])
+        self.desk.cycle()
+        by = {c["asset"]: c for c in self.desk.candidates}
+        self.assertNotIn("research", by["BTC"])
+        # The desk checked Hyperliquid ETH on its own: no settled payments recorded.
+        self.assertIn(
+            "Hyperliquid: gerçekleşmiş ödeme yetersiz · 0/6", by["ETH"]["research"]
+        )
+        self.assertIn("Hyperliquid: 30 günlük geçmiş kaydı yok", by["ETH"]["research"])
+        self.assertTrue(
+            all(r.startswith("Hyperliquid: ") for r in by["ETH"]["research"]),
+            by["ETH"]["research"],
+        )
+        self.assertEqual([p["asset"] for p in self.desk.positions], ["BTC"])
+        self.assertNotIn("ETH", [x["asset"] for x in self.desk.assessed])
+        # The funnel groups reasons without their measured values.
+        f = self.desk.funnel["strategies"]["funding"]
+        self.assertEqual(f["research"], 1)
+        self.assertIn("gerçekleşmiş ödeme yetersiz", f["research_reasons"])
+
+    def test_every_missing_market_evidence_keeps_the_pair_research_only(self):
+        def unreadable(v, a, start):
+            raise ValueError("kayıt okunamadı")
+
+        def few_payments(desk):
+            # The record holds 3 payments: the desk's own re-check finds too few.
+            self.src.stored[("LighterCore", "BTC")] = self.src.stored[
+                ("LighterCore", "BTC")
+            ][:3]
+            desk.capabilities.intervals["LighterCore|BTC"].update(gap=None, match=None)
+
+        def expired(desk):
+            # Old evidence, and the re-check cannot read the record to renew it.
+            desk.capabilities.intervals["LighterCore|BTC"].update(
+                at=T0 - wide_paper.capabilities.EVIDENCE_EXPIRY - 1
+            )
+            self.src.stored_funding = unreadable
+
+        gaps = dict(
+            no_history=lambda d: d.capabilities.market_history.pop("LighterCore|BTC"),
+            history_incomplete=lambda d: d.capabilities.market_history.update(
+                {"LighterCore|BTC": [T0, False]}
+            ),
+            few_payments=few_payments,
+            no_published=lambda d: d.capabilities.published.pop("LighterCore|BTC"),
+            sign_contradiction=lambda d: d.capabilities.published.update(
+                {"LighterCore|BTC": [[T0 - i, False, 1.0] for i in range(4)]}
+            ),
+            unit_mismatch=lambda d: d.capabilities.published.update(
+                {"LighterCore|BTC": [[T0 - i, True, 8.0] for i in range(4)]}
+            ),
+            expired=expired,
+            # Ranking itself refuses these rows: no candidate at all.
+            unknown_fee=lambda d: self.src.rows[1].update(fee=None),
+            no_contract_size=lambda d: self.src.rows[1].update(contract_size=None),
+        )
+        for name, gap in gaps.items():
+            with self.subTest(gap=name):
+                self.desk.positions, self.desk.closed = [], []
+                self.desk.capabilities = wide_paper.capabilities.Registry()
+                self.src = FakeSource()
+                self.desk.source = self.src
+                self.setup_pair()
+                self.evidence([(v, "BTC") for v in DEX])
+                gap(self.desk)
+                self.desk.cycle()
+                for c in self.desk.candidates:
+                    self.assertTrue(c.get("research"), name)
+                    self.assertTrue(
+                        any(r.startswith("LighterCore: ") for r in c["research"]),
+                        c["research"],
+                    )
+                self.assertEqual(self.desk.assessed, [])
+                self.assertEqual(self.desk.positions, [])
+
+    def test_continuous_funding_venue_is_research_only(self):
+        self.setup_pair()
+        for r in self.src.rows:
+            if r["venue"] == "LighterCore":
+                r["venue"] = "Paradex"
+        for d in (self.src.books, self.src.history, self.src.rates):
+            d[("Paradex", "BTC")] = d.pop(("LighterCore", "BTC"))
+        self.evidence(
+            [("Hyperliquid", "BTC"), ("Paradex", "BTC")],
+            venues=("Hyperliquid", "Paradex"),
+        )
+        self.assertNotIn("Paradex|BTC", self.desk.capabilities.intervals)
+        self.desk.cycle()
+        (c,) = self.desk.candidates
+        self.assertIn(
+            "Paradex: Funding modeli sürekli tahakkuk; yalnız araştırma", c["research"]
+        )
+        self.assertEqual(self.desk.positions, [])
+
+    def test_price_research_is_shown_apart_and_names_the_funding_gap(self):
+        # The convergence fixture pairs Hyperliquid with Binance, a venue without a
+        # declared funding model: research only, with price statistics beside it.
+        self.setup_convergence()
+        self.desk.cycle()
+        (c,) = self.desk.conv_candidates
+        self.assertTrue(c["research"])
+        self.assertIn("Binance: funding modeli bilinmiyor", c["research"])
+        pr = c["price_research"]
+        self.assertGreater(pr["cross30"], 0)
+        self.assertGreater(pr["widest"], 0)
+        self.assertIn("funding taşıma maliyeti dahil değil", pr["funding"])
+        self.assertNotIn("net", pr)
+        self.assertEqual((self.desk.assessed, self.desk.positions), ([], []))
+
+    # --- the re-check right before an entry -------------------------------------
+    def entry_reads(self, rows=None, book_at=None):
+        """The second market-list read and the second book read of each venue (the
+        re-check before the entry) see the given rows and book."""
+        reads, books, base_rows, base_book = (
+            [0],
+            {},
+            self.src.market_rows,
+            self.src.book,
+        )
+
+        def market_rows():
+            reads[0] += 1
+            if reads[0] == 2 and rows is not None:
+                return rows(base_rows())
+            return base_rows()
+
+        def read(v, a):
+            books[v] = books.get(v, 0) + 1
+            if books[v] == 2 and book_at is not None:
+                return book_at(v, base_book(v, a))
+            return base_book(v, a)
+
+        self.src.market_rows, self.src.book = market_rows, read
+
+    def assert_refused_at_entry(self, reason):
+        self.assertEqual(self.desk.positions, [])
+        (x,) = self.desk.assessed
+        self.assertFalse(x["eligible"])
+        self.assertTrue(any(reason in r for r in x["reasons"]), x["reasons"])
+        d = self.desk.verdict("BTC", "Hyperliquid", "LighterCore")["strategies"][0]
+        self.assertEqual(d["decision"]["outcome"], "rejected")
+
+    def test_entry_refuses_a_stale_book(self):
+        self.setup_pair()
+        self.evidence([(v, "BTC") for v in DEX])
+        self.entry_reads(
+            book_at=lambda v, b: dict(b, received=T0 - 120) if v == "LighterCore" else b
+        )
+        self.desk.cycle()
+        self.assert_refused_at_entry("LighterCore: girişte defter eski")
+
+    def test_entry_refuses_a_book_too_thin_for_the_order(self):
+        self.setup_pair()
+        self.evidence([(v, "BTC") for v in DEX])
+        self.entry_reads(
+            book_at=lambda v, b: (
+                dict(b, bids=[(99.99, 0.5)]) if v == "LighterCore" else b
+            )
+        )
+        self.desk.cycle()
+        self.assert_refused_at_entry("LighterCore: girişte defter derinliği yetersiz")
+
+    def test_entry_refuses_an_unknown_fee(self):
+        self.setup_pair()
+        self.evidence([(v, "BTC") for v in DEX])
+        self.entry_reads(
+            rows=lambda rs: [
+                dict(r, fee=None) if r["venue"] == "LighterCore" else r for r in rs
+            ]
+        )
+        self.desk.cycle()
+        self.assert_refused_at_entry("LighterCore: girişte ücret bilinmiyor")
+
+    def test_entry_refuses_a_changed_contract(self):
+        self.setup_pair()
+        self.evidence([(v, "BTC") for v in DEX])
+        self.entry_reads(
+            rows=lambda rs: [
+                dict(r, contract_size=10.0) if r["venue"] == "LighterCore" else r
+                for r in rs
+            ]
+        )
+        self.desk.cycle()
+        self.assert_refused_at_entry("LighterCore: girişte piyasa kimliği")
+
+    def test_entry_refuses_evidence_that_expired_during_the_round(self):
+        self.setup_pair()
+        # Valid when the round starts, 30 s before it expires; the entry comes later,
+        # and the record cannot be read to renew it.
+        self.evidence(
+            [(v, "BTC") for v in DEX],
+            at=T0 - wide_paper.capabilities.EVIDENCE_EXPIRY + 30,
+        )
+        for v in DEX:
+            self.desk.capabilities.market_history["%s|BTC" % v] = [T0, True]
+
+        def unreadable(v, a, start):
+            raise ValueError("kayıt okunamadı")
+
+        self.src.stored_funding = unreadable
+
+        def later(rs):
+            self.clock = T0 + 60
+            return [dict(r, received=self.clock) for r in rs]
+
+        self.entry_reads(rows=later)
+        self.desk.cycle()
+        self.assert_refused_at_entry(
+            "Girişte kanıt geçersiz: Hyperliquid: funding aralığı kanıtının süresi doldu"
+        )
+
+    def test_market_evidence_survives_a_restart(self):
+        self.setup_pair()
+        self.evidence([(v, "BTC") for v in DEX])
+        self.desk.cycle(entries=False)
+        self.assertNotIn("research", self.desk.candidates[0])
+        again = WidePaper(self.store, self.src, sleep=lambda s: None)
+        reg = again.capabilities
+        self.assertEqual(reg.intervals["LighterCore|BTC"]["n"], 12)
+        self.assertEqual(
+            reg.published_status("LighterCore", "BTC", T0)[:2], ("consistent", 4)
+        )
+        self.assertEqual(reg.market_history["Hyperliquid|BTC"], [T0, True])
+        again.cycle()
+        self.assertEqual(len(again.positions), 1, again.assessed)
 
 
 class LegacyDeskTests(unittest.TestCase):

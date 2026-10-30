@@ -13,11 +13,20 @@ prove are then verified at runtime from what the desk actually received:
     interval the venue publishes;
   * funding sign: on markets whose mark is clearly away from the index, the funding
     rate must point the same way as the premium (mark above index: longs pay). This
-    checks the long/short direction of the published sign without an account; a
-    venue whose signs run against the premium is marked inverted.
+    is a heuristic about the venue, not evidence of any payment; a venue whose signs
+    run against the premium is marked inverted.
+
+A venue status is necessary but never sufficient: it summarizes many markets, so a
+venue verified on BTC says nothing about its ETH market. Every leg of a trade must
+carry its own market evidence (`Registry.market_blockers`): a fresh row with contract
+size, fee, schedule and rate; a periodic funding model; its own settled payments
+matching its published interval; its own complete 30-day history; and its own
+published rates agreeing in sign and size with the payments that settled after them.
+Missing, too little, expired or contradictory evidence blocks the leg.
 
 Paper strategies read eligibility from here: a pair whose leg lacks a required
-capability is kept as research only, with the reason, and is never executed.
+capability or market evidence is kept as research only, with the reason, and is never
+executed.
 """
 
 import statistics
@@ -76,13 +85,19 @@ LABELS = dict(
     order_placement="Emir gönderme",
     order_cancellation="Emir iptali",
     testnet="Testnet",
+    funding_model="Funding modeli",
 )
 
 # What a paper strategy needs from each leg's venue. Both settle funding on every
 # payment while the position is open, so both need the schedule, settled history and
-# sign; both judge prices on traded (not oracle) history. The order book is not in
-# the list: every use reads it and refuses a stale, crossed or empty one, so it is
-# checked where it is used (the registry shows the last read).
+# sign; both judge prices on traded (not oracle) history. Convergence needs the same
+# funding evidence as the funding strategy: it holds both legs for days and pays the
+# carry on every payment, and its entry, add and exit tests charge that carry from the
+# signed rate on each leg's own schedule. Without the schedule, the sign or the
+# settled history the carry cannot be bounded, so the price signal alone is shown as
+# research and never executed. The order book is not in the list: every use reads it
+# and refuses a stale, crossed or empty one, so it is checked where it is used (the
+# registry shows the last read) and again right before an entry.
 REQUIRED = dict(
     funding=(
         "market_discovery",
@@ -244,6 +259,88 @@ DECLARED = dict(
     ),
 )
 
+# --- funding models -----------------------------------------------------------------
+# How a venue's funding becomes cash. The paper desk settles discrete payments: at each
+# payment time a leg pays or earns rate x quantity x price on its own schedule. Only a
+# PERIODIC venue fits that cash flow; a continuous accrual or an exchange-specific epoch
+# scheme is not evaluated with the payment-gap rule and stays research until the desk
+# implements its cash flow, and an unknown model stays research as well.
+PERIODIC = "PERIODIC"
+CONTINUOUS = "CONTINUOUS"
+EPOCH = "EXCHANGE_SPECIFIC"
+UNKNOWN = "UNKNOWN"
+MODELS = (PERIODIC, CONTINUOUS, EPOCH, UNKNOWN)
+MODEL_LABELS = {
+    PERIODIC: "Dönemsel ödeme",
+    CONTINUOUS: "Sürekli tahakkuk",
+    EPOCH: "Borsaya özel dönem",
+    UNKNOWN: "Bilinmiyor",
+}
+EXECUTABLE_MODELS = (PERIODIC,)
+# The official docs could not be fetched from this environment: the conventions below
+# are the connector's declaration, labelled as such, and every runtime check still
+# applies to them.
+DOCS_UNREAD = "Bağlayıcı beyanı; borsa belgesi bu ortamdan okunamadı"
+LONG_PAYS = "Pozitif oran: long öder, short alır"
+
+
+def _model(model, **kw):
+    out = dict(
+        model=model,
+        label=MODEL_LABELS[model],
+        settlement=None,
+        rate=None,
+        direction=None,
+        price=None,
+        history=None,
+        cashflow=None,
+        source=DOCS_UNREAD,
+        note=None,
+    )
+    out.update(kw)
+    return out
+
+
+HOURLY = dict(
+    settlement="Her saat başı ayrık ödeme",
+    rate="Ödeme başına (saatlik) oran",
+    direction=LONG_PAYS,
+    history="Geçmiş: ödeme başına gerçekleşmiş oran",
+    cashflow="Nakit = -yön x miktar x fiyat x ödeme oranı, her ödemede",
+)
+FUNDING_MODELS = dict(
+    Hyperliquid=_model(PERIODIC, price="Oracle fiyatı", **HOURLY),
+    LighterCore=_model(PERIODIC, price="Mark fiyatı", **HOURLY),
+    Lighter=_model(
+        PERIODIC,
+        price="Mark fiyatı",
+        note="Geçmiş kaydı ödeyen tarafı (direction) ayrıca yayımlıyor. Canlı oran "
+        "son gerçekleşen ödemeden alınır; yayımlanan/gerçekleşen karşılaştırması onu "
+        "bir sonraki ödemeyle karşılaştırır",
+        **HOURLY,
+    ),
+    Extended=_model(PERIODIC, price="Mark fiyatı", **HOURLY),
+    Paradex=_model(
+        CONTINUOUS,
+        settlement="Ayrık ödeme yok; funding pozisyona sürekli işler",
+        rate="Yayımlanan oran bir dönem için; tahakkuk süreklidir",
+        direction=LONG_PAYS,
+        history="Geçmiş kayıtları ödeme değil oran örneği",
+        cashflow="Masanın dönemsel ödeme modeliyle hesaplanamaz",
+        note="Sürekli model uygulanana kadar yalnız araştırma",
+    ),
+    RISEx=_model(UNKNOWN, note="Funding modeli bu masada belgelenmedi"),
+    TxFlow=_model(UNKNOWN, note="Funding / tahakkuk modeli doğrulanmadı"),
+    Arcus=_model(UNKNOWN, note="Funding modeli bu masada belgelenmedi"),
+    Variational=_model(UNKNOWN, note="Bağlayıcı yok"),
+)
+
+
+def funding_model(v):
+    """The venue's declared funding model; an undeclared venue's is unknown."""
+    return FUNDING_MODELS.get(v) or _model(UNKNOWN, note="Borsa beyanı yok")
+
+
 # Runtime thresholds.
 FRESH = 300  # rows older than this do not count as live evidence
 BOOK_FRESH = 3600  # a book read proves the capability for this long
@@ -256,6 +353,28 @@ INTERVAL_MIN_PAYMENTS = 6
 INTERVAL_SAMPLE = 10  # markets re-checked per round once a venue is verified
 INTERVAL_BOOTSTRAP = 3  # markets per venue checked first, every round until decided
 INTERVAL_RECHECK = 6 * 3600
+INTERVAL_RETRY = 900  # an undecided market is re-checked this often
+# Market evidence older than this no longer counts: the market is re-checked first.
+EVIDENCE_EXPIRY = 24 * 3600
+HISTORY_EXPIRY = 24 * 3600  # a history keeper record older than this proves nothing
+# Published rate against the payment that settled after it, per market.
+PUBLISHED_MIN = 3  # comparisons needed
+PUBLISHED_KEEP = 12  # comparisons kept per market
+PUBLISHED_WINDOW = 3 * 86400
+PREDICTION_KEEP = 2 * 86400  # an observation never matched to a payment is dropped
+SIGN_EPS = 1e-6  # |rate| per payment below this is too small to show a sign
+RATIO_BAND = (0.25, 4.0)  # median |published / settled| outside it: unit mismatch
+
+# Funding sign evidence, weakest to strongest. The desk has no account connection, so
+# the last two are never available and the sign is never fully supported.
+SIGN_LEVELS = dict(
+    documented="Borsanın belgelediği işaret kuralı",
+    heuristic="Prim yönüyle uyum (sezgisel; ödeme kanıtı değil)",
+    published="Yayımlanan oran = sonra gerçekleşen ödeme (piyasa bazında)",
+    settled_cash="Gerçek ödeme nakdi kaydı",
+    account="Hesapta gerçekleşen funding",
+)
+NO_ACCOUNT = "Hesap bağlantısı yok; gerçek ödeme nakdi okunamıyor"
 
 
 def median_gap(times):
@@ -264,25 +383,41 @@ def median_gap(times):
     return statistics.median(gaps) if gaps else None
 
 
+def market_key(v, a):
+    return "%s|%s" % (v, a)
+
+
 class Registry:
-    """Evidence per venue and the statuses derived from it. `state` is plain JSON so it
-    survives restarts; `evaluate` turns declarations plus evidence into the registry."""
+    """Evidence per venue and per market, and the statuses derived from it. `state` is
+    plain JSON so it survives restarts; `evaluate` turns declarations plus evidence into
+    the venue registry and `market_blockers` judges one market on its own evidence."""
 
     def __init__(self, state=None):
         state = state or {}
         self.books = state.get("books", {})
         self.signs = state.get("signs", {})
         self.intervals = state.get("intervals", {})
+        # {market: [[payment time, sign agrees, |published / settled|], ...]}
+        self.published = state.get("published", {})
+        # {market: {payment bucket: [observed at, published rate, next payment]}}
+        self.predictions = state.get("predictions", {})
+        # {market: [keeper record time, complete]}
+        self.market_history = state.get("market_history", {})
         self.rows = {}
-        self.history = {}
         self.fee_sources = {}
         self.cursor = state.get("cursor", 0)
+        # Each venue's premium-heuristic tally, recounted only after new observations:
+        # the gate judges every ranked pair's markets each round.
+        self.heuristic_memo = {}
 
     def state(self):
         return dict(
             books=self.books,
             signs=self.signs,
             intervals=self.intervals,
+            published=self.published,
+            predictions=self.predictions,
+            market_history=self.market_history,
             cursor=self.cursor,
         )
 
@@ -291,6 +426,7 @@ class Registry:
         """Per venue counts from the fresh perp rows of this scan, and one funding-sign
         observation per market and hour where the mark is clearly off the index."""
         by = {}
+        self.heuristic_memo = {}
         for r in rows:
             if r.get("kind", "perp") != "perp":
                 continue
@@ -324,7 +460,26 @@ class Registry:
             if r.get("fee_source"):
                 self.fee_sources.setdefault(v, set()).add(r["fee_source"])
             self.observe_sign(v, r, at)
+            self.observe_prediction(r, at)
         self.rows = by
+
+    def observe_prediction(self, r, at):
+        """Keep the latest published rate before each payment of a periodic market, to
+        be compared with the payment once the history keeper has recorded it."""
+        iv, rate = r.get("interval"), r.get("raw_rate")
+        if not iv or rate is None:
+            return
+        if funding_model(r["venue"])["model"] not in EXECUTABLE_MODELS:
+            return
+        seen = r.get("received") or at
+        nxt = r.get("next")
+        bucket = str(int(nxt) if nxt else int(seen // iv + 1) * int(iv))
+        obs = self.predictions.setdefault(market_key(r["venue"], r["asset"]), {})
+        obs[bucket] = [round(seen), rate, nxt]
+        for k in [k for k, x in obs.items() if at - x[0] > PREDICTION_KEEP]:
+            del obs[k]
+        for k in sorted(obs, key=lambda k: obs[k][0])[:-6]:
+            del obs[k]
 
     def observe_sign(self, v, r, at):
         mark, index, rate = r.get("mark"), r.get("index"), r.get("raw_rate")
@@ -334,6 +489,7 @@ class Registry:
         if abs(premium) < SIGN_PREMIUM:
             return
         key = "%s|%d" % (r["asset"], int(at) // 3600)
+        self.heuristic_memo.pop(v, None)
         obs = self.signs.setdefault(v, {})
         obs[key] = [at, (rate > 0) == (premium > 0)]
         for k in [k for k, (t, _) in obs.items() if at - t > SIGN_WINDOW]:
@@ -346,41 +502,126 @@ class Registry:
             error_at=None if ok else at,
         )
 
-    def observe_history(self, states):
-        """`states`: {(venue, asset): keeper market state}; counts complete markets."""
-        by = {}
+    def observe_history(self, states, at=None):
+        """`states`: {(venue, asset, kind): keeper market state}. Each market keeps the
+        time of its keeper record and whether its 30-day history is complete; a record
+        survives restarts until it expires."""
         for (v, a, *_), s in states.items():
-            x = by.setdefault(v, dict(markets=0, complete=0))
+            when = s.get("ts") or at
+            if when is not None:
+                self.market_history[market_key(v, a)] = [when, bool(s.get("complete"))]
+
+    def history_counts(self, at):
+        """{venue: dict(markets, complete)} over the unexpired market records."""
+        by = {}
+        for k, (when, done) in self.market_history.items():
+            if at - when > HISTORY_EXPIRY:
+                continue
+            x = by.setdefault(k.split("|")[0], dict(markets=0, complete=0))
             x["markets"] += 1
-            x["complete"] += bool(s.get("complete"))
-        self.history = by
+            x["complete"] += bool(done)
+        return by
 
     def check_market(self, v, a, interval, stored, at, start):
         """Compare one market's published interval with the median gap of its stored
-        settled payments; None when there are too few payments to tell."""
-        key = "%s|%s" % (v, a)
+        settled payments (None when there are too few to tell), and its published rates
+        with the payments that settled after them. A venue whose funding model is not
+        periodic has no payment gap to measure and is left unchecked."""
+        if funding_model(v)["model"] not in EXECUTABLE_MODELS:
+            return None
+        key = market_key(v, a)
         try:
-            times = [x["ts"] for x in stored(v, a, start)]
+            paid = [(x["ts"], x.get("rate")) for x in stored(v, a, start)]
         except Exception:
             return None
+        times = [t for t, _ in paid]
         gap = median_gap(times) if len(times) >= INTERVAL_MIN_PAYMENTS else None
         match = (
             None
             if gap is None
             else abs(gap - interval) <= INTERVAL_TOLERANCE * interval
         )
-        self.intervals[key] = dict(at=at, published=interval, gap=gap, match=match)
+        self.intervals[key] = dict(
+            at=at, published=interval, gap=gap, match=match, n=len(times)
+        )
+        self.compare_published(key, interval, paid, at)
         return match
 
+    def compare_published(self, key, interval, paid, at):
+        """Match each kept observation to the first payment after it (within one
+        interval, and at its announced time when it had one) and record whether the
+        published rate had the payment's sign and size."""
+        obs = self.predictions.get(key)
+        paid = sorted((t, r) for t, r in paid if r is not None)
+        if not obs or not paid:
+            return
+        last = paid[-1][0]
+        slack = INTERVAL_TOLERANCE * interval + 60
+        samples = self.published.setdefault(key, [])
+        done = {s[0] for s in samples}
+        for bucket, (seen, rate, nxt) in sorted(obs.items(), key=lambda x: x[1][0]):
+            if seen >= last:
+                continue  # its payment is not recorded yet
+            del obs[bucket]
+            settled = next(((t, r) for t, r in paid if t > seen), None)
+            if settled is None or settled[0] - seen > interval + slack:
+                continue
+            if nxt and abs(settled[0] - nxt) > slack:
+                continue
+            t, r = settled
+            if t in done or abs(r) < SIGN_EPS or abs(rate) < SIGN_EPS:
+                continue
+            samples.append([t, (r > 0) == (rate > 0), round(abs(rate / r), 4)])
+            done.add(t)
+        samples.sort()
+        del samples[:-PUBLISHED_KEEP]
+        if not obs:
+            self.predictions.pop(key, None)
+
+    def published_status(self, v, a, at):
+        """(status, n, agreeing, median ratio, latest): consistent, insufficient,
+        inconsistent, inverted or unit_mismatch."""
+        xs = [
+            s
+            for s in self.published.get(market_key(v, a), [])
+            if at - s[0] <= PUBLISHED_WINDOW
+        ]
+        n, agree = len(xs), sum(bool(s[1]) for s in xs)
+        ratio = statistics.median(s[2] for s in xs) if xs else None
+        latest = max((s[0] for s in xs), default=None)
+        if n < PUBLISHED_MIN:
+            status = "insufficient"
+        elif agree / n <= 1 - SIGN_AGREE:
+            status = "inverted"
+        elif agree / n < SIGN_AGREE:
+            status = "inconsistent"
+        elif not RATIO_BAND[0] <= ratio <= RATIO_BAND[1]:
+            status = "unit_mismatch"
+        else:
+            status = "consistent"
+        return status, n, agree, ratio, latest
+
     def due(self, v, a, at):
-        x = self.intervals.get("%s|%s" % (v, a))
-        return not x or at - x["at"] > INTERVAL_RECHECK
+        """A market is re-checked every INTERVAL_RECHECK, every INTERVAL_RETRY while
+        its interval or published-rate evidence is still undecided."""
+        x = self.intervals.get(market_key(v, a))
+        if not x:
+            return True
+        undecided = (
+            x["gap"] is None or self.published_status(v, a, at)[0] == "insufficient"
+        )
+        return at - x["at"] > (INTERVAL_RETRY if undecided else INTERVAL_RECHECK)
 
     def check_intervals(self, rows, stored, at, start):
         """Every venue first gets INTERVAL_BOOTSTRAP decided markets (tried each round
-        until they have enough payments); then a rotating sample is re-checked."""
+        until they have enough payments); then a rotating sample is re-checked. Only
+        periodic venues have a payment gap to check."""
         perps = [
-            r for r in rows if r.get("kind", "perp") == "perp" and r.get("interval")
+            r
+            for r in rows
+            if r.get("kind", "perp") == "perp"
+            and r.get("interval")
+            and funding_model(r["venue"])["model"] in EXECUTABLE_MODELS
         ]
         decided = {}
         for k, x in self.intervals.items():
@@ -406,9 +647,174 @@ class Registry:
         self.cursor += INTERVAL_SAMPLE
 
     def market_ok(self, v, a):
-        """False when this market's settled payments contradict its published interval."""
-        x = self.intervals.get("%s|%s" % (v, a))
-        return not (x and x.get("match") is False)
+        """True only when this market's own settled payments were counted and match its
+        published interval. No record, too few payments or a mismatch are all False."""
+        x = self.intervals.get(market_key(v, a))
+        return bool(x and x.get("gap") is not None and x.get("match") is True)
+
+    # --- market evidence ----------------------------------------------------------
+    def market_evidence(self, v, a, row, at):
+        """Everything known about one market's eligibility, with source, time, sample
+        size and the reasons it is blocked (`blockers`, empty when it may execute)."""
+        key = market_key(v, a)
+        model = funding_model(v)
+        why = []
+        if model["model"] not in EXECUTABLE_MODELS:
+            why.append(
+                "funding modeli %s; masanın dönemsel ödeme hesabına uymuyor"
+                % model["label"].lower()
+                if model["model"] != UNKNOWN
+                else "funding modeli bilinmiyor"
+            )
+        # This scan's row: the market is listed, fresh and fully specified.
+        r = dict(ok=False, received=None)
+        if row is None:
+            why.append("piyasa bu taramada yok")
+        else:
+            r.update(
+                received=row.get("received"),
+                fee=row.get("fee"),
+                contract_size=row.get("contract_size"),
+                interval=row.get("interval"),
+                raw_rate=row.get("raw_rate"),
+            )
+            missing = len(why)
+            if at - (row.get("received") or 0) > FRESH:
+                why.append("piyasa verisi eski")
+            if not row.get("contract_size"):
+                why.append("kontrat büyüklüğü bilinmiyor")
+            if row.get("fee") is None:
+                why.append("ücret bilinmiyor")
+            if not row.get("interval"):
+                why.append("funding aralığı yayımlanmıyor")
+            if row.get("raw_rate") is None:
+                why.append("funding oranı yok")
+            r["ok"] = len(why) == missing
+        # The market's own settled payments against its published interval.
+        x = self.intervals.get(key)
+        iv = dict(status="missing", at=None, n=0, gap=None, published=None)
+        if x:
+            iv.update(at=x["at"], n=x.get("n"), gap=x["gap"], published=x["published"])
+        if model["model"] not in EXECUTABLE_MODELS:
+            iv["status"] = "not_applicable"
+        elif not x:
+            iv["status"] = "missing"
+            why.append("funding aralığı bu piyasada doğrulanmadı")
+        elif x["gap"] is None:
+            iv["status"] = "insufficient"
+            why.append(
+                "gerçekleşmiş ödeme yetersiz · %s/%d"
+                % (x.get("n", "?"), INTERVAL_MIN_PAYMENTS)
+            )
+        elif x["match"] is False:
+            iv["status"] = "mismatch"
+            why.append("funding aralığı ödemelerle uyuşmuyor")
+        elif row is not None and row.get("interval") != x["published"]:
+            iv["status"] = "changed"
+            why.append("yayımlanan funding aralığı değişti; yeniden doğrulanmalı")
+        elif at - x["at"] > EVIDENCE_EXPIRY:
+            iv["status"] = "expired"
+            why.append("funding aralığı kanıtının süresi doldu")
+        else:
+            iv["status"] = "verified"
+        # The market's own 30-day candles and funding in the history keeper.
+        h = self.market_history.get(key)
+        hist = dict(status="missing", at=h[0] if h else None)
+        if not h:
+            why.append("30 günlük geçmiş kaydı yok")
+        elif at - h[0] > HISTORY_EXPIRY:
+            hist["status"] = "expired"
+            why.append("geçmiş kaydının süresi doldu")
+        elif not h[1]:
+            hist["status"] = "incomplete"
+            why.append("30 günlük geçmiş tamamlanmadı")
+        else:
+            hist["status"] = "complete"
+        # Funding sign, by evidence level.
+        heuristic, n_obs, agree, last_obs = self.sign_heuristic(v)
+        status, n, ok, ratio, latest = self.published_status(v, a, at)
+        sign = dict(
+            documented=dict(
+                status="declared" if model["direction"] else "missing",
+                convention=model["direction"],
+                source=model["source"],
+            ),
+            heuristic=dict(
+                status=heuristic,
+                scope="borsa",
+                n=n_obs,
+                agree=agree,
+                at=last_obs,
+                note=SIGN_LEVELS["heuristic"],
+            ),
+            published=dict(
+                status=status, scope="piyasa", n=n, agree=ok, ratio=ratio, at=latest
+            ),
+            settled_cash=dict(status="unavailable", note=NO_ACCOUNT),
+            account=dict(status="unavailable", note=NO_ACCOUNT),
+        )
+        if not model["direction"]:
+            why.append("funding işaret kuralı belgelenmedi")
+        if heuristic == "inverted":
+            why.append("funding işareti prim yönünün tersine görünüyor")
+        if status == "insufficient":
+            why.append(
+                "yayımlanan oran ile gerçekleşen ödeme karşılaştırması yetersiz · %d/%d"
+                % (n, PUBLISHED_MIN)
+            )
+        elif status in ("inverted", "inconsistent"):
+            why.append(
+                "funding işareti çelişkili · yayımlanan oran %d/%d ödemede aynı yönde"
+                % (ok, n)
+            )
+        elif status == "unit_mismatch":
+            why.append(
+                "yayımlanan oran ödemelerle aynı birimde değil · oran x%.2f" % ratio
+            )
+        confidence = "yok" if why else "orta" if heuristic == "consistent" else "düşük"
+        return dict(
+            venue=v,
+            asset=a,
+            at=at,
+            model=dict(
+                model=model["model"],
+                label=model["label"],
+                source=model["source"],
+                note=model["note"],
+            ),
+            row=r,
+            interval=iv,
+            history=hist,
+            sign=sign,
+            confidence=confidence,
+            blockers=["%s: %s" % (v, w) for w in why],
+        )
+
+    def sign_heuristic(self, v):
+        """(status, observations, agreeing, latest) of the venue's premium heuristic:
+        consistent, inverted, inconsistent or insufficient."""
+        obs = self.signs.get(v) or {}
+        hit = self.heuristic_memo.get(v)
+        if hit and hit[0] is obs and hit[1] == len(obs):
+            return hit[2]
+        xs = list(obs.values())
+        agree = sum(bool(o[1]) for o in xs)
+        if len(xs) < SIGN_MIN:
+            status = "insufficient"
+        elif agree / len(xs) <= 1 - SIGN_AGREE:
+            status = "inverted"
+        elif agree / len(xs) >= SIGN_AGREE:
+            status = "consistent"
+        else:
+            status = "inconsistent"
+        out = (status, len(xs), agree, max((o[0] for o in xs), default=None))
+        self.heuristic_memo[v] = (obs, len(obs), out)
+        return out
+
+    def market_blockers(self, v, a, row, at):
+        """Why this one market may not execute; empty only when its own evidence is
+        complete, fresh and consistent. A venue status never stands in for it."""
+        return self.market_evidence(v, a, row, at)["blockers"]
 
     # --- statuses -----------------------------------------------------------------
     def evaluate(self, at, venues=None):
@@ -435,14 +841,21 @@ class Registry:
             self.verify(v, caps, at)
             for c, x in caps.items():
                 x["eligible"] = x["status"] in USABLE
+            model = funding_model(v)
+            # A venue whose funding model the desk cannot settle is research only,
+            # whatever its other capabilities show.
+            bad_model = (
+                ["funding_model"] if model["model"] not in EXECUTABLE_MODELS else []
+            )
             out[v] = dict(
                 venue=v,
                 connector=decl["connector"],
                 declared=v in DECLARED,
                 perp_dex=v in PERP_DEXES,
+                funding_model=model,
                 caps=caps,
                 strategies={
-                    s: [c for c in need if caps[c]["status"] not in USABLE]
+                    s: bad_model + [c for c in need if caps[c]["status"] not in USABLE]
                     for s, need in REQUIRED.items()
                 },
             )
@@ -510,7 +923,7 @@ class Registry:
         elif b and b.get("error"):
             for c in ("order_book", "bid_ask"):
                 set_(c, UNVERIFIED, "Son defter okuması hatalı: " + b["error"])
-        h = self.history.get(v)
+        h = self.history_counts(at).get(v)
         if caps["funding_history"]["status"] != NONE and h and h["markets"]:
             if h["complete"] == 0:
                 set_("funding_history", UNVERIFIED, "Geçmiş henüz dolmadı")
@@ -524,9 +937,19 @@ class Registry:
                     "%d/%d piyasada tam" % (h["complete"], h["markets"]),
                 )
         checks = [
-            x for k, x in self.intervals.items() if k.split("|")[0] == v and x["gap"]
+            x
+            for k, x in self.intervals.items()
+            if k.split("|")[0] == v and x["gap"] and at - x["at"] <= EVIDENCE_EXPIRY
         ]
-        if checks:
+        model = funding_model(v)
+        if model["model"] not in EXECUTABLE_MODELS:
+            set_(
+                "funding_interval",
+                UNVERIFIED,
+                "Funding modeli: %s; ödeme aralığı kuralı uygulanmaz" % model["label"],
+                "Model masada uygulanmadı; yalnız araştırma",
+            )
+        elif checks:
             good = sum(bool(x["match"]) for x in checks)
             when = max(x["at"] for x in checks)
             method = "Gerçekleşmiş ödeme aralığı = yayımlanan aralık: %d/%d piyasa" % (
@@ -553,13 +976,26 @@ class Registry:
                 )
             else:
                 set_("funding_interval", UNVERIFIED, method, None, when)
+        # Funding sign: the venue status rests on the premium heuristic, which proves
+        # no payment; the per-market published-rate comparison is listed beside it.
+        markets = [k for k in self.published if k.split("|")[0] == v]
+        consistent = sum(
+            self.published_status(v, k.split("|", 1)[1], at)[0] == "consistent"
+            for k in markets
+        )
+        caps["funding_sign"]["evidence"] = dict(
+            documented=dict(convention=model["direction"], source=model["source"]),
+            published="%d/%d piyasada yayımlanan oran ödemelerle tutarlı"
+            % (consistent, len(markets)),
+            settled_cash=NO_ACCOUNT,
+            account=NO_ACCOUNT,
+        )
         obs = list((self.signs.get(v) or {}).values())
         if obs:
             agree = sum(bool(a) for t, a in obs)
-            method = "Prim yönüyle uyum: %d/%d gözlem (|mark/endeks-1| ≥ %.0f bp)" % (
-                agree,
-                len(obs),
-                SIGN_PREMIUM * 1e4,
+            method = (
+                "Sezgisel, ödeme kanıtı değil: prim yönüyle uyum %d/%d gözlem "
+                "(|mark/endeks-1| ≥ %.0f bp)" % (agree, len(obs), SIGN_PREMIUM * 1e4)
             )
             when = max(t for t, a in obs)
             if len(obs) < SIGN_MIN:
@@ -594,8 +1030,16 @@ TESTS = dict(
     bid_ask="test_capabilities.BookEvidenceTests",
     funding_history="test_capabilities.HistoryEvidenceTests",
     funding_interval="test_capabilities.IntervalTests",
-    funding_sign="test_capabilities.SignTests",
+    funding_sign="test_capabilities.SignTests, PublishedSignTests",
     fees="test_capabilities.RowEvidenceTests",
+)
+# Where the per-market evidence and the funding models are covered by tests.
+MARKET_TESTS = (
+    "test_capabilities.FundingModelTests",
+    "test_capabilities.PublishedSignTests",
+    "test_capabilities.MarketEvidenceTests",
+    "test_capabilities.EveryGapStaysResearchTests",
+    "test_wide_paper.CapabilityGateTests",
 )
 
 
@@ -608,9 +1052,25 @@ def blockers(registry, strategy, venues):
             out.append("%s: yetenek kaydı yok" % v)
             continue
         for c in entry["strategies"].get(strategy, []):
+            if c == "funding_model":
+                out.append(
+                    "%s: Funding modeli %s; yalnız araştırma"
+                    % (v, entry["funding_model"]["label"].lower())
+                )
+                continue
             x = entry["caps"][c]
             out.append(
                 "%s: %s %s"
                 % (v, LABELS[c], "yok" if x["status"] == NONE else "doğrulanmadı")
             )
     return out
+
+
+def pair_blockers(reg, registry, strategy, c, rows, at):
+    """Every reason the pair `c` may not execute: what its legs' venues lack for the
+    strategy, then each leg's own market evidence (`rows`: {(venue, asset): row}).
+    Both must be empty; a verified venue never stands in for a market."""
+    out = blockers(registry, strategy, (c["long"], c["short"]))
+    for v in (c["long"], c["short"]):
+        out += reg.market_blockers(v, c["asset"], rows.get((v, c["asset"])), at)
+    return list(dict.fromkeys(out))

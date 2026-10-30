@@ -1644,6 +1644,15 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 engine, "capability_registry"
             ):
                 return self.send(engine.capability_registry())
+            if self.path.startswith("/api/market_evidence?") and hasattr(
+                engine, "market_evidence"
+            ):
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                return self.send(
+                    engine.market_evidence(
+                        q.get("venue", [""])[0], q.get("asset", [""])[0]
+                    )
+                )
             if self.path.startswith(("/api/asset?", "/api/pair?")) and hasattr(
                 engine, "pair_view"
             ):

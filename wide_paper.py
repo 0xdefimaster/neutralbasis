@@ -121,6 +121,12 @@ LIMITS = dict(
 # liquidation distance; the other venue's profit does not protect it.
 LEG_SAFETY = 0.5
 HISTORY_TTL = 1800
+# Research-only convergence pairs shown with their price statistics, per round.
+PRICE_RESEARCH_TOP = 3
+PRICE_ONLY_NOTE = (
+    "Yalnız fiyat istatistiği: funding taşıma maliyeti dahil değil ve bu piyasa "
+    "kanıtıyla sınırlanamıyor; işlem açılmaz"
+)
 # Rates for ranking may be a scan round old; entry refreshes them (ENTRY_FUNDING_MAX_AGE)
 # and prices every leg on a fresh book.
 ROW_MAX_AGE = 300
@@ -146,6 +152,9 @@ ENTRY_FUNDING_MAX_AGE = 120
 # Days of published funding payments a funding entry checks: the advantage must hold over
 # the last 3 and 7 days without leaning on a single day.
 PERSIST_DAYS = 7
+# A book read right before an entry must be at most this old.
+ENTRY_BOOK_MAX_AGE = 30
+CAPABILITY_SAVE_SECONDS = 60
 # Payments may be up to 8h apart (venues move between 8h, 4h and 1h schedules); a longer
 # stretch without one means the published history is incomplete.
 FUNDING_GAP = 8 * 3600 + 900
@@ -1012,6 +1021,7 @@ class WidePaper:
         # What each venue's connector is verified to support, from live evidence.
         self.capabilities = capabilities.Registry(store.get("capability_state", {}))
         self.registry = self.capabilities.evaluate(now())
+        self.capability_saved = 0
 
     def update_registry(self, rows, at):
         """Feed this round's evidence to the capability registry and re-derive it."""
@@ -1020,14 +1030,31 @@ class WidePaper:
         states = getattr(self.source, "history_states", None)
         if states:
             try:
-                reg.observe_history(states())
+                reg.observe_history(states(), at)
             except Exception:
                 pass
         stored = getattr(self.source, "stored_funding", None)
         if stored:
             reg.check_intervals(rows, stored, at, at - PERSIST_DAYS * 86400)
         self.registry = reg.evaluate(at)
-        self.store.put("capability_state", reg.state())
+        # The evidence is kept across restarts; written at most once a minute, so a
+        # restart loses at most the last minute of it.
+        if at - self.capability_saved >= CAPABILITY_SAVE_SECONDS:
+            self.store.put("capability_state", reg.state())
+            self.capability_saved = at
+
+    def market_evidence(self, venue, asset):
+        """One market's own evidence as the gate sees it now. Read from the API while
+        a cycle may be adding evidence: a read that meets a dict being resized is
+        simply repeated."""
+        for _ in range(3):
+            try:
+                return self.capabilities.market_evidence(
+                    venue, asset, self.rows.get((venue, asset)), now()
+                )
+            except RuntimeError:
+                continue
+        raise ValueError("Kanıt şu an güncelleniyor; tekrar deneyin")
 
     def capability_summary(self):
         """Per venue: which strategies it may trade and what blocks the others."""
@@ -1480,6 +1507,52 @@ class WidePaper:
         return self.cached(
             ("prices", v, a), HISTORY_TTL, lambda: self.source.prices(v, a)
         )
+
+    def price_research(self, at):
+        """History-only price statistics for the best research-only convergence pairs,
+        shown apart from execution eligibility. They leave funding out: the pair is
+        research only because its carry could not be bounded on its own evidence, so
+        the figures are never a net result and never open a trade."""
+
+        def stats(c):
+            try:
+                st = convergence_stats(
+                    self.price_history(c["long"], c["asset"]),
+                    self.price_history(c["short"], c["asset"]),
+                    at,
+                    self.cfg,
+                )
+            except Exception as ex:
+                return dict(error=str(ex)[:160])
+            return {
+                k: st[k]
+                for k in (
+                    "baseline",
+                    "widest",
+                    "cross7",
+                    "cross30",
+                    "episodes",
+                    "avg_close_hours",
+                    "max_close_hours",
+                    "history_days",
+                )
+            }
+
+        shown = 0
+        for c in self.conv_candidates:
+            if shown >= PRICE_RESEARCH_TOP or c["score"] <= 0:
+                break
+            if not c.get("research"):
+                continue
+            shown += 1
+            c["price_research"] = dict(
+                self.cached(
+                    ("price_research",) + self.pair_key(c),
+                    HISTORY_TTL,
+                    lambda c=c: stats(c),
+                ),
+                funding=PRICE_ONLY_NOTE,
+            )
 
     # --- entry ---------------------------------------------------------------
     def blocked(self, c):
@@ -2042,16 +2115,87 @@ class WidePaper:
         out["eligible"] = not out["reasons"]
         return out
 
-    def entry_funding_check(self, c):
-        """Re-read funding right before the fills; None when the entry still holds."""
+    def entry_rows(self):
+        """One fresh read of the market list for the checks right before an entry:
+        ({(venue, asset): row}, None), or (None, why) when it cannot be read."""
         try:
-            fresh = {
-                (r["venue"], r["asset"]): r
-                for r in self.source.market_rows()
-                if r.get("kind", "perp") == "perp"
-            }
+            rows = self.with_fees(self.source.market_rows())
         except Exception as ex:
-            return "Girişte funding yenilenemedi: " + str(ex)[:120]
+            return None, str(ex)[:120]
+        return {
+            (r["venue"], r["asset"]): r for r in rows if r.get("kind", "perp") == "perp"
+        }, None
+
+    def entry_evidence(self, c, fresh):
+        """Re-check both legs right before the fills; [] when the entry may go on.
+
+        The market must still be listed as ranked (same schedule, contract and order
+        rules, a fee no higher), its row fresh, its own evidence still valid (expired
+        or contradicted evidence blocks), and its book fresh, uncrossed and deep
+        enough inside the order's price limit for the planned quantity."""
+        at = now()
+        a = c["asset"]
+        why = []
+        for v, side in ((c["long"], "long"), (c["short"], "short")):
+            r = fresh.get((v, a))
+            if r is None:
+                why.append("%s: girişte piyasa listede yok" % v)
+                continue
+            ranked = self.rows.get((v, a)) or {}
+            if any(
+                r.get(k) != ranked.get(k) for k in ("symbol", "contract_size")
+            ) or lot_of(r) != lot_of(ranked):
+                why.append("%s: girişte piyasa kimliği / kontrat bilgisi değişti" % v)
+            if at - (r.get("received") or 0) > ROW_MAX_AGE:
+                why.append("%s: girişte piyasa verisi eski" % v)
+            if r.get("interval") != c["interval_" + side]:
+                why.append("%s: girişte funding aralığı değişti" % v)
+            if r.get("fee") is None:
+                why.append("%s: girişte ücret bilinmiyor" % v)
+            elif r["fee"] > c["fee_" + side] + 1e-12:
+                why.append("%s: girişte ücret yükseldi" % v)
+        if why:
+            return why
+        why = capabilities.pair_blockers(
+            self.capabilities, self.registry, c.get("strategy", "funding"), c, fresh, at
+        )
+        if why:
+            return ["Girişte kanıt geçersiz: " + w for w in why]
+        for v, buy in ((c["long"], True), (c["short"], False)):
+            try:
+                b = self.book(v, a)
+            except Exception as ex:
+                why.append("%s: girişte defter okunamadı: %s" % (v, str(ex)[:80]))
+                continue
+            bids, asks = b.get("bids") or [], b.get("asks") or []
+            if not bids or not asks:
+                why.append("%s: girişte defter boş" % v)
+            elif max(p for p, q in bids) >= min(p for p, q in asks):
+                why.append("%s: girişte defter kesişik" % v)
+            elif at - (b.get("received") or 0) > ENTRY_BOOK_MAX_AGE:
+                why.append("%s: girişte defter eski" % v)
+            else:
+                planned = c["entry_long"] if buy else c["entry_short"]
+                limit = planned * (1 + FILL_TOLERANCE if buy else 1 - FILL_TOLERANCE)
+                depth = sum(
+                    q
+                    for p, q in (asks if buy else bids)
+                    if (p <= limit if buy else p >= limit)
+                )
+                if depth < c["qty"] * (1 - 1e-9):
+                    why.append(
+                        "%s: girişte defter derinliği yetersiz · %.4g / %.4g"
+                        % (v, depth, c["qty"])
+                    )
+        return why
+
+    def entry_funding_check(self, c, fresh=None):
+        """Re-read funding right before the fills (or use the rows just re-read);
+        None when the entry still holds."""
+        if fresh is None:
+            fresh, error = self.entry_rows()
+            if fresh is None:
+                return "Girişte funding yenilenemedi: " + error
         at = now()
         l, s = fresh.get((c["long"], c["asset"])), fresh.get((c["short"], c["asset"]))
         if not l or not s or l.get("raw_rate") is None or s.get("raw_rate") is None:
@@ -2944,8 +3088,9 @@ class WidePaper:
             self.rfq_review = rfq_funding + rfq_conv
             if rows is not None:
                 self.update_registry(rows, at)
-            # A pair whose leg lacks a verified capability stays visible as research
-            # and is never deep-checked or executed.
+            # A pair whose leg lacks a verified capability, or whose market lacks its
+            # own evidence, stays visible as research and is never deep-checked or
+            # executed.
             stored = getattr(self.source, "stored_funding", None)
             for key, ranked in (
                 ("funding", self.candidates),
@@ -2967,15 +3112,12 @@ class WidePaper:
                                     at,
                                     at - PERSIST_DAYS * 86400,
                                 )
-                    why = capabilities.blockers(
-                        self.registry, key, (c["long"], c["short"])
-                    ) + [
-                        "%s: funding aralığı ödemelerle uyuşmuyor" % v
-                        for v in (c["long"], c["short"])
-                        if not self.capabilities.market_ok(v, c["asset"])
-                    ]
+                    why = capabilities.pair_blockers(
+                        self.capabilities, self.registry, key, c, self.rows, at
+                    )
                     if why:
                         c["research"] = why
+            self.price_research(at)
             self.assessed = []
             if (
                 entries
@@ -3062,18 +3204,27 @@ class WidePaper:
                             best, at, "skipped", ["Günün kalan kayıp bütçesi yetmiyor"]
                         )
                         continue
-                    stale = self.entry_funding_check(best)
+                    # Both legs are re-checked right before the fills: market,
+                    # evidence, fees and books, then the funding quote.
+                    fresh, error = self.entry_rows()
+                    stale = (
+                        ["Girişte piyasa verisi yenilenemedi: " + error]
+                        if fresh is None
+                        else self.entry_evidence(best, fresh)
+                        or [x for x in [self.entry_funding_check(best, fresh)] if x]
+                    )
                     if stale:
                         best["eligible"] = False
-                        best["reasons"].append(stale)
+                        best["reasons"] += stale
                         self.review["eligible"] -= 1
-                        self.reject(best, [stale], at)
+                        self.reject(best, stale, at)
                         self.decide(best, at, "rejected")
                         self.events(
                             "ENTRY_SKIP",
-                            stale,
+                            stale[0],
                             asset=best["asset"],
                             strategy=best["strategy"],
+                            reasons=stale,
                         )
                     else:
                         missed = self.open(best)
@@ -3471,7 +3622,7 @@ class WidePaper:
                 research=sum(bool(c.get("research")) for c in positive),
                 research_reasons=dict(
                     collections.Counter(
-                        r.split(": ", 1)[1]
+                        r.split(": ", 1)[1].split(" · ")[0]
                         for c in positive
                         for r in c.get("research") or []
                     ).most_common(4)

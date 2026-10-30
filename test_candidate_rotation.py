@@ -22,7 +22,7 @@ class RotationTests(unittest.TestCase):
             mock.patch.object(wide_paper, "now", lambda: self.clock),
             mock.patch.object(wide_paper, "rank", lambda rows, cfg, at: self.cands),
             mock.patch.object(wide_paper, "rank_spreads", lambda rows, at: []),
-            mock.patch.object(wide_paper.capabilities, "blockers", lambda *a: []),
+            mock.patch.object(wide_paper.capabilities, "pair_blockers", lambda *a: []),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -141,7 +141,7 @@ class EntryLoopTests(unittest.TestCase):
             mock.patch.object(wide_paper, "now", lambda: T0),
             mock.patch.object(wide_paper, "rank", lambda rows, cfg, at: self.cands),
             mock.patch.object(wide_paper, "rank_spreads", lambda rows, at: []),
-            mock.patch.object(wide_paper.capabilities, "blockers", lambda *a: []),
+            mock.patch.object(wide_paper.capabilities, "pair_blockers", lambda *a: []),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -159,7 +159,9 @@ class EntryLoopTests(unittest.TestCase):
             execution_drag=0.5,
             stress_loss=5.0,
         )
-        self.desk.entry_funding_check = lambda c: None
+        self.desk.entry_funding_check = lambda c, *a: None
+        # The entry loop is under test, not the market re-check before each entry.
+        self.desk.entry_evidence = lambda c, *a: []
         self.opened = []
         self.status = "OPEN"
 
