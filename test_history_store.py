@@ -300,6 +300,35 @@ class DeskSourceTests(unittest.TestCase):
         self.assertEqual(src.markets(), [("Bybit", "IRYS", "perp", 14400, "trade")])
         self.assertEqual(src.candles("Bybit", "IRYS", "perp", 3600, 7200), {3600: 1.0})
 
+    def test_stored_oracle_closes_keep_their_label(self):
+        from desk_analytics import DeskHistorySource
+
+        e = self.engine()
+        closes = {t * 3600: 1.0 for t in range(720)}
+        e.history = type(
+            "H", (), {"db": type("D", (), {"candles": lambda *a: closes})()}
+        )()
+        e.feed.meta = {
+            "Arcus": {"BTC": dict(price_type="oracle")},
+            "RISEx": {"BTC": dict(price_type="trade")},
+        }
+        src = DeskHistorySource(e)
+        kinds = {
+            v: src.stored_prices(v, "BTC")["price_type"]
+            for v in ("Arcus", "RISEx", "Lighter", "Bybit", "TxFlow")
+        }
+        # TxFlow has no live metadata here: its source is unknown, so not "trade".
+        self.assertEqual(
+            kinds,
+            dict(
+                Arcus="oracle",
+                RISEx="trade",
+                Lighter="trade",
+                Bybit="trade",
+                TxFlow="oracle",
+            ),
+        )
+
     def test_only_selected_assets_are_kept_in_memory(self):
         from desk_analytics import DeskHistorySource
 
