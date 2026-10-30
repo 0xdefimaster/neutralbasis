@@ -510,10 +510,34 @@ class WidePaperTests(unittest.TestCase):
             (
                 "Fark ortalama/kesişim bölgesine geldi; kapanış sonrası net hedef sağlandı",
                 "Fiyat farkı normal seviyesine döndü",
-                "Beklenen yakınsama kazancı alındı",
             ),
         )
         self.assertGreater(self.desk.closed[-1]["net"], 0)
+
+    def test_convergence_waits_for_the_normal_gap_not_the_entry_estimate(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        d = p["decision"]
+        # Three quarters of the gap have closed: the after-close net is past the entry
+        # estimate (which keeps a risk reserve), but the gap is still above normal.
+        self.clock = T0 + 3600
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        rest = 100 * math.exp(d["entry_gap"] / 4)
+        self.src.books[("Hyperliquid", "BTC")] = book(100.0, self.clock)
+        self.src.books[("Binance", "BTC")] = book(rest, self.clock)
+        self.desk.cycle(entries=False)
+        self.assertEqual(len(self.desk.positions), 1)
+        self.assertGreater(p["net_if_closed"], d["net"])
+        self.assertGreater(p["live_gap"], d["target_gap"] + 0.0002)
+        # Back at the normal gap it closes.
+        self.clock += 3600
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        for v in ("Hyperliquid", "Binance"):
+            self.src.books[(v, "BTC")] = book(100.0, self.clock)
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertGreater(self.desk.closed[-1]["net"], p["decision"]["net"])
 
     def test_persistent_basis_never_qualifies(self):
         # Dear venue always 30bp rich and barely moves: today's 60bp has no history
@@ -613,28 +637,29 @@ class WidePaperTests(unittest.TestCase):
             self.desk.closed[0]["close_reason"], "Funding avantajı tersine döndü"
         )
 
-    # --- funding profit lock -------------------------------------------------------
-    def test_profit_lock_closes_positive_after_pullback(self):
+    # --- funding exits follow the carry ----------------------------------------------
+    def test_price_windfall_alone_does_not_close_the_carry(self):
         self.setup_pair()
         self.desk.cycle()
-        p = self.desk.positions[0]
-        p["peak_net"] = 5.0
-        p["decision"]["net"] = 100.0  # isolate the lock from the profit target
-        p["funding"] += 3.0
-        self.desk.wallet["cash"] += 3.0
-        self.desk.cycle(entries=False)
-        self.assertEqual(self.desk.positions, [])
-        closed = self.desk.closed[-1]
-        self.assertEqual(
-            closed["close_reason"], "Kâr kilitlendi: kazanç geri verilmeye başladı"
-        )
-        self.assertGreater(closed["net"], 0)
-
-    def test_no_lock_before_any_gain(self):
-        self.setup_pair()
-        self.desk.cycle()
+        (p,) = self.desk.positions
+        # Prices jump in the position's favour (short leg falls) while the funding
+        # advantage lasts: the hedge's noise is not a reason to leave.
+        self.clock += 600
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.src.books[("Hyperliquid", "BTC")] = book(100.0, self.clock)
+        self.src.books[("Binance", "BTC")] = book(99.0, self.clock)
         self.desk.cycle(entries=False)
         self.assertEqual(len(self.desk.positions), 1)
+        self.assertGreater(p["net_if_closed"], p["decision"]["net"])
+        self.assertGreater(p["remaining_funding_fraction"], 0)
+
+    def test_retired_profit_lock_setting_is_dropped(self):
+        self.store.put("wide_config", dict(wide_lock_trail=0.5, wide_size=700.0))
+        desk = WidePaper(self.store, self.src, sleep=lambda s: None)
+        self.assertNotIn("wide_lock_trail", desk.cfg)
+        self.assertEqual(desk.cfg["wide_size"], 700.0)
+        with self.assertRaises(ValueError):
+            desk.update_config({"wide_lock_trail": 0.5})
 
     # --- final spec guards ---------------------------------------------------------
     def test_entry_reason_and_strategy_recorded(self):
@@ -1154,7 +1179,7 @@ class WidePaperTests(unittest.TestCase):
         self.src.books[("Binance", "BTC")] = dict(
             bids=[(99.99, 1000.0)], asks=[(100.01, 5.0)], received=T0
         )
-        self.desk.close(p, "Kâr hedefi alındı")
+        self.desk.close(p, "Kullanıcı paper kapatma talebi")
         long, short = p["legs"]
         self.assertEqual((long["qty"], short["qty"]), (7.0, 7.0))
         self.assertEqual((p["status"], p["exposure"]), ("RECOVERY", None))
