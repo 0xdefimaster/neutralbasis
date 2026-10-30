@@ -167,7 +167,10 @@ class Lighter(Client):
                 stats[k] = stats.get(k, 0) + v
             out += rows
             left = right
-        return R.dedupe(out, "settled_at"), stats
+        rows, merged = R.dedupe_settlements(out)
+        for k, v in merged.items():
+            stats[k] = stats.get(k, 0) + v
+        return rows, stats
 
     def parse_settlements(self, obj, ctx, at, sha):
         rows = []

@@ -104,6 +104,7 @@ def result(x, s, status=None, expected=None):
         settled_rate_raw=s["settled_rate_raw"] if s else None,
         settled_rate=r,
         settled_direction_raw=s.get("direction_raw") if s else None,
+        settlement_revision=s.get("revision", 1) if s else None,
         ratio=ratio,
         comparison_status=status,
         snapshot_raw_sha256=x["raw_sha256"],

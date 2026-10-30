@@ -19,7 +19,7 @@ import urllib.parse
 
 from .clients import LABELS, make_client
 from .clients.base import CONFLICT, DECLARED, OBSERVED, UNKNOWN, VERIFIED
-from .clients.records import REQUIRED
+from .clients.records import REQUIRED, record_key
 from .matching import observed_interval
 from .storage import VENUE_DIRS, iso, sha256
 
@@ -46,12 +46,15 @@ def verify_hashes(store):
 
 
 def verify_schemas(store):
-    """[(kind, file, line, missing fields)] for normalized records missing a field."""
-    bad, count = [], 0
+    """([(kind, file, line, missing fields)], records, [(kind, file, line)] of lines
+    cut off by a crash, {kind: lines repeating a record key}). Repeated keys come from
+    a crash between a line and its index row; readers keep one record per key."""
+    bad, count, torn, repeated = [], 0, [], {}
     for kind, need in REQUIRED.items():
         base = os.path.join(store.root, "normalized", kind)
         if not os.path.isdir(base):
             continue
+        seen = set()
         for d in sorted(os.listdir(base)):
             for name in sorted(os.listdir(os.path.join(base, d))):
                 path = os.path.join(base, d, name)
@@ -63,12 +66,18 @@ def verify_schemas(store):
                         try:
                             r = json.loads(line)
                         except ValueError:
-                            bad.append((kind, name, i, ["bozuk JSON"]))
+                            # A line cut off by a crash; its record is not used.
+                            torn.append((kind, name, i))
                             continue
                         miss = [k for k in need if k not in r]
                         if miss:
                             bad.append((kind, name, i, miss))
-    return bad, count
+                            continue
+                        key = (r["venue"], record_key(kind, r))
+                        if key in seen:
+                            repeated[kind] = repeated.get(kind, 0) + 1
+                        seen.add(key)
+    return bad, count, torn, repeated
 
 
 # --- replay -----------------------------------------------------------------------
@@ -109,7 +118,7 @@ def signature(kind, r):
     if kind == "settlement":
         return (
             mid,
-            int(round(r["settled_at"])),
+            int(round(r.get("settled_at_api", r["settled_at"]))),
             str(r["settled_rate_raw"]),
             r["direction_raw"],
         )
@@ -245,7 +254,8 @@ def coverage(store, cfg, now=None):
         client = make_client(v, store, cfg)
         markets = store.checkpoint("markets:" + v) or []
         snaps = store.records("funding_snapshot", v)
-        paid = store.records("settlement", v)
+        paid = store.latest("settlement", v)
+        corrections = store.records("settlement_correction", v)
         candles = store.records("candle", v)
         books = store.records("orderbook", v)
         comps = store.comparisons(v)
@@ -321,6 +331,11 @@ def coverage(store, cfg, now=None):
                 ),
                 orderbook_snapshots=sum(str(b["market_id"]) == key for b in books),
                 duplicate_payments=stats.get("duplicates", 0),
+                conflicting_payments=sum(
+                    p.get("settled_rate_status") == "CONFLICT" for p in mp
+                ),
+                corrected_payments=sum(str(c["market_id"]) == key for c in corrections),
+                jitter_merged=stats.get("jitter_merged", 0),
                 out_of_order=stats.get("out_of_order", 0)
                 + stats.get("candle_out_of_order", 0),
                 bad_timestamps=sum(t > now + 300 or t < 1_420_000_000 for t in times),
@@ -349,7 +364,30 @@ def coverage(store, cfg, now=None):
             )
         venue["unverified_fields"] = unverified_fields(v, client, snaps)
         out["venues"][v] = venue
-    return out
+    return label_source(out, store.checkpoint("data_source"))
+
+
+LIVE = "LIVE_PUBLIC_API"
+EVIDENCE = (VERIFIED, OBSERVED, CONFLICT)
+
+
+def label_source(cov, source):
+    """Only data recorded from the real public APIs may carry an evidence status. In
+    a folder recorded with a test transport (or with no recorded session) every
+    VERIFIED / OBSERVED / CONFLICT is prefixed, so it can never be read as real."""
+    cov["data_source"] = source
+    cov["live"] = source == LIVE
+    if cov["live"]:
+        return cov
+    prefix = "MOCK:" if source and source.startswith("MOCK") else "KAYNAKSIZ:"
+    for x in cov["venues"].values():
+        if x["api"]["requests"]:
+            x["connection"] += " (%s gerçek borsa bağlantısı değil)" % prefix[:-1]
+        for m in x["markets"].values():
+            for k in ("funding_interval", "rate_unit", "direction"):
+                if m[k] in EVIDENCE:
+                    m[k] = prefix + m[k]
+    return cov
 
 
 def unverified_fields(v, client, snaps):
@@ -389,7 +427,7 @@ def comparison_index(store):
         }
     jsonl = {
         (c["venue"], str(c["market_id"]), int(round(c["settled_at"])))
-        for c in store.records("comparison")
+        for c in store.latest("comparison")
         if c.get("settled_at") is not None
     }
     if any(t is None for _, _, t in index):
@@ -405,9 +443,14 @@ def comparison_index(store):
 def consistency(store, cfg):
     bad_hashes, raw_count = verify_hashes(store)
     comp = comparison_index(store)
-    bad_schemas, rec_count = verify_schemas(store)
+    bad_schemas, rec_count, torn, repeated = verify_schemas(store)
     replayed, replay_problems = replay(store, cfg)
+    settlements = settlement_index(store)
     return dict(
+        data_source=store.checkpoint("data_source"),
+        torn_lines=[dict(kind=k, file=f, line=i) for k, f, i in torn],
+        repeated_keys=repeated,
+        settlement_index=settlements,
         raw_files=raw_count,
         raw_hash_failures=[dict(path=p, problem=x) for p, x in bad_hashes],
         records=rec_count,
@@ -423,8 +466,34 @@ def consistency(store, cfg):
         ok=not bad_hashes
         and not bad_schemas
         and not replay_problems
-        and not comp["problems"],
+        and not comp["problems"]
+        and not settlements["problems"],
     )
+
+
+def settlement_index(store):
+    """The per-payment index must hold exactly the latest revision of every
+    normalized settlement record, one row per (venue, market, settled_at)."""
+    with store.lock:
+        index = {
+            (v, m, t): r
+            for v, m, t, r in store.db.execute(
+                "select venue, market_id, settled_at, revision from settlement_index"
+            )
+        }
+    jsonl = {
+        (r["venue"], str(r["market_id"]), int(round(r["settled_at"]))): r.get(
+            "revision", 1
+        )
+        for r in store.latest("settlement")
+    }
+    problems = []
+    if index != jsonl:
+        problems.append(
+            "dizin ile JSONL farklı: dizinde fazla %d, JSONL'de fazla %d"
+            % (len(set(index) - set(jsonl)), len(set(jsonl) - set(index)))
+        )
+    return dict(rows=len(index), events=len(jsonl), problems=problems)
 
 
 # --- report -----------------------------------------------------------------------
@@ -433,8 +502,13 @@ def text_report(cov, cons=None):
         "PHASE 1 LOCAL DATA REPORT",
         "Üretim: %s (UTC). Yalnızca bu klasördeki kayıtlardan üretildi."
         % cov["generated_iso"],
-        "",
+        "Veri kaynağı: %s" % (cov.get("data_source") or "kayıt oturumu yok"),
     ]
+    if not cov.get("live"):
+        lines.append(
+            "!!! BU KLASÖR GERÇEK BORSA VERİSİ İÇERMİYOR: durumlar kanıt değildir. !!!"
+        )
+    lines.append("")
     for v, x in cov["venues"].items():
         a = x["api"]
         lines.append("%s — %s" % (x["label"], x["connection"]))
@@ -459,6 +533,12 @@ def text_report(cov, cons=None):
                 "  - Funding snapshots: %d" % m["funding_snapshots"],
                 "  - Settled payments: %d (kapsam %s%%)"
                 % (m["settled_payments"], m["funding_coverage"]),
+                "  - Düzeltilen ödeme: %d · çelişkili ödeme: %d · zaman kayması birleştirilen: %d"
+                % (
+                    m["corrected_payments"],
+                    m["conflicting_payments"],
+                    m["jitter_merged"],
+                ),
                 "  - Published/settled comparisons: %d %s"
                 % (m["comparisons"], m["comparison_statuses"] or ""),
                 "  - 1h candles: %d / %d (%.1f%%)"
@@ -504,6 +584,18 @@ def text_report(cov, cons=None):
                     else ""
                 ),
             ),
+            "  Ödeme dizini: %d satır, %d ödeme%s"
+            % (
+                cons["settlement_index"]["rows"],
+                cons["settlement_index"]["events"],
+                (
+                    (" · " + "; ".join(cons["settlement_index"]["problems"]))
+                    if cons["settlement_index"]["problems"]
+                    else ""
+                ),
+            ),
+            "  Kesik satır (çökme): %d · tekrarlanan anahtar: %s"
+            % (len(cons["torn_lines"]), cons["repeated_keys"] or 0),
             "  Yeniden ayrıştırılan yanıt: %d, sorun: %d"
             % (cons["replayed_responses"], len(cons["replay_problems"])),
         ]

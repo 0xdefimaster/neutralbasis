@@ -151,7 +151,7 @@ class FundingSemanticsTests(Base):
         cov = coverage(self.recorder.store, self.cfg, self.clock())
         self.assertEqual(
             cov["venues"]["Hyperliquid"]["markets"]["BTC"]["funding_interval"],
-            "VERIFIED",
+            "MOCK:VERIFIED",
         )
         # A venue paying every 8 hours against a declared hour is a conflict.
         self.dir2 = tempfile.TemporaryDirectory()
@@ -161,7 +161,7 @@ class FundingSemanticsTests(Base):
         self.make().run("once")
         cov = coverage(self.recorder.store, self.cfg, self.clock())
         m = cov["venues"]["Extended"]["markets"]["BTC"]
-        self.assertEqual(m["funding_interval"], "CONFLICT")
+        self.assertEqual(m["funding_interval"], "MOCK:CONFLICT")
         self.assertEqual(m["observed_interval_seconds"], 28800)
 
 
@@ -283,7 +283,9 @@ class LiveObservationTests(Base):
         for v in self.venues:
             m = cov["venues"][v]["markets"]["BTC"]
             self.assertGreaterEqual(m["comparison_statuses"].get("MATCHED", 0), 3, v)
-            self.assertEqual(m["rate_unit"], "OBSERVED")  # never VERIFIED: docs unread
+            self.assertEqual(
+                m["rate_unit"], "MOCK:OBSERVED"
+            )  # never VERIFIED: docs unread
             self.assertEqual(m["sign_consistency"], 100.0)
         c = rec.store.comparisons("Lighter")[0]
         self.assertTrue(c["snapshot_raw_sha256"] and c["settlement_raw_sha256"])
@@ -295,7 +297,7 @@ class LiveObservationTests(Base):
         m = coverage(rec.store, self.cfg, self.clock())["venues"]["Extended"][
             "markets"
         ]["BTC"]
-        self.assertEqual(m["rate_unit"], "CONFLICT")
+        self.assertEqual(m["rate_unit"], "MOCK:CONFLICT")
         self.assertAlmostEqual(m["published_settled_ratio"], 8.0)
 
     def test_opposite_signs_mark_the_direction_conflicted(self):
@@ -304,7 +306,7 @@ class LiveObservationTests(Base):
         m = coverage(rec.store, self.cfg, self.clock())["venues"]["Hyperliquid"][
             "markets"
         ]["BTC"]
-        self.assertEqual(m["direction"], "CONFLICT")
+        self.assertEqual(m["direction"], "MOCK:CONFLICT")
         self.assertEqual(m["sign_consistency"], 0.0)
 
 
@@ -422,10 +424,11 @@ class HttpTests(Base):
         self.assertFalse(st["Hyperliquid"]["connected"])
         self.assertTrue(st["Extended"]["connected"])
         cov = coverage(rec.store, self.cfg, self.clock())
-        self.assertEqual(
-            cov["venues"]["Hyperliquid"]["connection"], "BAĞLANTI KURULAMADI"
+        self.assertTrue(
+            cov["venues"]["Hyperliquid"]["connection"].startswith("BAĞLANTI KURULAMADI")
         )
-        self.assertEqual(cov["venues"]["Extended"]["connection"], "BAĞLANDI")
+        self.assertTrue(cov["venues"]["Extended"]["connection"].startswith("BAĞLANDI"))
+        self.assertIn("MOCK", cov["venues"]["Extended"]["connection"])
 
     def test_secrets_are_never_recorded_and_only_public_reads_are_made(self):
         self.assertEqual(

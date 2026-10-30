@@ -126,7 +126,10 @@ class Extended(Client):
             dict(startTime=int(start * 1000), endTime=int(end * 1000), limit=1000),
         )
         rows, stats = self.parse_settlements(obj, ctx, at, sha)
-        return R.dedupe(rows, "settled_at"), stats
+        rows, merged = R.dedupe_settlements(rows)
+        for k, v in merged.items():
+            stats[k] = stats.get(k, 0) + v
+        return rows, stats
 
     def parse_settlements(self, obj, ctx, at, sha):
         rows = []
