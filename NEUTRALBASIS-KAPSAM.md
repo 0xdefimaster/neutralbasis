@@ -287,3 +287,41 @@ Bu sırada bir hata düzeltildi: canlı mum okuması başarısız olunca kayıtl
   - Her sıfırlama ve çalışma alanı başlangıcı dönem satırını günceller.
 - **Mutabakat:** kapanan bir işlemin olayları toplamı netine eşit olmalı. Dönem raporunda "Muhasebe defteri işlemlerle tutarlı" ölçütü bunu kontrol eder.
 - **Kaynak:** paper motorunun çalışan durumu hâlâ kv JSON'da. Normalleştirilmiş tablolar şimdilik denetim için tutulan bir aynadır; motorun ana kaynağı yapılmadı.
+
+## Piyasa düzeyinde kanıt (Faz 0.7)
+Borsa düzeyindeki yetenek durumu artık gerekli ama yeterli değil. Bir borsa durumu birçok piyasanın özetidir; BTC'de doğrulanan bir borsa ETH piyasası için hiçbir şey kanıtlamaz. Bir işlemin her bacağı kendi piyasasının kanıtını taşımalı (`Registry.market_blockers`, `capabilities.pair_blockers`).
+- **Düzeltilen hata:** `market_ok` kayıt yokken, ödeme sayısı yetersizken ya da borsayı başka piyasalar "kısmi" yapmışken de geçiyordu. Artık yalnızca o piyasanın kendi ödemeleri sayılmış ve yayımlanan aralıkla uyuşmuşsa geçer.
+- **Her bacakta aranan kanıt** (eksik, yetersiz, süresi dolmuş ya da çelişkili kanıt bacağı engeller):
+  - bu taramada taze satır; kontrat büyüklüğü, ücret, funding aralığı ve oranı bilinir;
+  - dönemsel funding modeli;
+  - piyasanın kendi kayıtlı ödemeleri: en az 6 ödeme, ortanca aralık yayımlanan aralıkla %5 içinde, kontrol 24 saatten eski değil, yayımlanan aralık kontrolden beri değişmemiş;
+  - piyasanın kendi 30 günlük geçmişi tamam; geçmiş kaydı 24 saatten eski değil;
+  - funding işareti kanıtı (aşağıda).
+- **Funding işareti, kanıt düzeyleri ayrı tutulur:**
+  1. Borsanın belgelediği kural: bağlayıcı beyanı. Borsa belgeleri bu ortamdan okunamadı (ağ politikası belge alan adlarına izin vermiyor); kaynak alanı bunu açıkça yazar.
+  2. Prim yönüyle uyum: borsa düzeyinde sezgisel bir kontrol, ödeme kanıtı değil. Ters çıkarsa borsanın tüm piyasaları engellenir.
+  3. Yayımlanan oran = gerçekleşen ödeme (piyasa bazında): her ödemeden önce yayımlanan son oran saklanır; ödeme kaydedilince ikisi karşılaştırılır. En az 3 karşılaştırma, %80 aynı yön ve ortanca büyüklük oranı 0,25–4 arası gerekir. Ters yön "çelişki", farklı birim (ör. saatlik ödemeye 8 saatlik oran) "birim uyuşmazlığı" olarak engeller.
+  4. Gerçek ödeme nakdi ve 5. hesapta gerçekleşen funding: hesap bağlantısı olmadığı için yok. Bu yüzden funding işareti hiçbir zaman "tam" sayılmaz; güven en fazla "orta"dır.
+- **Funding modelleri:** dönemsel ödeme, sürekli tahakkuk, borsaya özel dönem, bilinmiyor. Her modelin oran anlamı, yön kuralı, ödeme sıklığı, geçmiş kaydının anlamı ve nakit hesabı yazılıdır. Masa yalnız dönemsel ödemeyi hesaplayabildiği için yalnız o model işlem açabilir.
+  - Dönemsel ödeme: Hyperliquid, Lighter Core, Lighter RH, Extended.
+  - Paradex sürekli tahakkuk: ödeme aralığı kuralı uygulanmaz, yalnız araştırma.
+  - RISEx, TxFlow, Arcus, Variational ve beyanı olmayan borsalar (CEX'ler dahil) için model bilinmiyor: yalnız araştırma.
+- **Strateji uygunluğu:** funding ve yakınsama aynı funding kanıtını ister. Yakınsama bacakları günlerce tutar ve her ödemede taşıma maliyeti öder; giriş, ekleme ve çıkış testleri bu maliyeti işaretli oran ve bacağın kendi takvimiyle hesaplar. Aralık, işaret ya da gerçekleşmiş geçmiş yoksa maliyet sınırlanamaz.
+  - Araştırmadaki en iyi 3 yakınsama çiftinin fiyat istatistiği (en geniş açılma, 7/30 günlük kesişim, ortalama dönüş süresi) ayrıca gösterilir. Bu sayılar funding içermez, net sonuç değildir ve işlem açmaz.
+  - "Yalnız fiyat" yürütme modu yoktur.
+- **Girişten hemen önce yeniden kontrol:** piyasa listesi bir kez daha okunur ve her iki bacak için şunlara bakılır:
+  - aynı piyasa kimliği, kontrat büyüklüğü ve emir kuralları;
+  - aynı funding aralığı;
+  - ücret bilinir ve yükselmemiş;
+  - satır taze;
+  - piyasa kanıtı hâlâ geçerli;
+  - defter taze (30 sn), çapraz değil ve fiyat sınırı içinde planlanan miktar kadar derin.
+
+  Biri tutmazsa giriş reddedilir ve nedeni karara yazılır.
+- **Kalıcılık:** piyasa kanıtı yeniden başlatmadan sonra korunur ve kendi saatine göre süresi dolar: aralık kayıtları (ödeme sayısıyla), yayımlanan oran karşılaştırmaları, bekleyen gözlemler, geçmiş kayıtları. Kanıt en fazla dakikada bir yazılır; ani bir kapanışta en çok son dakikanınki kaybolur.
+- **API:** `GET /api/market_evidence?venue=&asset=`, bir piyasanın modelini, satırını, aralık, geçmiş ve işaret kanıtını, güvenini ve engellerini döner. `/api/capabilities` yanıtına funding modelleri, işaret düzeyleri ve eşikler eklendi.
+- **Panel:** Borsalar sayfasındaki yetenek kartına "Funding modeli" satırı eklendi; açıklama bu kuralları anlatıyor.
+- **Ne zaman uygun olur:** bir piyasa işlem açabilmek için kendi kanıtını biriktirmeli:
+  - saatlik piyasalarda en az 3 ödeme karşılaştırması gerekir; bu birkaç saat sürer;
+  - 8 saatlik piyasalarda bir günden fazla sürer;
+  - yeni sürüm ilk açıldığında bu kanıt henüz olmadığı için bir süre hiçbir çift işlem açmayabilir. Bu beklenen davranıştır.

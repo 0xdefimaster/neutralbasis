@@ -507,15 +507,33 @@ class DeskEngine(RiskEngine):
 
     def capability_registry(self):
         """The full capability registry: every venue, capability, status and evidence."""
-        from capabilities import CAPABILITIES, LABELS, STATUSES, REQUIRED
+        import capabilities as cap
 
         return dict(
             venues=self.wide_paper.registry,
-            capabilities=list(CAPABILITIES),
-            labels=LABELS,
-            statuses=list(STATUSES),
-            required=REQUIRED,
+            capabilities=list(cap.CAPABILITIES),
+            labels=cap.LABELS,
+            statuses=list(cap.STATUSES),
+            required=cap.REQUIRED,
+            funding_models={v: cap.funding_model(v) for v in cap.PERP_DEXES},
+            executable_models=list(cap.EXECUTABLE_MODELS),
+            sign_levels=cap.SIGN_LEVELS,
+            market_rules=dict(
+                fresh_seconds=cap.FRESH,
+                interval_min_payments=cap.INTERVAL_MIN_PAYMENTS,
+                interval_tolerance=cap.INTERVAL_TOLERANCE,
+                evidence_expiry_seconds=cap.EVIDENCE_EXPIRY,
+                history_expiry_seconds=cap.HISTORY_EXPIRY,
+                published_min=cap.PUBLISHED_MIN,
+                published_window_seconds=cap.PUBLISHED_WINDOW,
+                sign_agree=cap.SIGN_AGREE,
+                ratio_band=list(cap.RATIO_BAND),
+            ),
         )
+
+    def market_evidence(self, venue, asset):
+        """One market's own evidence: model, row, interval, history, sign levels."""
+        return self.wide_paper.market_evidence(venue, asset)
 
     def funding_matrix(self):
         return self.matrix.get()
