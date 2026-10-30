@@ -325,3 +325,6 @@ Borsa düzeyindeki yetenek durumu artık gerekli ama yeterli değil. Bir borsa d
   - saatlik piyasalarda en az 3 ödeme karşılaştırması gerekir; bu birkaç saat sürer;
   - 8 saatlik piyasalarda bir günden fazla sürer;
   - yeni sürüm ilk açıldığında bu kanıt henüz olmadığı için bir süre hiçbir çift işlem açmayabilir. Bu beklenen davranıştır.
+
+## Yerel piyasa kanıtı kaydedici (Faz 1)
+`tools/phase1_recorder/`: Hyperliquid, Lighter Core, Lighter RH ve Extended için public piyasa verisini (piyasa bilgisi, anlık funding, gerçekleşmiş funding, 1h mumlar, defter) ham ve normalleştirilmiş olarak kaydeden bağımsız araç. Yayımlanan oranı sonraki ödemeyle eşleştirir; kapsam ve tutarlılık raporu ile tek ZIP paketi üretir. Emir göndermez, hesap okumaz, motoru başlatmaz, motorun veritabanına yazmaz. Kurulum ve kullanım: `PHASE-1-LOCAL-RECORDER.md`. Gerçek veri ilk olarak kullanıcının bilgisayarında toplanacak; bulut ortamı borsa API'lerine bağlanamıyor.
