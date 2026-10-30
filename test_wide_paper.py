@@ -10,7 +10,8 @@ from wide_paper import (
     next_payment,
     pair_stats,
     crossings,
-    closing_times,
+    excursions,
+    stop_breaches,
 )
 
 T0 = 1_000 * 86400  # aligned to the hour and to 8h
@@ -440,7 +441,11 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.cfg["wide_min_history_days"], 30)
 
     # --- convergence strategy ----------------------------------------------------
-    def setup_convergence(self, basis=0.0, amplitude=0.0035, gap=0.006, drift=0.0):
+    def setup_convergence(
+        self, basis=0.0, amplitude=0.0035, gap=0.0031, drift=0.0, grow=0.0, spikes=()
+    ):
+        # Default: the gap swings ±35bp around its normal level every 12h, and today it
+        # is 31bp away (88% of the widest move, all three tiers).
         end = bot.hour(T0)
         hours = list(range(end - 730 * 3600, end, 3600))
         base = {t: 100 * (1 + 0.03 * math.sin(i / 7)) for i, t in enumerate(hours)}
@@ -453,7 +458,10 @@ class WidePaperTests(unittest.TestCase):
                 * math.exp(
                     basis
                     + drift * i / len(hours)
-                    + amplitude * math.sin(2 * math.pi * i / 12)
+                    + amplitude
+                    * (1 + grow * i / len(hours))
+                    * math.sin(2 * math.pi * i / 12)
+                    + dict(spikes).get(i, 0.0)
                 )
                 for i, t in enumerate(hours)
             },
@@ -472,12 +480,27 @@ class WidePaperTests(unittest.TestCase):
             (i * 3600, x) for i, x in enumerate([0.001, -0.001, 0.001, 0, -0.001])
         ]
         self.assertEqual(crossings(series, 0.0001)[0], 3)
-        self.assertEqual(
-            closing_times(
-                [(0, 0.0), (3600, 0.003), (7200, 0.001), (10800, 0.0)], 0.002, 0.0002
-            ),
-            [2.0],
-        )
+        h = 3600
+        moves = [(0, 0.0), (h, 0.003), (2 * h, 0.001), (3 * h, 0.0)]
+        # Back in 2 hours; a move that took 5 hours misses a 4-hour cap; one still
+        # open for under the cap is not decided yet.
+        slow = [(4 * h, 0.003), (9 * h, 0.0), (10 * h, 0.003), (12 * h, 0.003)]
+        self.assertEqual(excursions(moves, 0.002, 0.0002, 4), ([2.0], 0))
+        self.assertEqual(excursions(moves + slow, 0.002, 0.0002, 4), ([2.0], 1))
+        late = moves + [(4 * h, 0.003), (9 * h, 0.003)]
+        self.assertEqual(excursions(late, 0.002, 0.0002, 4), ([2.0], 1))
+
+    def test_stop_breaches_count_separate_moves_past_the_first_half(self):
+        h = 3600
+        first = [(i * h, x) for i, x in enumerate([0.0, 0.002, 0.0, 0.001])]
+        second = [
+            (i * h, x) for i, x in enumerate([0.0, 0.0023, 0.0024, 0.0, 0.003], 4)
+        ]
+        top, count = stop_breaches(first + second, 0.10)
+        self.assertEqual(top, 0.002)
+        # 0.0023 and 0.0024 are one move past 0.0022; 0.003 after a return is another.
+        self.assertEqual(count, 2)
+        self.assertEqual(stop_breaches(first + first, 0.10)[1], 0)
 
     def test_convergence_opens_long_cheap_short_dear_5x(self):
         self.setup_convergence()
@@ -519,8 +542,8 @@ class WidePaperTests(unittest.TestCase):
         self.desk.cycle()
         (p,) = self.desk.positions
         d = p["decision"]
-        # Three quarters of the gap have closed: the after-close net is past the entry
-        # estimate (which keeps a risk reserve), but the gap is still above normal.
+        # Three quarters of the gap have closed and the trade is in profit, but the gap
+        # is still above normal: it waits.
         self.clock = T0 + 3600
         self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
         rest = 100 * math.exp(d["entry_gap"] / 4)
@@ -528,7 +551,7 @@ class WidePaperTests(unittest.TestCase):
         self.src.books[("Binance", "BTC")] = book(rest, self.clock)
         self.desk.cycle(entries=False)
         self.assertEqual(len(self.desk.positions), 1)
-        self.assertGreater(p["net_if_closed"], d["net"])
+        self.assertGreater(p["net_if_closed"], 0)
         self.assertGreater(p["live_gap"], d["target_gap"] + 0.0002)
         # Back at the normal gap it closes.
         self.clock += 3600
@@ -537,21 +560,21 @@ class WidePaperTests(unittest.TestCase):
             self.src.books[(v, "BTC")] = book(100.0, self.clock)
         self.desk.cycle(entries=False)
         self.assertEqual(self.desk.positions, [])
-        self.assertGreater(self.desk.closed[-1]["net"], p["decision"]["net"])
+        self.assertGreater(self.desk.closed[-1]["net"], 0)
 
     def test_persistent_basis_never_qualifies(self):
         # Dear venue always 30bp rich and barely moves: today's 60bp has no history
         # of excursions that came back.
-        self.setup_convergence(basis=0.003, amplitude=0.0003)
+        self.setup_convergence(basis=0.003, amplitude=0.0003, gap=0.006)
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
         reasons = " ".join(self.desk.assessed[0]["reasons"])
-        self.assertRegex(reasons, "kesişim yok|kapanışı yetersiz")
+        self.assertRegex(reasons, "kesişim yok|en büyük açılmanın üstünde")
 
     def test_constant_basis_reverts_to_its_normal_gap(self):
-        # 0.99 vs 0.98 style: the dear venue is normally 30bp rich and swings around
-        # that; today it is 90bp rich, so the trade targets ~30bp, not zero.
-        self.setup_convergence(basis=0.003, gap=0.009)
+        # 0.99 vs 0.98 style: the dear venue is normally 30bp rich and swings ±35bp
+        # around that; today it is 61bp rich, so the trade targets ~30bp, not zero.
+        self.setup_convergence(basis=0.003, gap=0.0061)
         self.desk.cycle()
         self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
         d = self.desk.positions[0]["decision"]
@@ -564,6 +587,137 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(self.desk.positions, [])
         reasons = " ".join(self.desk.assessed[0]["reasons"])
         self.assertIn("Normal fiyat farkı kayıyor", reasons)
+
+    # --- tiers and the stop past the widest move ------------------------------------
+    def move_to(self, dev, after=600):
+        """Books (and rows) at a gap `dev` away from the fixture's normal level."""
+        self.clock += after
+        self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
+        self.src.books[("Hyperliquid", "BTC")] = book(100.0, self.clock)
+        self.src.books[("Binance", "BTC")] = book(100 * math.exp(dev), self.clock)
+
+    def test_tiers_take_more_risk_closer_to_the_widest_move(self):
+        self.desk.update_config({"wide_size": 100000.0})
+        sizes = {}
+        for gap in (0.0019, 0.0031):  # 54% and 88% of the widest 35bp move
+            self.setup_convergence(gap=gap)
+            self.desk.candidates = wide_paper.rank_spreads(self.src.rows, T0)
+            x = self.desk.assess(self.desk.candidates[0])
+            self.assertTrue(x["eligible"], x["reasons"])
+            sizes[gap] = x
+        low, high = sizes[0.0019], sizes[0.0031]
+        self.assertEqual([t["filled"] for t in low["tiers"]], [True, False, False])
+        self.assertEqual([t["filled"] for t in high["tiers"]], [True, True, True])
+        budget = self.desk.risk_budget()
+        self.assertAlmostEqual(low["budget"], 0.2 * budget)
+        self.assertAlmostEqual(high["budget"], budget)
+        # Sized for the hard stop: the loss there plus fees and spread fits the share.
+        for x in (low, high):
+            hard = x["hard_stop_gap"]
+            self.assertAlmostEqual(hard, x["baseline"] + 1.25 * x["widest"])
+            worst = (
+                x["entry_fee"] + x["exit_fee"] + x["execution_drag"] + x["stress_loss"]
+            )
+            self.assertLessEqual(worst, x["budget"] + 1e-6)
+        self.assertGreater(high["size"], 5 * low["size"])
+
+    def test_wider_gap_adds_the_next_tiers_to_the_same_position(self):
+        self.desk.update_config({"wide_size": 100000.0})
+        self.setup_convergence(gap=0.0019)
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        first_qty = [leg["qty"] for leg in p["legs"]]
+        opened = self.clock
+        self.move_to(0.0032)
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1)
+        d = p["decision"]
+        self.assertEqual([t["filled"] for t in d["tiers"]], [True, True, True])
+        long, short = p["legs"]
+        self.assertAlmostEqual(long["qty"], short["qty"])
+        self.assertGreater(long["qty"], 3 * first_qty[0])
+        self.assertEqual(len(long["adds"]), 1)
+        self.assertAlmostEqual(d["qty"], long["qty"])
+        # The short leg's average entry moved up toward the wider gap.
+        self.assertGreater(short["entry"], 100 * math.exp(0.0019) - 0.02)
+        # Funding before the add is settled on what was held then.
+        self.assertAlmostEqual(self.desk.held_at(p, long, opened + 1), first_qty[0])
+        self.assertAlmostEqual(self.desk.held_at(p, long, self.clock + 1), long["qty"])
+        # Each tier enters once.
+        self.move_to(0.0033)
+        self.desk.cycle()
+        self.assertEqual(len(long["adds"]), 1)
+
+    def test_gap_past_the_widest_move_is_cut_after_it_holds(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        d = p["decision"]
+        past = d["widest"] * 1.15  # past the 10% stop, inside the 25% hard stop
+        self.move_to(past)
+        self.desk.cycle(entries=False)
+        self.assertEqual(len(self.desk.positions), 1)
+        self.assertIsNotNone(p["stop_since"])
+        self.move_to(past, after=self.desk.cfg["wide_conv_stop_minutes"] * 60)
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(
+            self.desk.closed[-1]["close_reason"],
+            "Fark geçmiş en büyük açılmanın ötesinde kaldı; zarar kesildi",
+        )
+        self.assertLess(self.desk.closed[-1]["net"], 0)
+
+    def test_gap_back_inside_the_stop_resets_the_wait(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        (p,) = self.desk.positions
+        self.move_to(p["decision"]["widest"] * 1.15)
+        self.desk.cycle(entries=False)
+        self.move_to(0.0031, after=120)
+        self.desk.cycle(entries=False)
+        self.assertIsNone(p["stop_since"])
+        self.move_to(p["decision"]["widest"] * 1.15, after=240)
+        self.desk.cycle(entries=False)
+        self.assertEqual(len(self.desk.positions), 1)
+
+    def test_hard_stop_cuts_at_once(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        self.move_to(self.desk.positions[0]["decision"]["widest"] * 1.4)
+        self.desk.cycle(entries=False)
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn(
+            self.desk.closed[-1]["close_reason"],
+            (
+                "Fark geçmiş en büyük açılmayı sert sınırın ötesinde aştı; zarar kesildi",
+                "Spread stres bütçesi aşıldı",
+            ),
+        )
+
+    def test_history_that_keeps_breaking_its_record_sets_no_stop(self):
+        # The swings double over the month: the first half's widest move is passed
+        # again and again in the second half.
+        self.setup_convergence(grow=1.0, gap=0.0045)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        reasons = " ".join(self.desk.assessed[0]["reasons"])
+        self.assertIn("Geçmiş sınır ileri dönemde aşıldı", reasons)
+
+    def test_wider_tier_needs_its_own_history_of_coming_back(self):
+        # ±20bp swings every 12h, and two one-hour spikes on a crest to 40bp: moves to 28bp and
+        # 34bp (tiers 2 and 3) happened only twice, so only tier 1 risk is taken.
+        self.desk.update_config({"wide_size": 100000.0})
+        self.setup_convergence(
+            amplitude=0.002, gap=0.0036, spikes=((207, 0.002), (507, 0.002))
+        )
+        self.desk.candidates = wide_paper.rank_spreads(self.src.rows, T0)
+        x = self.desk.assess(self.desk.candidates[0])
+        h = x["convergence_history"]
+        self.assertAlmostEqual(h["widest"], 0.004, places=4)
+        self.assertEqual([t["qualified"] for t in h["tiers"]], [True, False, False])
+        self.assertTrue(x["eligible"], x["reasons"])
+        self.assertEqual([t["filled"] for t in x["tiers"]], [True, False, False])
+        self.assertAlmostEqual(x["budget"], 0.2 * self.desk.risk_budget())
 
     def test_convergence_charges_funding_paid_while_waiting(self):
         self.setup_convergence()

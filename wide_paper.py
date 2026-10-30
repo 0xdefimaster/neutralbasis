@@ -62,6 +62,11 @@ WIDE_DEFAULTS = dict(
     wide_min_history_days=7,
     wide_conv_min_episodes=3,
     wide_conv_max_hold_hours=72,
+    # Stop past the widest past move: after it holds this many minutes, or at once past
+    # the hard margin. Positions are sized for the hard stop.
+    wide_conv_stop_pct=10.0,
+    wide_conv_hard_stop_pct=25.0,
+    wide_conv_stop_minutes=5,
     wide_conv_exit_bps=2.0,
     wide_max_spread_sd_bps=30.0,
     wide_weak_minutes=30,
@@ -98,6 +103,9 @@ LIMITS = dict(
     wide_min_history_days=(7, 30),
     wide_conv_min_episodes=(1, 100),
     wide_conv_max_hold_hours=(1, 720),
+    wide_conv_stop_pct=(1, 100),
+    wide_conv_hard_stop_pct=(1, 200),
+    wide_conv_stop_minutes=(0, 240),
     wide_conv_exit_bps=(0, 50),
     wide_max_spread_sd_bps=(1, 500),
     wide_weak_minutes=(0, 1440),
@@ -623,27 +631,69 @@ def crossings(series, deadband):
     return count, two_sided
 
 
-def closing_times(series, level, target):
-    """Hours each past excursion to `level` took to come back to `target`."""
-    out = []
-    start = None
+# Convergence tiers: (share of the widest past deviation from the normal gap at which
+# the tier enters, share of the trade's loss budget it may risk). Each tier is sized so
+# its loss at the hard stop fits its share: the widest tiers take the most risk.
+CONV_TIERS = ((0.50, 0.20), (0.70, 0.30), (0.85, 0.50))
+# A tier needs `wide_conv_min_episodes` past moves to its width that came back, and at
+# most this many that did not come back within the maximum hold.
+CONV_MAX_MISSES = 1
+# Walk-forward check of the stop: how many separate times the first half's widest move
+# was exceeded by the stop margin in the second half. A stop taken from history is only
+# trusted when history did not keep breaking its own record.
+CONV_MAX_BREACHES = 1
+
+
+def excursions(series, level, target, cap_hours):
+    """Past moves of the gap to `level`: the hours each took to come back to `target`
+    within `cap_hours`, and how many did not come back in that time. A move still open
+    with less than `cap_hours` of data after it is not decided yet and left out."""
+    back, missed, start = [], 0, None
     for t, x in series:
-        if start is None and x >= level:
-            start = t
-        elif start is not None and x <= target:
-            out.append((t - start) / 3600)
+        if start is None:
+            if x >= level:
+                start = t
+        elif x <= target:
+            hours = (t - start) / 3600
+            if hours <= cap_hours:
+                back.append(hours)
+            else:
+                missed += 1
             start = None
-    return out
+    if start is not None and (series[-1][0] - start) / 3600 > cap_hours:
+        missed += 1
+    return back, missed
 
 
-def convergence_stats(left, right, at, gap, cfg):
-    """Regular, stable crossings of the pair's normal gap over both 7 and 30 days, and
-    the usual time to return to it.
+def stop_breaches(series, margin):
+    """The first half's widest move and how many separate times the second half went
+    past it by more than `margin`: how often a stop set from history would have been
+    hit on data it had not seen."""
+    mid = (series[0][0] + series[-1][0]) / 2
+    first = [x for t, x in series if t < mid]
+    second = [x for t, x in series if t >= mid]
+    if not first or not second:
+        return None, 0
+    top = max(first)
+    limit = top * (1 + margin) if top > 0 else 0.0
+    count, above = 0, False
+    for x in second:
+        if x > limit and not above:
+            count, above = count + 1, True
+        elif x <= max(top, 0.0):
+            above = False
+    return top, count
+
+
+def convergence_stats(left, right, at, cfg):
+    """Regular, stable crossings of the pair's normal gap over both 7 and 30 days, the
+    widest past move away from it, and for each tier how often a move to its width
+    came back and how long that took.
 
     Gap is log(short venue / long venue): the short venue is the dearer one now. The
     normal gap (baseline) is the median over the window, so two venues that always
-    differ a little (0.99 vs 0.98) still revert: crossings, closing times and the
-    target are measured around the baseline instead of zero.
+    differ a little (0.99 vs 0.98) still revert: crossings, moves and the target are
+    measured around the baseline instead of zero.
     """
     days = history_days(left, right, at, cfg.get("wide_min_history_days", 30))
     times = matched(left, right, at, days * 24)
@@ -659,8 +709,28 @@ def convergence_stats(left, right, at, gap, cfg):
     cross7, days7 = crossings([x for x in dev if x[0] >= week[0][0]], deadband)
     cross30, days30 = crossings(dev, deadband)
     target = cfg["wide_conv_exit_bps"] / 10000
-    level = max((gap - base30) * 0.5, target + 0.0003)
-    closes = closing_times(dev, level, target)
+    widest = max(x for t, x in dev)
+    half_max, breaches = stop_breaches(dev, cfg["wide_conv_stop_pct"] / 100)
+    tiers = []
+    for level, risk in CONV_TIERS:
+        back, missed = (
+            excursions(dev, level * widest, target, cfg["wide_conv_max_hold_hours"])
+            if widest > 0
+            else ([], 0)
+        )
+        tiers.append(
+            dict(
+                level=level,
+                risk=risk,
+                gap=base30 + level * widest,
+                returns=len(back),
+                missed=missed,
+                avg_hours=statistics.mean(back) if back else None,
+                max_hours=max(back) if back else None,
+                qualified=len(back) >= cfg["wide_conv_min_episodes"]
+                and missed <= CONV_MAX_MISSES,
+            )
+        )
     return dict(
         baseline=base30,
         baseline7=base7,
@@ -673,10 +743,13 @@ def convergence_stats(left, right, at, gap, cfg):
         mean30=mean30,
         sd30=sd30,
         history_days=days,
-        episodes=len(closes),
-        avg_close_hours=statistics.mean(closes) if closes else None,
-        max_close_hours=max(closes) if closes else None,
-        level=level,
+        widest=widest,
+        half_max=half_max,
+        breaches=breaches,
+        tiers=tiers,
+        episodes=tiers[0]["returns"],
+        avg_close_hours=tiers[0]["avg_hours"],
+        max_close_hours=tiers[0]["max_hours"],
     )
 
 
@@ -897,6 +970,9 @@ SLOW_REASONS = {
     "7g / 30g getiri korelasyonu sınır altında": 6 * 3600,
     "Hedge beta uyumsuz": 6 * 3600,
     "Normal fiyat farkı kayıyor": 3 * 3600,
+    "Geçmiş sınır ileri dönemde aşıldı": 6 * 3600,
+    "Kademe için geçmiş dönüş yetersiz": 3 * 3600,
+    "Bu yönde geçmiş açılma yok": 3 * 3600,
 }
 
 
@@ -1310,11 +1386,14 @@ class WidePaper:
     def worst_loss(c):
         return c["entry_fee"] + c["exit_fee"] + c["execution_drag"] + c["stress_loss"]
 
-    def priced(self, c, leverage_cap, stress, size, vol=0.0, hold=24):
-        """Size against margin, reserve and loss budget; VWAP all four fills on fresh books."""
+    def priced(
+        self, c, leverage_cap, stress, size, vol=0.0, hold=24, budget=None, books=None
+    ):
+        """Size against margin, reserve and loss budget (or a share of it); VWAP all four
+        fills on fresh books (the ones just read when given)."""
         cfg = self.cfg
         a, lv, sv = c["asset"], c["long"], c["short"]
-        lb, sb = self.book(lv, a), self.book(sv, a)
+        lb, sb = books or (self.book(lv, a), self.book(sv, a))
         if (
             abs(lb["received"] - sb["received"]) > 5
             or now() - min(lb["received"], sb["received"]) > 30
@@ -1338,7 +1417,9 @@ class WidePaper:
         extra = self.extra_slippage
         if self.daily_pnl() <= -cfg["wide_daily_loss"]:
             raise ValueError("Günlük kayıp limiti doldu")
-        budget = self.risk_budget()
+        budget = (
+            self.risk_budget() if budget is None else min(budget, self.risk_budget())
+        )
         # Margin plus entry fee of both legs per $1 notional, at the worst accepted fill.
         # In per-venue mode each leg is funded by its own venue's free collateral.
         if self.per_venue():
@@ -1648,7 +1729,10 @@ class WidePaper:
         return out
 
     def assess_convergence(self, c):
-        """Long cheap, short dear when the gap closed regularly over 7 and 30 days."""
+        """Long cheap, short dear when the gap closed regularly over 7 and 30 days and
+        today's move sits in the band history proved: from half of the widest past move
+        away from the normal gap up to that widest move. The stop sits past the widest
+        move; the trade risks more the closer it enters to it (tiers)."""
         cfg = self.cfg
         a, lv, sv = c["asset"], c["long"], c["short"]
         out = dict(c, reasons=list(self.blocked(c)), eligible=False, net=None)
@@ -1656,7 +1740,7 @@ class WidePaper:
             at = now()
             left, right = self.price_history(lv, a), self.price_history(sv, a)
             stats = pair_stats(left, right, at, 1, cfg["wide_min_history_days"])
-            hist = convergence_stats(left, right, at, c["spread"], cfg)
+            hist = convergence_stats(left, right, at, cfg)
             out["stats"] = stats
             out["convergence_history"] = hist
             if hist["cross7"] < cfg["wide_conv_min_cross_7"] or hist["two_sided7"] < 4:
@@ -1680,27 +1764,70 @@ class WidePaper:
                 out["reasons"].append(
                     "Normal fiyat farkı kayıyor: 7g ve %dg medyanı uyuşmuyor" % days
                 )
-            if hist["episodes"] < cfg["wide_conv_min_episodes"]:
-                raise ValueError(
-                    "Bu genişlikte geçmiş makas kapanışı yetersiz (%d)"
-                    % hist["episodes"]
+            if hist["breaches"] > CONV_MAX_BREACHES:
+                out["reasons"].append(
+                    "Geçmiş sınır ileri dönemde aşıldı · %d kez (ilk yarının en büyük "
+                    "sapması %.1f bp)"
+                    % (hist["breaches"], (hist["half_max"] or 0) * 1e4)
                 )
-            expected = max(1, math.ceil(hist["avg_close_hours"]))
+            widest, base = hist["widest"], hist["baseline"]
+            if widest <= 0:
+                raise ValueError("Bu yönde geçmiş açılma yok")
+            first = hist["tiers"][0]
+            if not first["qualified"]:
+                raise ValueError(
+                    "Kademe için geçmiş dönüş yetersiz · %d dönüş, %d dönmeyen (en az %d, "
+                    "en çok %d)"
+                    % (
+                        first["returns"],
+                        first["missed"],
+                        cfg["wide_conv_min_episodes"],
+                        CONV_MAX_MISSES,
+                    )
+                )
+            lb, sb = self.book(lv, a), self.book(sv, a)
+            live = math.log(mid_of(sb) / mid_of(lb))
+            move = live - base
+            if move > widest:
+                raise ValueError(
+                    "Fark geçmiş en büyük açılmanın üstünde · sapma %.1f bp > %.1f bp"
+                    % (move * 1e4, widest * 1e4)
+                )
+            reached = [t for t in hist["tiers"] if move >= t["level"] * widest]
+            if not reached:
+                raise ValueError(
+                    "Fark kademe 1 seviyesinin altında · sapma %.1f bp < %.1f bp (en büyük "
+                    "%.1f bp'nin %%%d'i)"
+                    % (
+                        move * 1e4,
+                        first["level"] * widest * 1e4,
+                        widest * 1e4,
+                        round(first["level"] * 100),
+                    )
+                )
+            # A wider tier counts only when moves to its own width came back in the past.
+            taken = [t for t in reached if t["qualified"]]
+            expected = max(1, math.ceil(first["avg_hours"]))
             max_hold = min(
                 cfg["wide_conv_max_hold_hours"],
-                max(2 * expected, math.ceil(hist["max_close_hours"])),
+                max(2 * expected, math.ceil(first["max_hours"])),
             )
-            # Stress over the usual closing time, from 7d return residuals.
-            stress = pair_stats(
-                left, right, at, expected, cfg["wide_min_history_days"]
-            )["stress_fraction"]
+            stop = base + widest * (1 + cfg["wide_conv_stop_pct"] / 100)
+            hard = base + widest * (
+                1 + max(cfg["wide_conv_hard_stop_pct"], cfg["wide_conv_stop_pct"]) / 100
+            )
+            # Sized for the hard stop: the loss there (gap widening from here) plus fees
+            # and both books' spread fits the entered tiers' share of the loss budget.
+            budget = self.risk_budget()
             q = self.priced(
                 c,
                 cfg["wide_conv_leverage"],
-                stress,
+                hard - live,
                 cfg["wide_size"],
                 stats["vol"],
                 max_hold,
+                budget=budget * sum(t["risk"] for t in taken),
+                books=(lb, sb),
             )
             raw = self.conservative_raw(c, at, required=False)
             # The gap may take until the maximum hold to close, and the funding is paid
@@ -1716,24 +1843,17 @@ class WidePaper:
             funding_cost = min(0.0, funding)
             # Target: the pair's normal gap, the less favourable of the 7d and long-window
             # medians. It may be below zero when the short venue is usually the cheaper one.
-            target = max(hist["baseline7"], hist["baseline"])
+            target = max(hist["baseline7"], base)
             # Expected capture: the gap narrowing back to its normal level, not beyond.
             capture = (
                 q["qty"] * (q["entry_short"] - q["entry_long"]) - q["size"] * target
             )
             # The exit crosses half of today's round-trip book spread.
             exit_drag = q["execution_drag"] / 2
-            # Risk reserve: one 7d standard deviation of the gap widening further.
-            risk_reserve = q["size"] * hist["sd7"]
-            net = (
-                capture
-                - exit_drag
-                - q["entry_fee"]
-                - q["exit_fee"]
-                + funding_cost
-                - risk_reserve
-            )
+            # The risk is the stop, sized into the budget above; no reserve on top.
+            net = capture - exit_drag - q["entry_fee"] - q["exit_fee"] + funding_cost
             gap = math.log(q["entry_short"] / q["entry_long"])
+            tiers = [dict(t, filled=t in taken) for t in hist["tiers"]]
             out.update(
                 q,
                 entry_capture=capture,
@@ -1741,21 +1861,31 @@ class WidePaper:
                 conservative_funding=funding,
                 funding_cost_reserve=funding_cost,
                 conservative_raw=raw,
-                risk_reserve=risk_reserve,
                 expected_hours=expected,
                 max_hold_hours=max_hold,
                 entry_gap=gap,
                 target_gap=target,
+                baseline=base,
+                widest=widest,
+                stop_gap=stop,
+                hard_stop_gap=hard,
+                risk_budget=budget,
+                tiers=tiers,
                 net=net,
                 entry_reason=(
-                    "Yakınsama: long %s, short %s; boşluk %.1f bp (normal %.1f, sd %.1f), "
-                    "kesişim 7g %d / %dg %d, ortalama kapanma %d saat, net $%.2f"
+                    "Yakınsama: long %s, short %s; sapma %.1f bp (normal %.1f, geçmiş en "
+                    "büyük %.1f), kademe %d/%d, durdurma %.1f / %.1f bp, kesişim 7g %d / "
+                    "%dg %d, ortalama dönüş %d saat, net $%.2f"
                     % (
                         lv,
                         sv,
-                        gap * 10000,
-                        target * 10000,
-                        hist["sd7"] * 10000,
+                        move * 1e4,
+                        base * 1e4,
+                        widest * 1e4,
+                        len(taken),
+                        len(tiers),
+                        stop * 1e4,
+                        hard * 1e4,
                         hist["cross7"],
                         hist["history_days"],
                         hist["cross30"],
@@ -1764,15 +1894,12 @@ class WidePaper:
                     )
                 ),
             )
-            if gap < max(target + 0.0005, hist["baseline7"] + hist["sd7"]):
-                out["reasons"].append(
-                    "Fiyat boşluğu geçmiş dağılıma göre yeterli değil"
-                )
             if min(stats["corr"], stats["corr30"]) < cfg["wide_min_corr"]:
                 out["reasons"].append("7g / 30g getiri korelasyonu sınır altında")
             if net < cfg["wide_min_net"]:
                 out["reasons"].append(
-                    "Yakınsama kazancı 4 emir ücreti, kayma, funding gideri ve risk payı sonrası yetersiz"
+                    "Yakınsama kazancı 4 emir ücreti, kayma ve funding gideri sonrası "
+                    "yetersiz"
                 )
             if (
                 q["entry_fee"] + q["exit_fee"] + q["execution_drag"] + q["stress_loss"]
@@ -2017,6 +2144,151 @@ class WidePaper:
             self.events("RECOVERY", p["close_reason"], position=p["id"])
             self.close(p, p["close_reason"])
 
+    def add_tiers(self, p):
+        """A convergence position whose gap widened to its next tier (still inside the
+        widest past move) takes that tier's share of the loss budget, sized for the
+        same hard stop, on today's books. Nothing is added while any position is not
+        plainly open or the day's loss limit is used up; a failed add is not retried
+        the same round and never leaves the legs unequal."""
+        d = p["decision"]
+        tiers = d.get("tiers")
+        if (
+            not tiers
+            or p.get("strategy") != "convergence"
+            or not self.cfg["wide_conv_enabled"]
+            or any(x["status"] != "OPEN" for x in self.positions)
+            or self.daily_pnl() <= -self.cfg["wide_daily_loss"]
+            or p.get("live_gap") is None
+            or now() < p.get("tier_retry_at", 0)
+        ):
+            return
+        move = p["live_gap"] - d["baseline"]
+        due = [
+            t
+            for t in tiers
+            if t["qualified"] and not t["filled"] and move >= t["level"] * d["widest"]
+        ]
+        if not due or move > d["widest"]:
+            return
+        try:
+            lb, sb = self.book(d["long"], p["asset"]), self.book(d["short"], p["asset"])
+            live = math.log(mid_of(sb) / mid_of(lb))
+            q = self.priced(
+                d,
+                d["leverage"],
+                d["hard_stop_gap"] - live,
+                self.cfg["wide_size"] - d["size"],
+                hold=d["max_hold_hours"],
+                budget=d["risk_budget"] * sum(t["risk"] for t in due),
+                books=(lb, sb),
+            )
+            capture = (
+                q["qty"] * (q["entry_short"] - q["entry_long"])
+                - q["size"] * d["target_gap"]
+            )
+            net = capture - q["execution_drag"] / 2 - q["entry_fee"] - q["exit_fee"]
+            if net <= 0:
+                raise ValueError("ek kademe ücret ve kayma sonrası kazanç getirmiyor")
+            got = self.add_fill(p, q)
+            if not got:
+                raise ValueError(
+                    "iki bacakta eşleşen dolum olmadı (defter ya da borsa teminatı)"
+                )
+        except Exception as ex:
+            # Waits like a rejected pair, so an add that keeps failing does not pay the
+            # spread every round.
+            p["tier_retry_at"] = now() + REJECT_COOLDOWN
+            note = "Kademe eklenmedi: " + str(ex)[:160]
+            if p.get("tier_note") != note:
+                p["tier_note"] = note
+                self.events("TIER_SKIP", note, position=p["id"], asset=p["asset"])
+            self.persist()
+            return
+        ratio = got / q["qty"]
+        for k in (
+            "qty",
+            "size",
+            "entry_fee",
+            "exit_fee",
+            "execution_drag",
+            "stress_loss",
+        ):
+            d[k] += q[k] * ratio
+        d["net"] += net * ratio
+        for t in due:
+            t["filled"] = True
+        p.pop("tier_note", None)
+        self.persist()
+        self.events(
+            "TIER_ADD",
+            "Fark açıldı: yakınsama kademesi eklendi",
+            position=p["id"],
+            asset=p["asset"],
+            tiers=[t["level"] for t in due],
+            qty=got,
+            gap=live,
+        )
+
+    def add_fill(self, p, q):
+        """Both legs of an add, as at entry: IOC at the planned price plus the tolerance,
+        long first; a short leg that fills less unwinds the long excess at once. Each
+        fill joins its leg at the average price; the leg keeps when each part came in,
+        so funding is settled on what was held at every payment. Returns the matched
+        quantity."""
+        d = p["decision"]
+        legs = {leg["side"]: leg for leg in p["legs"] if not leg["closed"]}
+        lots = [d.get("lot_long"), d.get("lot_short")]
+        qty, matched = q["qty"], 0.0
+        for side, planned in (("long", q["entry_long"]), ("short", q["entry_short"])):
+            leg, buy = legs[side], side == "long"
+            self.sleep(self.latency(leg["venue"]))
+            limit = planned * (1 + FILL_TOLERANCE if buy else 1 - FILL_TOLERANCE)
+            got, px, b = self.fill(leg["venue"], p["asset"], qty, buy, limit, lots)
+            fee = got * px * leg["fee_rate"] if got else 0.0
+            margin = got * px / q["leverage"] if got else 0.0
+            if not got or margin + fee > self.headroom(leg["venue"]):
+                got = 0.0
+            else:
+                slip = got * abs(px - mid_of(b))
+                total = leg["qty"] + got
+                leg["entry"] = (leg["entry"] * leg["qty"] + px * got) / total
+                leg["qty"] = total
+                leg["entry_fee"] += fee
+                leg["margin"] += margin
+                leg["entry_slippage"] = leg.get("entry_slippage", 0.0) + slip
+                leg.setdefault("adds", []).append(
+                    dict(
+                        qty=got, price=px, fee=fee, at=now(), audit_id=b.get("audit_id")
+                    )
+                )
+                p["fees"] += fee
+                p["slippage"] = p.get("slippage", 0.0) + slip
+                self.credit(leg["venue"], -fee)
+                self.persist()
+            if side == "long":
+                if not got:
+                    return 0.0
+                qty = got
+            else:
+                matched = got
+                if got < qty * (1 - 1e-9):
+                    self.unwind(p, legs["long"], qty - got)
+        return matched
+
+    @staticmethod
+    def held_at(p, leg, t):
+        """The leg's quantity at time t: later additions taken off, later partial
+        closes and unwinds added back."""
+        q = leg["qty"]
+        q -= sum(x["qty"] for x in leg.get("adds", []) if x["at"] >= t)
+        q += sum(x["qty"] for x in leg.get("partial_exits", []) if x["at"] >= t)
+        q += sum(
+            x["qty"]
+            for x in p.get("unwound", [])
+            if x["venue"] == leg["venue"] and x["at"] >= t
+        )
+        return max(0.0, q)
+
     # --- monitoring ------------------------------------------------------------
     def settle(self, p):
         pending = []
@@ -2056,7 +2328,11 @@ class WidePaper:
                         pending.append(key)
                         continue
                     unit = price * r["rate"]
-                cash = leg["qty"] * unit * (-1 if leg["side"] == "long" else 1)
+                cash = (
+                    self.held_at(p, leg, r["ts"])
+                    * unit
+                    * (-1 if leg["side"] == "long" else 1)
+                )
                 body = dict(
                     position=p["id"],
                     venue=v,
@@ -2161,7 +2437,12 @@ class WidePaper:
             return 0.0
         seen = self.store.before(leg["venue"], p["asset"], t)
         price = seen[1] if seen else leg["entry"]
-        cash = leg["qty"] * price * rate * (-1 if leg["side"] == "long" else 1)
+        cash = (
+            self.held_at(p, leg, t)
+            * price
+            * rate
+            * (-1 if leg["side"] == "long" else 1)
+        )
         return min(0.0, cash)
 
     def mark_position(self, p, books):
@@ -2348,6 +2629,17 @@ class WidePaper:
             }
             gap = math.log(mid[d["short"]] / mid[d["long"]])
             p["live_gap"] = gap
+            # The widest move history knows is the line: past it the relationship the
+            # trade relies on is not holding. Positions are sized for the hard stop.
+            if d.get("stop_gap") is not None:
+                if gap >= d["hard_stop_gap"]:
+                    return "Fark geçmiş en büyük açılmayı sert sınırın ötesinde aştı; zarar kesildi"
+                if gap >= d["stop_gap"]:
+                    p["stop_since"] = p.get("stop_since") or now()
+                    if now() - p["stop_since"] >= cfg["wide_conv_stop_minutes"] * 60:
+                        return "Fark geçmiş en büyük açılmanın ötesinde kaldı; zarar kesildi"
+                else:
+                    p["stop_since"] = None
             # Earlier positions targeted max(mean, 0); the baseline target may be negative.
             zone = d.get("target_gap", 0.0) + cfg["wide_conv_exit_bps"] / 10000
             # No need to wait for an exact cross: in the mean/cross zone the
@@ -2473,6 +2765,8 @@ class WidePaper:
                         self.close(p, reason)
                     else:
                         p["status"] = "OPEN"
+                        if entries and self.cfg["wide_enabled"]:
+                            self.add_tiers(p)
                 except Exception as ex:
                     if p["status"] == "OPEN":
                         p["status"] = "DATA_WAIT"
@@ -3068,8 +3362,11 @@ class WidePaper:
                 "girerse çıkılır. "
                 "Yakınsama: çiftin normal fiyat farkı (7g/30g medyanı; sıfır olması gerekmez) etrafında 7g ve "
                 "30g düzenli kesişim ve dönüş süresi; ucuzda long, pahalıda short, eşit miktar, en fazla 5x; "
-                "fark normal seviyesine dönünce kapanış sonrası nete bakılarak kapanır; normal fark "
-                "kayıyorsa girilmez. "
+                "fark, 30 günün en büyük sapmasının %50'sini geçince kademeli girilir (%50 / %70 / %85, "
+                "kayıp bütçesinin %20 / %30 / %50'si; her kademe kendi genişliğinden en az 3 dönüş "
+                "ister); fark normal seviyesine dönünce kapanır, en büyük sapmanın %10 ötesinde 5 dk "
+                "kalırsa ya da %25 ötesine geçerse zarar kesilir; büyüklük sert stoptaki zarar bütçeye "
+                "sığacak şekilde; normal fark kayıyorsa ya da geçmiş sınır ileri dönemde aşıldıysa girilmez. "
                 "Kaldıraç tavandır, her bacağın kendi marjinine göre küçülür. Gerçek emir ve API anahtarı yok."
             ),
         )
