@@ -80,13 +80,11 @@ class Store:
               raw_sha256 text, file text, at real, primary key(kind, venue, key));
             create table if not exists checkpoints(name text primary key, value text,
               at real);
-            create table if not exists comparisons(venue text, market_id text,
-              settled_at real, asset text, status text, body text, at real,
-              primary key(venue, market_id, settled_at));
             create table if not exists sessions(id integer primary key, started real,
               ended real, mode text, stopped_by text);
             """)
         self.db.commit()
+        self.repair = self.ensure_comparisons()
 
     def close(self):
         with self.lock:
@@ -206,21 +204,82 @@ class Store:
             self.db.commit()
 
     # --- comparisons ----------------------------------------------------------------
-    def put_comparison(self, c, at):
+    # A completed comparison is identified by the payment it was matched with: venue,
+    # market and the payment's actual settlement time (whole seconds, never null). The
+    # venue's announced settlement time, when it publishes one, is only a field.
+    FINAL = ("MATCHED", "SIGN_CONFLICT", "TOO_SMALL", "NO_SIGNED_RATE")
+    SCHEMA = (
+        "create table comparisons(venue text not null, market_id text not null,"
+        " settled_at integer not null, asset text, status text,"
+        " expected_settlement_at real, body text, at real,"
+        " primary key(venue, market_id, settled_at))"
+    )
+
+    def ensure_comparisons(self):
+        """Create the comparison index, or repair one written before the identity fix
+        (keyed on the announced time, which is null for Hyperliquid and Lighter, so
+        one comparison could be stored many times). The old table is renamed, never
+        dropped; the index is rebuilt from the normalized comparison records, which
+        were always keyed by the actual settlement time. Nothing else is touched.
+        Returns a description of the repair, or None."""
         with self.lock:
-            self.db.execute(
-                "insert or replace into comparisons values(?,?,?,?,?,?,?)",
+            cols = [r[1] for r in self.db.execute("pragma table_info(comparisons)")]
+            if not cols:
+                self.db.execute(self.SCHEMA)
+                self.db.commit()
+                return None
+            current = "expected_settlement_at" in cols
+            if current:
+                total, distinct = self.db.execute(
+                    "select count(*), (select count(*) from (select distinct venue,"
+                    " market_id, settled_at from comparisons)) from comparisons"
+                ).fetchone()
+                if total == distinct:
+                    return None
+            before = self.db.execute("select count(*) from comparisons").fetchone()[0]
+            legacy = "comparisons_legacy_%d" % int(time.time())
+            self.db.execute("alter table comparisons rename to %s" % legacy)
+            self.db.execute(self.SCHEMA)
+            self.db.commit()
+        rebuilt = self.rebuild_comparisons()
+        note = dict(
+            at=time.time(),
+            legacy_table=legacy,
+            legacy_rows=before,
+            rebuilt_rows=rebuilt,
+            reason="eski anahtar" if not current else "yinelenen satır",
+        )
+        self.set_checkpoint("repair:comparisons", note)
+        return note
+
+    def rebuild_comparisons(self):
+        """Refill the comparison index from the normalized comparison records."""
+        n = 0
+        for c in self.records("comparison"):
+            n += self.put_comparison(c, c.get("observed_at") or time.time())
+        return n
+
+    def put_comparison(self, c, at):
+        """Store a completed comparison once per (venue, market, actual settlement
+        time); True when it is new. A pending one has no settlement: refused."""
+        if c.get("settled_at") is None or c.get("comparison_status") not in self.FINAL:
+            raise ValueError("Yalnız tamamlanmış karşılaştırma kaydedilir")
+        with self.lock:
+            cur = self.db.execute(
+                "insert or ignore into comparisons values(?,?,?,?,?,?,?,?)",
                 (
                     c["venue"],
                     str(c["market_id"]),
-                    c["expected_settlement_at"],
+                    int(round(c["settled_at"])),
                     c["asset"],
                     c["comparison_status"],
+                    c.get("expected_settlement_at"),
                     json.dumps(c, sort_keys=True),
                     at,
                 ),
             )
             self.db.commit()
+            return cur.rowcount == 1
 
     def comparisons(self, venue=None, status=None):
         q, args = "select body from comparisons where 1=1", []
@@ -233,6 +292,14 @@ class Store:
                 json.loads(r[0])
                 for r in self.db.execute(q + " order by settled_at", args)
             ]
+
+    def comparison_counts(self):
+        """(rows, distinct venue/market/settlement) of the comparison index."""
+        with self.lock:
+            return self.db.execute(
+                "select count(*), (select count(*) from (select distinct venue,"
+                " market_id, settled_at from comparisons)) from comparisons"
+            ).fetchone()
 
     # --- sessions -------------------------------------------------------------------
     def start_session(self, mode, at):

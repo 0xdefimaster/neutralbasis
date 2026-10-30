@@ -129,6 +129,13 @@ phase1-evidence/
   - `PENDING`: ödeme henüz kayıtlı değil.
   - `NOT_RECORDED`: ödeme zamanı ve bekleme süresi geçti, kayıt yok.
 - Her karşılaştırma iki ham yanıtın hash'ini taşır.
+- **Karşılaştırma kimliği:** tamamlanmış bir karşılaştırma borsa, piyasa ve ödemenin gerçek zamanıyla (`settled_at`) bir kez saklanır. Eşleştirme kaç kez yeniden çalışırsa çalışsın sayı artmaz. Borsanın duyurduğu ödeme zamanı (`expected_settlement_at`) yalnızca bir alandır; Hyperliquid ve Lighter'da boştur ve kimliğe girmez. `PENDING` ve `NOT_RECORDED` kayıtları tamamlanmış sayılmaz.
+- **Eski kayıtların onarımı:** bu düzeltmeden önce çalışmış bir kayıt klasörü açıldığında karşılaştırma dizini otomatik onarılır:
+  - eski tablo silinmez, `comparisons_legacy_<zaman>` adıyla saklanır;
+  - dizin, zaten gerçek ödeme zamanıyla anahtarlanmış JSONL karşılaştırma kayıtlarından yeniden kurulur;
+  - ham yanıtlara, piyasa, funding ve mum kayıtlarına dokunulmaz.
+
+  Yapılan onarım `--validate-only` raporunda görünür.
 - 3 tutarlı karşılaştırma raporda belirtilir; bu tek başına üretim güvenilirliği değildir.
 
 ## Rapordaki durumlar
