@@ -16,6 +16,7 @@ import time
 
 from . import matching
 from .clients import LABELS, make_client
+from .clients.variational import sample as variational_sample
 from .clients.records import (
     configured_tolerance,
     counted,
@@ -32,8 +33,10 @@ LOCK_STALE = 180
 
 
 class VenueRecorder:
-    def __init__(self, client, store, cfg, stop, clock=time.time, log=None):
+    def __init__(self, client, store, cfg, stop, clock=time.time, log=None, say=None):
         self.client = client
+        # Progress for the console window; the log file gets the same lines.
+        self.say = say or (lambda text: None)
         self.venue = client.venue
         self.store = store
         self.cfg = cfg
@@ -49,8 +52,11 @@ class VenueRecorder:
             connected=None,
         )
         client.http.stop = stop
-        self.next_due = {t: 0.0 for t in TASKS}
+        # A discovery venue runs its own task list (raw poll + schema only).
+        self.tasks = getattr(client, "tasks", TASKS)
+        self.next_due = {t: 0.0 for t in self.tasks}
         self.period = dict(
+            discovery=cfg.get("discovery_seconds", 60),
             metadata=cfg["metadata_seconds"],
             funding=cfg["funding_seconds"],
             settlements=cfg["settlements_seconds"],
@@ -99,6 +105,44 @@ class VenueRecorder:
         self.store.set_checkpoint(name, total)
 
     # --- tasks ---------------------------------------------------------------------
+    def task_discovery(self, at):
+        """Store the raw response (Http does), a schema record when the shape is new,
+        and how often the body changes. No field is interpreted."""
+        obj, sha, schema = self.client.poll(at)
+        new_schema = self.put("schema", [schema], at)
+        name = "discovery:" + self.venue
+        d = self.store.checkpoint(name, {})
+        d.setdefault("first_at", at)
+        d["polls"] = d.get("polls", 0) + 1
+        if sha != d.get("last_sha256"):
+            if d.get("last_change_at") is not None:
+                d["change_gaps"] = (
+                    d.get("change_gaps", []) + [at - d["last_change_at"]]
+                )[-500:]
+            d["content_changes"] = d.get("content_changes", 0) + 1
+            d["last_change_at"] = at
+            d["last_sha256"] = sha
+        if schema["schema_sha256"] != d.get("schema_sha256"):
+            d["schema_changes"] = d.get("schema_changes", 0) + (
+                1 if d.get("schema_sha256") else 0
+            )
+            d["schema_sha256"] = schema["schema_sha256"]
+        d.update(
+            last_at=at,
+            listing_count=schema["listing_count"],
+            listing_keys=schema["listing_keys"],
+            top_keys=sorted(obj) if isinstance(obj, dict) else None,
+            paths=len(schema["paths"]),
+            paths_truncated=schema["paths_truncated"],
+            sample=variational_sample(obj),
+        )
+        self.store.set_checkpoint(name, d, at)
+        return "ham yanıt kaydedildi: %s listing, %d alan yolu%s" % (
+            schema["listing_count"],
+            len(schema["paths"]),
+            ", YENİ ŞEMA" if new_schema else "",
+        )
+
     def task_metadata(self, at):
         markets = self.client.markets(at)
         self.put("market", markets, at)
@@ -342,18 +386,28 @@ class VenueRecorder:
     # --- running -------------------------------------------------------------------
     def run_task(self, task):
         at = self.clock()
+        down = self.client.http.unreachable()
+        if down:
+            # Skipped without a request: the venue gave no answer to its last tries.
+            note = "atlandı: borsa erişilemiyor (%d sn sonra yeniden)" % round(down)
+            self.mark(task, False, at, note)
+            self.say("%s %s: %s" % (self.venue, task, note))
+            return False
         try:
             note = getattr(self, "task_" + task)(at)
         except Exception as ex:
             self.error(task, None, ex, at)
-            self.mark(task, False, at, "%s: %s" % (type(ex).__name__, str(ex)[:200]))
+            note = "%s: %s" % (type(ex).__name__, str(ex)[:200])
+            self.mark(task, False, at, note)
+            self.say("%s %s: HATA %s" % (self.venue, task, note))
             return False
         self.mark(task, True, at, note)
         self.log.info("%s %s: %s", self.venue, task, note)
+        self.say("%s %s: %s" % (self.venue, task, note))
         return True
 
     def once(self):
-        for task in TASKS:
+        for task in self.tasks:
             if self.stop.is_set():
                 break
             self.run_task(task)
@@ -361,7 +415,7 @@ class VenueRecorder:
     def loop(self, until):
         while not self.stop.is_set() and self.clock() < until:
             now = self.clock()
-            for task in TASKS:
+            for task in self.tasks:
                 if self.stop.is_set():
                     break
                 if now >= self.next_due[task]:
@@ -407,9 +461,11 @@ class Lock:
 
 
 class Recorder:
-    def __init__(self, cfg, transport=None, clock=time.time, sleep=None):
+    def __init__(self, cfg, transport=None, clock=time.time, sleep=None, console=None):
         self.cfg = cfg
         self.clock = clock
+        self.console = console
+        self.say_lock = threading.Lock()
         self.store = Store(cfg["root"])
         # Where the data comes from: the real public APIs, or a test transport. One
         # folder never mixes the two, and every report says which it holds.
@@ -434,10 +490,24 @@ class Recorder:
                 self.stop,
                 clock,
                 self.log,
+                self.say,
             )
             for v in cfg["venues"]
         ]
         self.stop_file = os.path.join(cfg["root"], "STOP")
+
+    def say(self, text):
+        if self.console is None:
+            return
+        line = "[%s] %s" % (
+            time.strftime("%H:%M:%S", time.localtime(self.clock())),
+            text,
+        )
+        with self.say_lock:
+            try:
+                self.console(line)
+            except Exception:
+                pass
 
     def run(self, mode="once", hours=None, poll=2.0):
         lock = Lock(self.cfg["root"], self.clock)
@@ -457,6 +527,15 @@ class Recorder:
             for v in self.venues
         ]
         self.log.info("Oturum başladı: %s %s", mode, iso(started))
+        self.say(
+            "Kayıt başladı (%s, %s): %s. Her görev bitince burada bir satır görünür;"
+            " ilk geçmiş indirmesi borsa başına birkaç dakika sürebilir."
+            % (
+                "tek tur" if mode == "once" else "%g saat" % (hours or 0),
+                "GERÇEK public API" if self.source == LIVE else self.source,
+                ", ".join(v.venue for v in self.venues),
+            )
+        )
         for t in threads:
             t.start()
         try:
@@ -480,6 +559,7 @@ class Recorder:
             self.store.end_session(sid, self.clock(), stopped_by)
             lock.release()
             self.log.info("Oturum bitti: %s", stopped_by)
+            self.say("Kayıt bitti: %s. Rapor hazırlanıyor..." % stopped_by)
         return stopped_by
 
     def statuses(self):

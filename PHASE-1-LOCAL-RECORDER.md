@@ -9,9 +9,10 @@ Phase 0.7'deki piyasa düzeyinde kanıt kurallarını gerçek borsa verisiyle do
 
 Kendi klasörüne yazar: `phase1-evidence/`.
 
-## Durum: kod hazır, gerçek veri henüz yok
+## Durum
 - **Kod:** yazıldı ve test edildi. Testler sahte (mock) yanıtlarla çalışır; bu yanıtlar piyasa kanıtı sayılmaz.
-- **Gerçek veri:** bu kod geliştirilirken bulut ortamından borsa API'lerine bağlanılamadı (proxy 403). Henüz **hiçbir gerçek veri toplanmadı.** İlk gerçek bağlantı senin bilgisayarında `Phase1-Kayit.cmd --once` ile denenecek.
+- **Gerçek veri:** bulut ortamı borsa API'lerine bağlanamaz (proxy 403). İlk gerçek tur kullanıcının bilgisayarında `--once` ile yapıldı (2026-10-30, `LIVE_PUBLIC_API`): dört borsa da bağlandı. Bu tek turda karşılaştırma yoktur; oran birimi ve yön için uzun kayıt gerekir.
+- **Variational:** yalnızca keşif modunda eklendi; henüz gerçek yanıtı görülmedi.
 - **Borsa belgeleri:** bu ortamdan okunamadı. Funding kuralları "bağlayıcı beyanı" (DECLARED) olarak işaretlidir; resmî belge doğrulaması ayrıca yapılmalıdır.
 
 ## Borsalar ve endpoint'ler
@@ -23,6 +24,7 @@ Endpoint'ler projede zaten kullanılan çağrılardan alındı; yeni endpoint uy
 | `LighterCore` | Lighter Core | `mainnet.zklighter.elliot.ai/api/v1/` | `orderBookDetails`, `funding-rates`, `fundings`, `candles`, `orderBookOrders` | `bot.Feed`, CCXT lighter (`funding-rates`) |
 | `Lighter` | Lighter RH | `api.rh.lighter.xyz/api/v1/` | aynı Lighter API | `risk_scan.FiveFeed`, `bot.Feed` |
 | `Extended` | Extended | `api.starknet.extended.exchange/api/v1/` | `info/markets`, `info/<piyasa>/funding`, `info/candles/<piyasa>/trades`, `info/markets/<piyasa>/orderbook` | `bot.Feed` |
+| `Variational` | Variational Omni (keşif) | `omni-client-api.prod.ap-northeast-1.variational.io` | `GET metadata/stats` | `connections.py` bağlantı testi |
 
 Notlar:
 - **Hyperliquid POST kullanır:** public verisini yalnızca `POST /info` ile verir. Kayıt aracı yalnızca yukarıdaki dört okuma türüne izin verir; başka bir tür (ör. hesap durumu) kodda reddedilir.
@@ -30,6 +32,8 @@ Notlar:
 - **Lighter `funding-rates`:** başka borsaların oranlarını da listeler; yalnızca `exchange == "lighter"` kayıtları alınır. Bu oranın birimi belgelenmemiştir: ham saklanır, birimi `UNKNOWN`.
 - **Lighter gerçekleşmiş funding:** `direction` alanı ham olarak saklanır. Projenin okuması (yüzde değer, long → +, short → −) yanına DECLARED olarak yazılır.
 - **Extended ve Hyperliquid:** gerçekleşmiş ödemede yön alanı yok. Yön türetilmez, `UNKNOWN` kalır.
+- **Extended sıralaması:** funding ve mum yanıtları yeniden eskiye sıralı gelir. Bu tutarlı bir sıradır; "sırasız kayıt" yalnızca yanıtın kendi yönüne aykırı adımları sayar.
+- **Variational yalnız keşiftir:** projede Variational bağlayıcısı yok, alan anlamları belgelenmedi. Dakikada bir `metadata/stats` ham yanıtı saklanır ve yanıttaki her JSON yolunun tipi bir şema kaydına yazılır (şema değişince yeni kayıt). Hiçbir alan funding, fiyat veya ödeme olarak yorumlanmaz; piyasa, funding, ödeme veya mum kaydı üretilmez. Raporda listing alanları, ilk listing'in yayımlandığı haliyle değerleri, yanıtın ne sıklıkla değiştiği (RFQ önbelleği için) ve önbellek başlıkları görünür. Alanların anlamı sonraki adımda bu kanıta ve belgeye bakılarak ayrıca onaylanacak.
 
 ## Windows'ta kurulum ve çalıştırma
 Mevcut `.venv` yeterli; yeni bağımlılık yok (yalnızca Python standart kütüphanesi, Python 3.11+).
@@ -46,7 +50,7 @@ Mevcut `.venv` yeterli; yeni bağımlılık yok (yalnızca Python standart küt�
    .venv\Scripts\python.exe -m tools.phase1_recorder --once
    ```
 
-   Rapor her borsa için "BAĞLANDI" ya da "BAĞLANTI KURULAMADI" yazar.
+   Kayıt sürerken pencerede her görev için bir satır görünür (ör. `[12:30:05] Hyperliquid funding: ...`). İlk geçmiş indirmesi borsa başına birkaç dakika sürebilir. Bitince rapor her borsa için "BAĞLANDI" ya da "BAĞLANTI KURULAMADI" yazar.
 3. Uzun kayıt için `Phase1-Kayit.cmd`'yi argümansız çalıştır; 24 saat kaydeder. 72 saat için:
 
    ```bash
@@ -92,6 +96,7 @@ Varsayılan varlıklar projenin listesidir: BTC, ETH, SOL, HYPE, SUI, XRP, LINK,
 | Gerçekleşmiş funding | 15 dk; son 2 saat her seferinde yeniden okunur | `settlements_seconds` |
 | 1h mumlar | ilk açılışta 30 gün; sonra 30 dakikada bir eksik saatler | `candles_seconds`, `backfill_days` |
 | Emir defteri (ilk 20 seviye) | 60 sn | `orderbook_seconds`, `book_levels` |
+| Variational ham yanıtı ve şeması | 60 sn | `discovery_seconds` |
 | İstek denetimi | her istekte | — |
 
 - **Borsalar birbirinden bağımsızdır:** her borsa ayrı iş parçacığında çalışır. Bir borsanın API'si çökse de diğerleri sürer; bir piyasa hata verse de diğer piyasalar sürer.
@@ -99,6 +104,8 @@ Varsayılan varlıklar projenin listesidir: BTC, ETH, SOL, HYPE, SUI, XRP, LINK,
   - 429, 5xx, zaman aşımı ve bağlantı hatası üstel bekleme ile yeniden denenir (2, 4, 8, 16 sn).
   - 429'da `Retry-After` uyulur.
   - Her borsa için istekler arasında asgari aralık vardır (`min_spacing`).
+  - Hiç yanıt alınamayan (zaman aşımı, DNS, bağlantı reddi) istekler art arda 3 kez tükenirse o borsa 10 dakika istek yapılmadan atlanır (`unreachable_after`, `unreachable_cooldown_seconds`). HTTP hata kodu dönen bir borsa atlanmaz. Atlanan görev raporda ve pencerede "atlandı" diye görünür.
+  - `--once` hızlı bir kontroldür: 1 yeniden deneme, 10 sn zaman aşımı, 2 başarısızlıkta atlama (ayar dosyasında verilen değer önceliklidir).
 - **Yeniden başlatma:** kaldığı yerden devam eder; ödeme geçmişi ve mumlar kontrol noktasından okunur.
 - **Eksik mumlar:** en çok 3 kez yeniden istenir. Doldurulmaz, interpolasyon yapılmaz.
 

@@ -86,6 +86,13 @@ class Http:
         self.last = 0.0
         self.lock = threading.Lock()
         self.stop = None
+        # Consecutive requests that got no answer at all, and the skip window after.
+        self.unanswered = 0
+        self.down_until = 0.0
+
+    def unreachable(self):
+        """Seconds left in the skip window of an unreachable venue (0 when reachable)."""
+        return max(0.0, self.down_until - self.clock())
 
     def _wait_turn(self):
         with self.lock:
@@ -100,6 +107,12 @@ class Http:
             raise ValueError("Yalnızca public okuma isteği yapılır")
         if params:
             url = url + "?" + urllib.parse.urlencode(params)
+        if self.unreachable():
+            # No request is made, so there is no audit row: nothing was asked.
+            raise HttpError(
+                "Borsa erişilemiyor; %d sn sonra yeniden denenecek"
+                % round(self.unreachable())
+            )
         attempts = self.cfg["retries"] + 1
         delay = self.cfg["backoff_seconds"]
         last_error = None
@@ -162,6 +175,7 @@ class Http:
                 )
             )
             if error is None:
+                self.unanswered = 0
                 return parsed, sha
             last_error = HttpError(error, status, retry)
             if not retry or attempt == attempts - 1:
@@ -174,4 +188,13 @@ class Http:
                 except ValueError:
                     pass
             self.sleep(min(wait, 120))
+        if last_error.status is None and "durduruldu" not in str(last_error):
+            self.unanswered += 1
+            if self.unanswered >= self.cfg.get("unreachable_after", 3):
+                self.down_until = self.clock() + self.cfg.get(
+                    "unreachable_cooldown_seconds", 600
+                )
+                self.unanswered = 0
+        else:
+            self.unanswered = 0
         raise last_error

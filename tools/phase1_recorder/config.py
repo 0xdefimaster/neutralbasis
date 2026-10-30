@@ -25,7 +25,7 @@ DEFAULT_ASSETS = [
 
 DEFAULTS = dict(
     root="phase1-evidence",
-    venues=["Hyperliquid", "LighterCore", "Lighter", "Extended"],
+    venues=["Hyperliquid", "LighterCore", "Lighter", "Extended", "Variational"],
     assets=DEFAULT_ASSETS,
     all_markets=False,
     metadata_seconds=6 * 3600,
@@ -41,7 +41,11 @@ DEFAULTS = dict(
     retries=4,
     backoff_seconds=2.0,
     # Minimum spacing between two requests to one venue (seconds).
-    min_spacing=dict(Hyperliquid=0.3, LighterCore=1.0, Lighter=1.0, Extended=0.3),
+    min_spacing=dict(
+        Hyperliquid=0.3, LighterCore=1.0, Lighter=1.0, Extended=0.3, Variational=1.0
+    ),
+    # Discovery venues (Variational): one raw poll of the public stats endpoint.
+    discovery_seconds=60,
     candle_retry_limit=3,
     # Two settlement times of one market closer than this may be one payment. Per
     # venue or per "Venue|ASSET"; the effective value is also capped at 60 s and at
@@ -50,7 +54,15 @@ DEFAULTS = dict(
     # Historical reconciliation: how often, and how far back (capped at backfill_days).
     reconcile_seconds=6 * 3600,
     reconcile_hours=24,
+    # A venue whose requests fail this many times in a row with no answer at all
+    # (timeout, DNS, refused connection; every retry spent) is skipped without network
+    # calls for the cooldown, so one unreachable venue cannot hold up a run.
+    unreachable_after=3,
+    unreachable_cooldown_seconds=600,
 )
+
+# A single --once check is a quick look, not a backfill under a bad connection.
+ONCE_OVERRIDES = dict(retries=1, timeout_seconds=10, unreachable_after=2)
 
 
 def load(path=None, **overrides):

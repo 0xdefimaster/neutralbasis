@@ -25,6 +25,7 @@ VENUE_DIRS = dict(
     LighterCore="lighter_core",
     Lighter="lighter_rh",
     Extended="extended",
+    Variational="variational",
 )
 # The paper engine's data folders and database; the recorder refuses them.
 ENGINE_DIRS = ("data-five-rh", "data", "data-railway")

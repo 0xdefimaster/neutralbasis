@@ -11,6 +11,7 @@ KINDS = (
     "comparison",
     "settlement_correction",
     "settlement_withdrawn",
+    "schema",
 )
 # Fields every record of a kind must carry (values may be null where unknown).
 REQUIRED = dict(
@@ -108,6 +109,16 @@ REQUIRED = dict(
         "snapshot_raw_sha256",
         "settlement_raw_sha256",
     ),
+    schema=(
+        "venue",
+        "market_id",
+        "endpoint",
+        "schema_sha256",
+        "paths",
+        "listing_count",
+        "first_seen_at",
+        "raw_sha256",
+    ),
 )
 
 
@@ -130,6 +141,8 @@ def record_key(kind, r):
             r,
             r.get("settlement_revision"),
         )
+    if kind == "schema":
+        return "%s|%s" % (mid, r["schema_sha256"])
     if kind in ("settlement_correction", "settlement_withdrawn"):
         return "%s|%d|r%d" % (mid, int(round(r["settled_at"])), r["revision"])
     raise ValueError(kind)
@@ -260,11 +273,14 @@ def candle(client, ctx, open_time, o, h, l, c, v, at, sha, endpoint):
 
 
 def series_stats(times, at):
-    """Duplicates, out-of-order entries and implausible timestamps in one response."""
-    seen, dup, disorder = set(), 0, 0
-    for a, b in zip(times, times[1:]):
-        if b < a:
-            disorder += 1
+    """Duplicates, out-of-order entries and implausible timestamps in one response.
+
+    A response listed consistently newest-first (Extended) is ordered, not disordered:
+    only steps against the response's own dominant direction count."""
+    seen, dup = set(), 0
+    steps = [b - a for a, b in zip(times, times[1:]) if b != a]
+    down = sum(d < 0 for d in steps)
+    disorder = min(down, len(steps) - down)
     for t in times:
         if t in seen:
             dup += 1
