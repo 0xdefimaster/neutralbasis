@@ -54,7 +54,6 @@ WIDE_DEFAULTS = dict(
     wide_cooldown_seconds=3600,
     wide_max_hold_hours=168,
     wide_funding_enabled=True,
-    wide_lock_trail=0.5,
     wide_conv_enabled=True,
     wide_conv_leverage=5.0,
     wide_conv_min_cross_7=6,
@@ -93,7 +92,6 @@ LIMITS = dict(
     wide_deep_top=(1, 10),
     wide_cooldown_seconds=(0, 86400),
     wide_max_hold_hours=(1, 2160),
-    wide_lock_trail=(0.1, 0.9),
     wide_conv_leverage=(1, 5),
     wide_conv_min_cross_7=(1, 168),
     wide_conv_min_cross_30=(1, 720),
@@ -926,7 +924,12 @@ class WidePaper:
         self.store = store
         self.source = source
         self.sleep = sleep
-        self.cfg = {**WIDE_DEFAULTS, **store.get("wide_config", {})}
+        # A stored setting that is no longer used (e.g. the removed profit lock) is dropped.
+        self.cfg = {
+            k: v
+            for k, v in {**WIDE_DEFAULTS, **store.get("wide_config", {})}.items()
+            if k in WIDE_DEFAULTS
+        }
         self.positions = store.get("wide_positions", [])
         self.closed = store.get("wide_closed", [])
         self.wallet = store.get("wide_wallet", {"cash": self.cfg["wide_capital"]})
@@ -1913,7 +1916,6 @@ class WidePaper:
             close_reason=None,
             strategy=c.get("strategy", "funding"),
             entry_reason=c.get("entry_reason"),
-            peak_net=None,
         )
         self.positions.append(p)
         self.persist()
@@ -2354,23 +2356,15 @@ class WidePaper:
                 return "Fark ortalama/kesişim bölgesine geldi; kapanış sonrası net hedef sağlandı"
             if gap <= d.get("target_gap", 0.0) and p["net_if_closed"] > 0:
                 return "Fiyat farkı normal seviyesine döndü"
-            if p["net_if_closed"] >= d["net"] > 0:
-                return "Beklenen yakınsama kazancı alındı"
+            # The entry estimate keeps a risk reserve below the full move back to normal;
+            # it is not a profit target, so the position waits for the gap itself.
             if held > d["max_hold_hours"] * 3600:
                 return "Yakınsama azami bekleme süresi"
             return None
         if held > cfg["wide_max_hold_hours"] * 3600:
             return "Azami tutma süresi"
-        if p["net_if_closed"] >= d["net"] > 0:
-            return "Kâr hedefi alındı"
-        peak = max(p.get("peak_net") or p["net_if_closed"], p["net_if_closed"])
-        p["peak_net"] = peak
-        # Profit lock: once a real gain exists, a pullback of the trail fraction closes it
-        # while still positive. Entry fees mean a fresh trade starts below zero.
-        if peak >= cfg["wide_min_net"] and 0 < p["net_if_closed"] <= peak * (
-            1 - cfg["wide_lock_trail"]
-        ):
-            return "Kâr kilitlendi: kazanç geri verilmeye başladı"
+        # The carry is the thesis: a price move alone (the hedge's noise) never closes the
+        # position; it is held while the funding advantage lasts.
         try:
             stats = pair_stats(
                 self.price_history(d["long"], p["asset"]),
