@@ -9,6 +9,8 @@ KINDS = (
     "candle",
     "orderbook",
     "comparison",
+    "settlement_correction",
+    "settlement_withdrawn",
 )
 # Fields every record of a kind must carry (values may be null where unknown).
 REQUIRED = dict(
@@ -128,7 +130,7 @@ def record_key(kind, r):
             r,
             r.get("settlement_revision"),
         )
-    if kind == "settlement_correction":
+    if kind in ("settlement_correction", "settlement_withdrawn"):
         return "%s|%d|r%d" % (mid, int(round(r["settled_at"])), r["revision"])
     raise ValueError(kind)
 
@@ -139,9 +141,15 @@ def revised(key, r, revision=None):
     return key if (n or 1) <= 1 else "%s|r%d" % (key, n)
 
 
-# Two settlement times this close are one payment (a venue may report the same
-# payment with a different sub-second part); every interval here is >= 1 hour.
+# Two settlement times closer than the market's tolerance may be one payment (a venue
+# may report the same payment with a different sub-second part). The tolerance is
+# set per venue or market (config `same_event_seconds`) and is never more than 60 s
+# nor 1% of the market's payment interval (records.same_event_tolerance).
 SAME_EVENT = 60
+# Within the tolerance, times this close with different values are one payment
+# reported two ways (CONFLICT); further apart they are two possible payments that
+# cannot be told apart (AMBIGUOUS).
+SAME_INSTANT = 1
 SETTLED_FIELDS = ("settled_rate_raw", "direction_raw", "value_raw")
 
 
@@ -213,6 +221,7 @@ def settlement(client, ctx, settled_at, rate_raw, at, sha, endpoint, **kw):
         settled_at=int(round(settled_at)),
         settled_at_api=settled_at,
         revision=1,
+        identity_status="UNIQUE",
         settled_rate_raw=rate_raw,
         settled_rate=num(rate_raw),
         settled_rate_status=DECLARED,
@@ -268,30 +277,63 @@ def series_stats(times, at):
     )
 
 
-def dedupe_settlements(rows):
-    """One record per payment of one response. Entries within SAME_EVENT seconds are
-    one payment: identical ones are duplicates; differing ones are a conflict, kept
-    as one record whose settled rate is unknown (never a value picked from them)."""
-    out, stats = [], dict(conflicting_duplicates=0, jitter_merged=0)
+def configured_tolerance(cfg, venue, asset):
+    """`same_event_seconds` for a market: "Venue|ASSET", else the venue, else 60."""
+    conf = cfg.get("same_event_seconds")
+    if isinstance(conf, dict):
+        return conf.get("%s|%s" % (venue, asset), conf.get(venue, SAME_EVENT))
+    return SAME_EVENT if conf is None else conf
+
+
+def same_event_tolerance(configured, interval):
+    """The seconds within which two settlement times may be one payment: the smallest
+    of the configured value, 1% of the payment interval and 60 s. With no known
+    interval only SAME_INSTANT is allowed."""
+    limits = [SAME_EVENT, configured if configured is not None else SAME_EVENT]
+    limits.append(0.01 * interval if interval else SAME_INSTANT)
+    return max(0.0, min(limits))
+
+
+def dedupe_settlements(rows, tolerance=SAME_EVENT):
+    """One record per payment of one response. Entries within `tolerance` seconds:
+    * identical values: one payment (a duplicate, or a sub-second difference);
+    * different values within SAME_INSTANT: one payment reported two ways, kept as
+      one CONFLICT record whose settled rate is unknown (never a picked value);
+    * different values further apart: both kept, both AMBIGUOUS (excluded from
+      counts and comparisons until resolved)."""
+    out = []
+    stats = dict(conflicting_duplicates=0, jitter_merged=0, ambiguous=0)
     for r in sorted(rows, key=lambda r: r["settled_at_api"]):
         # Sorted by time: only the latest kept entry can be the same payment.
         same = (
             out[-1]
-            if out and r["settled_at_api"] - out[-1]["settled_at_api"] <= SAME_EVENT
+            if out and r["settled_at_api"] - out[-1]["settled_at_api"] <= tolerance
             else None
         )
         if same is None:
             out.append(r)
             continue
+        differ = any(same[f] != r[f] for f in SETTLED_FIELDS)
+        apart = abs(r["settled_at_api"] - same["settled_at_api"]) > SAME_INSTANT
+        if differ and apart:
+            stats["ambiguous"] += 1
+            same["identity_status"] = "AMBIGUOUS"
+            out.append(dict(r, identity_status="AMBIGUOUS"))
+            continue
         if int(round(same["settled_at_api"])) != int(round(r["settled_at_api"])):
             stats["jitter_merged"] += 1
-        if any(same[f] != r[f] for f in SETTLED_FIELDS):
+        if differ:
             stats["conflicting_duplicates"] += 1
             same.setdefault("conflict_values", [{f: same[f] for f in SETTLED_FIELDS}])
             same["conflict_values"].append({f: r[f] for f in SETTLED_FIELDS})
             same["settled_rate"] = None
             same["settled_rate_status"] = "CONFLICT"
     return out, stats
+
+
+def counted(rows):
+    """Settlements that may be counted and compared: not AMBIGUOUS."""
+    return [r for r in rows if r.get("identity_status", "UNIQUE") != "AMBIGUOUS"]
 
 
 def dedupe(records, field):

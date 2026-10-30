@@ -47,6 +47,10 @@ class FakeVenues:
         self.missing_hours = set()
         self.shuffle_candles = False
         self.duplicate_payment = False
+        # Past payments the venue later reports differently ({time: rate}, applied to
+        # every venue), and ones it no longer lists.
+        self.revised = {}
+        self.withdrawn = set()
 
     def __call__(self, method, url, body, timeout):
         self.calls.append((method, url, body))
@@ -86,6 +90,7 @@ class FakeVenues:
         while t <= min(end, self.clock()):
             out.append(t)
             t += self.gap
+        out = [t for t in out if t not in self.withdrawn]
         if self.duplicate_payment and out:
             out.append(out[-1])
         return out
@@ -122,7 +127,9 @@ class FakeVenues:
                 return [
                     {
                         "coin": body["coin"],
-                        "fundingRate": str(self.settled["Hyperliquid"]),
+                        "fundingRate": str(
+                            self.revised.get(x, self.settled["Hyperliquid"])
+                        ),
                         "premium": "0.0",
                         "time": x * 1000,
                     }
@@ -216,7 +223,7 @@ class FakeVenues:
                     "fundings": [
                         {
                             "timestamp": x,
-                            "rate": str(abs(self.settled[venue])),
+                            "rate": str(abs(self.revised.get(x, self.settled[venue]))),
                             "direction": self.direction,
                             "value": "0.01",
                         }
@@ -279,7 +286,11 @@ class FakeVenues:
                 return {
                     "status": "OK",
                     "data": [
-                        {"m": m, "T": x * 1000, "f": str(self.settled["Extended"])}
+                        {
+                            "m": m,
+                            "T": x * 1000,
+                            "f": str(self.revised.get(x, self.settled["Extended"])),
+                        }
                         for x in ts
                     ],
                 }

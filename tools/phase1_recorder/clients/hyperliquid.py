@@ -131,10 +131,9 @@ class Hyperliquid(Client):
             if len(obj) < HISTORY_PAGE or not rows:
                 break
             cursor = int(round(max(r["settled_at_api"] for r in rows) * 1000)) + 1
-        rows, merged = R.dedupe_settlements(out)
-        for k, v in merged.items():
-            stats[k] = stats.get(k, 0) + v
-        return rows, stats
+        # One payment per time is decided by the recorder (records.dedupe_settlements),
+        # with the market's own tolerance.
+        return sorted(out, key=lambda r: r["settled_at_api"]), stats
 
     def parse_settlements(self, obj, ctx, at, sha):
         if not isinstance(obj, list):

@@ -16,10 +16,16 @@ import time
 
 from . import matching
 from .clients import LABELS, make_client
-from .clients.records import record_key
+from .clients.records import (
+    configured_tolerance,
+    counted,
+    dedupe_settlements,
+    record_key,
+    same_event_tolerance,
+)
 from .storage import Store, iso
 
-TASKS = ("metadata", "funding", "settlements", "candles", "orderbook")
+TASKS = ("metadata", "funding", "settlements", "candles", "orderbook", "reconcile")
 LIVE = "LIVE_PUBLIC_API"
 MOCK_PREFIX = "MOCK:"
 LOCK_STALE = 180
@@ -50,6 +56,7 @@ class VenueRecorder:
             settlements=cfg["settlements_seconds"],
             candles=cfg["candles_seconds"],
             orderbook=cfg["orderbook_seconds"],
+            reconcile=cfg["reconcile_seconds"],
         )
 
     # --- bookkeeping ---------------------------------------------------------------
@@ -149,9 +156,12 @@ class VenueRecorder:
                 failed += 1
                 self.error("settlements", mid, ex, at)
                 continue
+            tol = self.tolerance(m)
+            rows, merged = dedupe_settlements(rows, tol)
+            stats = dict(stats, **{k: stats.get(k, 0) + v for k, v in merged.items()})
             outcome = {}
             for r in rows:
-                o = self.store.put_settlement(r, at)
+                o = self.store.put_settlement(r, at, tol)
                 outcome[o] = outcome.get(o, 0) + 1
             if outcome.get("correction"):
                 self.log.warning(
@@ -160,7 +170,14 @@ class VenueRecorder:
                     mid,
                     outcome["correction"],
                 )
-            self.bump(mid, dict(stats, corrections=outcome.get("correction", 0)))
+            self.bump(
+                mid,
+                dict(
+                    stats,
+                    corrections=outcome.get("correction", 0),
+                    ambiguous_payments=outcome.get("ambiguous", 0),
+                ),
+            )
             new += outcome.get("new", 0)
             if rows:
                 self.store.set_checkpoint(name, max(r["settled_at"] for r in rows), at)
@@ -169,17 +186,29 @@ class VenueRecorder:
             raise RuntimeError("Hiçbir piyasanın ödeme geçmişi okunamadı")
         return "%d yeni ödeme, %d piyasada hata" % (new, failed)
 
-    def match(self, m, at):
+    def tolerance(self, m):
+        """Seconds within which two settlement times of this market may be one
+        payment: the configured value (per market, else per venue), capped at 60 s and
+        at 1% of the market's observed (else declared) payment interval."""
+        conf = configured_tolerance(self.cfg, self.venue, m["asset"])
+        interval = (
+            self.store.observed_interval(self.venue, m["market_id"])
+            or self.client.declared_interval
+        )
+        return same_event_tolerance(conf, interval)
+
+    def match(self, m, at, since=None):
         mid = m["market_id"]
-        since = at - 3 * 86400
+        since = at - 3 * 86400 if since is None else min(since, at - 3 * 86400)
         snaps = [
             s
             for s in self.store.records("funding_snapshot", self.venue, since)
             if s["market_id"] == mid
         ]
+        # AMBIGUOUS payments are never compared.
         paid = [
             s
-            for s in self.store.latest("settlement", self.venue, since)
+            for s in counted(self.store.latest("settlement", self.venue, since))
             if s["market_id"] == mid
         ]
         final, pending = matching.compare(
@@ -195,6 +224,58 @@ class VenueRecorder:
                 "comparison", self.venue, record_key("comparison", c), c, at
             )
         self.store.set_checkpoint("pending:%s:%s" % (self.venue, mid), pending, at)
+
+    def task_reconcile(self, at):
+        """Read the last `reconcile_hours` of settled funding again for every market
+        and pass it through the same path as new payments: unchanged ones are
+        `same`, changed ones become revisions, and recorded payments the venue no
+        longer lists are reported as settlement_withdrawn (never deleted). Then the
+        window's comparisons are recomputed. Running it again changes nothing."""
+        self.ensure_markets(at)
+        hours = min(self.cfg["reconcile_hours"], self.cfg["backfill_days"] * 24)
+        start = at - hours * 3600
+        total, failed = {}, 0
+        for m in self.selected:
+            if self.stop.is_set():
+                break
+            mid = m["market_id"]
+            try:
+                rows, stats = self.client.settlements(m, start, at, at)
+            except Exception as ex:
+                failed += 1
+                self.error("reconcile", mid, ex, at)
+                continue
+            tol = self.tolerance(m)
+            rows, merged = dedupe_settlements(rows, tol)
+            outcome = dict(checked=len(rows), withdrawn=0)
+            for r in rows:
+                o = self.store.put_settlement(r, at, tol)
+                outcome[o] = outcome.get(o, 0) + 1
+            if rows:
+                # Only inside what the venue answered for: a payment missing between
+                # its first and last listed one is no longer listed.
+                times = [r["settled_at_api"] for r in rows]
+                for t, rev, identity in self.store.index_rows(
+                    self.venue, mid, min(times) + tol, max(times) - tol
+                ):
+                    if all(abs(t - x) > tol for x in times):
+                        outcome["withdrawn"] += self.store.put_withdrawn(
+                            self.venue, m["asset"], mid, t, rev, at, [start, at]
+                        )
+            self.match(m, at, since=start - 2 * 86400)
+            self.bump(mid, {"reconcile_" + k: v for k, v in outcome.items()})
+            self.store.set_checkpoint(
+                "reconcile:%s:%s" % (self.venue, mid),
+                dict(at=at, window_hours=hours, **outcome),
+                at,
+            )
+            for k, v in outcome.items():
+                total[k] = total.get(k, 0) + v
+        if failed and failed == len(self.selected):
+            raise RuntimeError(
+                "Mutabakat için hiçbir piyasanın ödeme geçmişi okunamadı"
+            )
+        return "son %d saat: %s, %d piyasada hata" % (hours, total, failed)
 
     def task_candles(self, at):
         self.ensure_markets(at)

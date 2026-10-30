@@ -85,10 +85,16 @@ class Store:
               ended real, mode text, stopped_by text);
             create table if not exists settlement_index(venue text not null,
               market_id text not null, settled_at integer not null, revision integer,
-              settled_values text, record_key text,
+              settled_values text, record_key text, identity_status text,
               primary key(venue, market_id, settled_at));
             """)
         self.db.commit()
+        cols = [r[1] for r in self.db.execute("pragma table_info(settlement_index)")]
+        if "identity_status" not in cols:
+            self.db.execute(
+                "alter table settlement_index add column identity_status text"
+            )
+            self.db.commit()
         cols = [r[1] for r in self.db.execute("pragma table_info(sessions)")]
         if "source" not in cols:
             self.db.execute("alter table sessions add column source text")
@@ -257,6 +263,8 @@ class Store:
     # market and the payment's actual settlement time (whole seconds, never null). The
     # venue's announced settlement time, when it publishes one, is only a field.
     FINAL = ("MATCHED", "SIGN_CONFLICT", "TOO_SMALL", "NO_SIGNED_RATE")
+    # Stored but never counted: the payment behind it became AMBIGUOUS.
+    EXCLUDED = ("EXCLUDED_AMBIGUOUS",)
     SCHEMA = (
         "create table comparisons(venue text not null, market_id text not null,"
         " settled_at integer not null, asset text, status text,"
@@ -275,7 +283,9 @@ class Store:
         description of the repair, or None."""
         wanted = {}
         for c in self.latest("comparison"):
-            if c.get("settled_at") is not None and c["comparison_status"] in self.FINAL:
+            if c.get("settled_at") is not None and c["comparison_status"] in (
+                self.FINAL + self.EXCLUDED
+            ):
                 wanted[self._comparison_key(c)] = c
         with self.lock:
             cols = [r[1] for r in self.db.execute("pragma table_info(comparisons)")]
@@ -369,7 +379,9 @@ class Store:
         """Store a completed comparison once per (venue, market, actual settlement
         time); True when it is new. A comparison of a corrected payment (a higher
         settlement revision) replaces the earlier one. A pending one is refused."""
-        if c.get("settled_at") is None or c.get("comparison_status") not in self.FINAL:
+        if c.get("settled_at") is None or c.get("comparison_status") not in (
+            self.FINAL + self.EXCLUDED
+        ):
             raise ValueError("Yalnız tamamlanmış karşılaştırma kaydedilir")
         with self.lock:
             old = self.db.execute(
@@ -419,7 +431,7 @@ class Store:
                 self.db.execute("begin")
                 self.db.execute("delete from settlement_index")
                 self.db.executemany(
-                    "insert into settlement_index values(?,?,?,?,?,?)",
+                    "insert into settlement_index values(?,?,?,?,?,?,?)",
                     [self._settlement_row(r) for r in latest],
                 )
                 self.db.commit()
@@ -447,62 +459,64 @@ class Store:
             r.get("revision", 1),
             self._values(r),
             record_key("settlement", r),
+            r.get("identity_status", "UNIQUE"),
         )
 
-    def put_settlement(self, r, at):
+    def put_settlement(self, r, at, tolerance=None):
         """Record one settled payment; returns what it was:
         new         a payment not seen before;
         same        already recorded with the same values (also when the venue
                     reported its time with a different sub-second part);
-        correction  the venue now reports different values for a recorded payment:
-                    kept as a new revision with the previous values beside it, and
-                    a settlement_correction record; the first version stays.
+        correction  the venue now reports different values for a recorded payment
+                    (at the same instant): a new revision with the previous values
+                    beside it and a settlement_correction record; the first stays;
+        ambiguous   a different payment a few seconds from a recorded one, which
+                    cannot be told apart from it: both are kept and marked
+                    AMBIGUOUS (the recorded one by a new revision), and neither is
+                    counted or compared; an existing comparison is excluded.
+        Only payments of the same venue and market are ever matched.
         """
-        from .clients.records import SAME_EVENT, SETTLED_FIELDS, record_key
+        from .clients.records import (
+            SAME_EVENT,
+            SAME_INSTANT,
+            SETTLED_FIELDS,
+            record_key,
+        )
 
+        tol = SAME_EVENT if tolerance is None else tolerance
         t = int(round(r["settled_at"]))
         mid = str(r["market_id"])
         with self.lock:
             row = self.db.execute(
-                "select settled_at, revision, settled_values, record_key"
-                " from settlement_index"
+                "select settled_at, revision, settled_values, record_key,"
+                " identity_status from settlement_index"
                 " where venue=? and market_id=? and settled_at between ? and ?"
                 " order by abs(settled_at - ?) limit 1",
-                (r["venue"], mid, t - SAME_EVENT, t + SAME_EVENT, t),
+                (r["venue"], mid, t - tol, t + tol, t),
             ).fetchone()
             if row is None:
                 r = dict(r, settled_at=t, revision=1)
-                self.db.execute(
-                    "insert into settlement_index values(?,?,?,?,?,?)",
-                    self._settlement_row(r),
-                )
+                self._index_settlement(r, insert=True)
                 self.put_record(
                     "settlement", r["venue"], record_key("settlement", r), r, at
                 )
                 return "new"
-            first_t, rev, values, key = row
+            first_t, rev, values, key, identity = row
             if values == self._values(r):
                 return "same"
+            api = r.get("settled_at_api", t)
+            if abs(api - first_t) > SAME_INSTANT + 0.5:
+                return self._ambiguous(r, t, first_t, rev, identity, at)
             before = json.loads(values)
             r = dict(
                 r,
                 settled_at=first_t,
                 revision=rev + 1,
+                identity_status=identity or "UNIQUE",
                 correction_of=key,
                 previous=dict(zip(list(SETTLED_FIELDS) + ["conflict"], before)),
             )
-            self.db.execute(
-                "update settlement_index set revision=?, settled_values=?, record_key=?"
-                " where venue=? and market_id=? and settled_at=?",
-                (
-                    rev + 1,
-                    self._values(r),
-                    record_key("settlement", r),
-                    r["venue"],
-                    mid,
-                    first_t,
-                ),
-            )
+            self._index_settlement(r)
             note = dict(
                 venue=r["venue"],
                 asset=r["asset"],
@@ -525,6 +539,130 @@ class Store:
                 "settlement", r["venue"], record_key("settlement", r), r, at
             )
             return "correction"
+
+    def _ambiguous(self, r, t, first_t, rev, identity, at):
+        from .clients.records import record_key
+
+        venue, mid = r["venue"], str(r["market_id"])
+        new = dict(
+            r,
+            settled_at=t,
+            revision=1,
+            identity_status="AMBIGUOUS",
+            ambiguous_with=first_t,
+        )
+        # More than a second from the recorded time, so its own whole second.
+        self._index_settlement(new, insert=True)
+        self.put_record("settlement", venue, record_key("settlement", new), new, at)
+        if identity != "AMBIGUOUS":
+            old = next(
+                (
+                    x
+                    for x in self.latest("settlement", venue)
+                    if str(x["market_id"]) == mid
+                    and int(round(x["settled_at"])) == first_t
+                ),
+                None,
+            )
+            if old is not None:
+                old = dict(
+                    old,
+                    revision=rev + 1,
+                    identity_status="AMBIGUOUS",
+                    ambiguous_with=t,
+                    detected_at=at,
+                )
+                self._index_settlement(old)
+                self.put_record(
+                    "settlement", venue, record_key("settlement", old), old, at
+                )
+                self.exclude_comparison(venue, mid, first_t, rev + 1, at)
+        return "ambiguous"
+
+    def _index_settlement(self, r, insert=False):
+        row = self._settlement_row(r)
+        if insert:
+            self.db.execute("insert into settlement_index values(?,?,?,?,?,?,?)", row)
+        else:
+            self.db.execute(
+                "update settlement_index set revision=?, settled_values=?,"
+                " record_key=?, identity_status=?"
+                " where venue=? and market_id=? and settled_at=?",
+                (row[3], row[4], row[5], row[6], row[0], row[1], row[2]),
+            )
+
+    def exclude_comparison(self, venue, mid, settled_at, revision, at):
+        """A payment that became AMBIGUOUS no longer supports its comparison: a new
+        revision of the comparison is stored as EXCLUDED_AMBIGUOUS (never counted)."""
+        from .clients.records import record_key
+
+        with self.lock:
+            old = self.db.execute(
+                "select body from comparisons where venue=? and market_id=?"
+                " and settled_at=?",
+                (venue, str(mid), int(settled_at)),
+            ).fetchone()
+        if old is None:
+            return False
+        c = dict(
+            json.loads(old[0]),
+            comparison_status="EXCLUDED_AMBIGUOUS",
+            settlement_revision=revision,
+            excluded_at=at,
+        )
+        self.put_comparison(c, at)
+        self.put_record("comparison", venue, record_key("comparison", c), c, at)
+        return True
+
+    def observed_interval(self, venue, mid, last=50):
+        """Median gap of the market's last recorded (non-ambiguous) payments, or None
+        with fewer than six."""
+        with self.lock:
+            ts = [
+                t
+                for (t,) in self.db.execute(
+                    "select settled_at from settlement_index where venue=? and"
+                    " market_id=? and coalesce(identity_status, 'UNIQUE')"
+                    " != 'AMBIGUOUS' order by settled_at desc limit ?",
+                    (venue, str(mid), last),
+                )
+            ]
+        ts.sort()
+        gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
+        if len(ts) < 6 or not gaps:
+            return None
+        return gaps[len(gaps) // 2]
+
+    def index_rows(self, venue, mid, lo, hi):
+        """[(settled_at, revision, identity_status)] of a market between two times."""
+        with self.lock:
+            return self.db.execute(
+                "select settled_at, revision, identity_status from settlement_index"
+                " where venue=? and market_id=? and settled_at between ? and ?"
+                " order by settled_at",
+                (venue, str(mid), int(lo), int(hi)),
+            ).fetchall()
+
+    def put_withdrawn(self, venue, asset, mid, settled_at, revision, at, window):
+        """A recorded payment the venue no longer lists: reported, never deleted."""
+        from .clients.records import record_key
+
+        note = dict(
+            venue=venue,
+            asset=asset,
+            market_id=mid,
+            settled_at=int(settled_at),
+            revision=revision,
+            detected_at=at,
+            window=window,
+        )
+        return self.put_record(
+            "settlement_withdrawn",
+            venue,
+            record_key("settlement_withdrawn", note),
+            note,
+            at,
+        )
 
     def comparisons(self, venue=None, status=None):
         q, args = "select body from comparisons where 1=1", []
