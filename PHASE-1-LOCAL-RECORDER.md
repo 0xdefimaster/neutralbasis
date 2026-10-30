@@ -140,12 +140,26 @@ phase1-evidence/
 
 ## Ödeme kimliği ve veri güvenilirliği
 - **Ödeme kimliği:** her ödemenin kimliği borsa + piyasa + `settled_at` üçlüsüdür. `settled_at` her borsada tam saniye UTC epoch değeridir; API'nin verdiği tam zaman `settled_at_api` alanında ayrıca saklanır.
-- **Zaman kayması:** aynı piyasada 60 saniye içindeki iki zaman aynı ödeme sayılır. Saniye altı farklar iki ayrı kayıt oluşturmaz; dört borsada da ödeme aralığı en az 1 saattir.
+- **Aynı ödeme toleransı:** aynı piyasada birbirine çok yakın iki ödeme zamanı aynı ödeme sayılabilir.
+  - Ayar `same_event_seconds`: borsa bazında, ya da `"Borsa|VARLIK"` ile piyasa bazında.
+  - Etkin tolerans şu üçünün en küçüğüdür: ayar, piyasanın gözlenen (yoksa beyan edilen) ödeme aralığının %1'i ve 60 sn. Saatlik piyasada en fazla 36 sn olur; aralık bilinmiyorsa 1 sn.
+  - Farklı borsa ya da farklı piyasanın ödemeleri hiçbir koşulda birleşmez.
+- **Kayma ve düzeltme:** tolerans içinde aynı değerler aynı ödemedir; saniye altı farklar iki kayıt oluşturmaz. Aynı anda (1 sn içinde) farklı değer borsa düzeltmesidir.
 - **Borsa düzeltmesi:** borsa kayıtlı bir ödemenin değerini sonradan değiştirirse yeni bir revizyon olarak saklanır.
   - İlk sürüm silinmez.
   - Önceki ve yeni değer bir `settlement_correction` kaydına yazılır.
   - O ödemenin karşılaştırması yeni değerle yeniden hesaplanır ve eskisinin yerine geçer; sayı artmaz.
-  - Düzeltmeler yalnızca her turda yeniden okunan son 2 saat içinde yakalanır.
+- **Belirsiz kimlik (AMBIGUOUS):** tolerans içinde ama 1 sn'den uzak ve farklı değerli iki kayıt hangisinin gerçek ödeme olduğu ayırt edilemeyen iki kayıttır.
+  - İkisi de saklanır ve `identity_status=AMBIGUOUS` olur. Kayıtlı olan yeni bir revizyonla işaretlenir; hiçbir şey silinmez.
+  - İkisi de ödeme sayımına ve karşılaştırmalara girmez.
+  - Varsa eski karşılaştırması `EXCLUDED_AMBIGUOUS` olur ve sayılmaz.
+- **Geçmiş mutabakatı:** ayrı bir görev varsayılan olarak 6 saatte bir (`reconcile_seconds`) her piyasanın son 24 saatini (`reconcile_hours`, üst sınır `backfill_days`) yeniden okur. Kayıtlar yeni ödemelerle aynı yoldan geçer:
+  - değişmeyen ödeme yeni kayıt oluşturmaz;
+  - değişen ödeme yeni revizyon olur;
+  - kayıtlı olup artık listelenmeyen ödeme silinmez, `settlement_withdrawn` olarak raporlanır;
+  - pencerenin karşılaştırmaları yeniden hesaplanır.
+
+  Görev tekrar çalıştırılırsa hiçbir şey değişmez. Kontrol noktası ve istatistikleri (`reconcile:<borsa>:<piyasa>`) yeniden başlatmada korunur.
 - **Çelişkili kayıt:** aynı yanıtta aynı ödeme için farklı değerler gelirse ödeme `CONFLICT` olarak işaretlenir ve oranı bilinmiyor kabul edilir; değerlerden biri seçilmez. Eşleştirmede `NO_SIGNED_RATE` olur ve tutarlılık sayısına girmez.
 - **Eksik veri:** eksik veri hiçbir yerde sıfır sayılmaz: eksik alan `null` kalır, zorunlu alan eksikse yanıt reddedilir.
 - **Çökme güvenliği:**

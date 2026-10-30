@@ -328,3 +328,23 @@ Borsa düzeyindeki yetenek durumu artık gerekli ama yeterli değil. Bir borsa d
 
 ## Yerel piyasa kanıtı kaydedici (Faz 1)
 `tools/phase1_recorder/`: Hyperliquid, Lighter Core, Lighter RH ve Extended için public piyasa verisini (piyasa bilgisi, anlık funding, gerçekleşmiş funding, 1h mumlar, defter) ham ve normalleştirilmiş olarak kaydeden bağımsız araç. Yayımlanan oranı sonraki ödemeyle eşleştirir; kapsam ve tutarlılık raporu ile tek ZIP paketi üretir. Emir göndermez, hesap okumaz, motoru başlatmaz, motorun veritabanına yazmaz. Kurulum ve kullanım: `PHASE-1-LOCAL-RECORDER.md`. Gerçek veri ilk olarak kullanıcının bilgisayarında toplanacak; bulut ortamı borsa API'lerine bağlanamıyor.
+
+## Paper muhasebe ayrımı (PR #54)
+Her funding ödemesinin bir durumu var:
+- `SETTLED`: oran yayımlandı, fiyat gözlendi.
+- `SETTLED_ESTIMATED_PRICE`: oran yayımlandı, fiyat tahmini (giriş dolumu).
+- `NOT_RECORDED`: bekleme sonrası oran yayımlanmadı.
+- `UNKNOWN`: borsanın geçmişi okunamadı.
+
+Kurallar:
+- Eski kayıtların durumu mevcut alanlarından türetilir (`unverified`, `valuation_estimated`); hiçbir kayıt silinmez.
+- Geçmiş okunamazken de takvimdeki her ödeme `UNKNOWN` olarak olası maliyetiyle kaydedilir. Geçmiş okunabildiğinde `SETTLED` ya da `NOT_RECORDED` olur.
+- **Üç ayrı sonuç** (pozisyon, kapanmış işlem ve dönem raporu ile panelde):
+  - gerçekleşmiş PnL: fiyat, ücret ve yalnız `SETTLED` funding;
+  - tahmini PnL: gerçekleşmiş + tahmini fiyatlı funding + açık pozisyonların gerçekleşmemiş PnL'si;
+  - belirsizlik riski: `NOT_RECORDED` ve `UNKNOWN` ödemelerin olası maliyeti.
+- **Muhasebe defteri:**
+  - Doğrulanmamış ödeme tutarsız (`null`) bir `funding_not_recorded` ya da `funding_unknown` olayıdır; gerçekleşmiş 0 olarak görünmez.
+  - Mutabakat yalnız `SETTLED` olaylarla yapılır: işlem neti eksi tahmini funding.
+- **Değişmeyenler:** cüzdan bakiyesi, pozisyon neti, büyüklük ve teminat hesabı, günlük kayıp sınırı, sinyaller ve emir mantığı aynıdır.
+- **Açık konu:** günlük kayıp sınırının belirsizlik riskini hesaba katması ayrı tasarım ve onay bekliyor.
