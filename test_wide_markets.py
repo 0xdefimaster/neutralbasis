@@ -125,14 +125,23 @@ class OrderRulesTests(unittest.TestCase):
             precision=dict(amount=0.01),
             limits=dict(amount=dict(min=0.1), cost=dict(min=5)),
         )
-        self.assertEqual(order_rules(ex, m), dict(step=0.1, minimum=1.0, min_quote=5.0))
+        self.assertEqual(
+            order_rules(ex, m),
+            dict(step=0.1, minimum=1.0, min_quote=5.0, contract_size=10.0),
+        )
+        # Without a published contract size the base-unit rules are unknown.
+        unknown = order_rules(ex, dict(m, contractSize=None))
+        self.assertEqual(
+            unknown, dict(step=None, minimum=None, min_quote=5.0, contract_size=None)
+        )
         ex.precisionMode = ccxt.DECIMAL_PLACES
         self.assertAlmostEqual(
-            order_rules(ex, dict(precision=dict(amount=3)))["step"], 0.001
+            order_rules(ex, dict(contractSize=1, precision=dict(amount=3)))["step"],
+            0.001,
         )
         # Unknown precision modes and missing limits are left unpublished.
         ex.precisionMode = ccxt.SIGNIFICANT_DIGITS
         self.assertEqual(
-            order_rules(ex, dict(precision=dict(amount=3))),
-            dict(step=None, minimum=None, min_quote=None),
+            order_rules(ex, dict(contractSize=1, precision=dict(amount=3))),
+            dict(step=None, minimum=None, min_quote=None, contract_size=1.0),
         )

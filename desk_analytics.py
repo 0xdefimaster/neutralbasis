@@ -58,6 +58,7 @@ def market_view(engine):
                         venue=v,
                         mark=m["mark"],
                         rate=m.get("rate"),
+                        interval=m.get("interval"),
                         next=m.get("next"),
                         received=m["received"],
                         fee=fee,
@@ -383,7 +384,7 @@ class DeskHistorySource:
             if v in VENUES:
                 if a in e.cfg["symbols"] or not e.feed.meta.get(v, {}).get(a):
                     continue
-                interval = e.feed.meta[v][a].get("interval") or 3600
+                interval = e.feed.meta[v][a].get("interval")
                 ptype = e.feed.meta[v][a].get("price_type", "trade")
             else:
                 x = rows_by.get((v, a)) or universe.get(v, {}).get(a)
@@ -425,7 +426,7 @@ class DeskHistorySource:
                     end=hour(now()),
                 ),
                 rates=rates,
-                interval=interval or old.get("interval") or 3600,
+                interval=interval or old.get("interval"),
                 ts=now(),
             )
 
@@ -637,7 +638,9 @@ class DeskEngine(RiskEngine):
                                 self.wide.histories[(v, a, k)] = dict(
                                     prices=prices[v],
                                     rates=rates,
-                                    interval=3600,
+                                    interval=feed.meta.get(v, {})
+                                    .get(a, {})
+                                    .get("interval"),
                                     ts=now(),
                                 )
                         else:

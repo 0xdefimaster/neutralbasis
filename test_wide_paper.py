@@ -2100,7 +2100,10 @@ class DeskIntegrationTests(unittest.TestCase):
                 self.assertEqual((rise["fee"], rise["fee_source"]), (0.0004, "user"))
                 for r in rows:
                     m = f.meta[r["venue"]][r["asset"]]
-                    self.assertEqual(r["interval"], m.get("interval") or 3600)
+                    # The venue's own schedule; an unknown one is never taken as 1h.
+                    self.assertEqual(r["interval"], m.get("interval"))
+                    if not r["interval"]:
+                        continue
                     self.assertAlmostEqual(
                         r["rate"] * r["interval"] / 3600, r["raw_rate"]
                     )
@@ -2131,6 +2134,7 @@ class UniverseRowsTests(unittest.TestCase):
             leverage=20,
             volume=5e6,
             oi=2e6,
+            contract_size=1.0,
         )
         x.update(kw)
         return x
@@ -2157,6 +2161,44 @@ class UniverseRowsTests(unittest.TestCase):
             (r["raw_rate"], r["interval"], r["price_type"]), (0.0004, 14400, "mark")
         )
         self.assertEqual(len(wide_paper.rank(out, wide_paper.WIDE_DEFAULTS, T0)), 1)
+
+    def test_unknown_schedule_or_contract_size_is_left_out(self):
+        rows = [
+            dict(self.entry(), venue="A", asset="X", kind="perp", contract_size=None),
+            dict(self.entry(), venue="B", asset="X", kind="perp", interval=None),
+            dict(self.entry(), venue="C", asset="X", kind="perp"),
+        ]
+        why = {}
+        groups = wide_paper.usable_rows(rows, T0, why)
+        self.assertEqual(list(groups["X"]), ["C"])
+        self.assertEqual(
+            why, {"Kontrat büyüklüğü bilinmiyor": 1, "Funding aralığı yok": 1}
+        )
+
+    def test_native_row_without_a_schedule_is_not_made_hourly(self):
+        class Feed:
+            meta = {
+                "RISEx": {
+                    "BTC": dict(mark=100.0, rate=0.0001, received=T0, max_leverage=10)
+                }
+            }
+
+        class Wide:
+            def snapshot(self):
+                return [], {}
+
+            def universe_snapshot(self):
+                return {}
+
+        e = type("E", (), {})()
+        e.feed, e.wide = Feed(), Wide()
+        e.fee = lambda v: 0.0004
+        (r,) = wide_paper.EngineSource(e).market_rows()
+        self.assertIsNone(r["interval"])
+        self.assertIsNone(r["raw_rate"])
+        why = {}
+        self.assertEqual(wide_paper.usable_rows([r], T0, why), {})
+        self.assertEqual(why, {"Funding aralığı yok": 1})
 
     def test_held_asset_stays_even_when_thin(self):
         universe = {"Bybit": {"DUST": self.entry(oi=5e4)}}

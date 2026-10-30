@@ -218,10 +218,16 @@ def usable_rows(rows, at, why=None):
     for r in rows:
         if r.get("kind", "perp") != "perp":
             continue
-        if r.get("rate") is None or r.get("raw_rate") is None:
+        if r.get("rate") is None:
             reason = "Funding oranı yok"
         elif not r.get("interval"):
             reason = "Funding aralığı yok"
+        elif r.get("raw_rate") is None:
+            reason = "Funding oranı yok"
+        elif "contract_size" in r and not r["contract_size"]:
+            # Book sizes and lots are in contracts; without the multiplier neither the
+            # quantity nor the cost is known.
+            reason = "Kontrat büyüklüğü bilinmiyor"
         elif r.get("fee") is None:
             reason = "Taker ücreti bilinmiyor"
         elif not (r.get("mark") or 0) > 0:
@@ -845,6 +851,7 @@ def universe_rows(universe, rows, held=()):
                     step=x.get("step"),
                     minimum=x.get("minimum"),
                     min_quote=x.get("min_quote"),
+                    contract_size=x.get("contract_size"),
                 )
             )
     return out
@@ -871,7 +878,12 @@ class EngineSource:
             for a, m in list(e.feed.meta.get(v, {}).items()):
                 if not m or m.get("rate") is None:
                     continue
-                interval = m.get("interval") or 3600
+                # An unknown schedule stays unknown: the row is left out of the desk
+                # ("Funding aralığı yok") instead of being taken for an hourly one.
+                interval = m.get("interval")
+                raw = m.get("raw_rate")
+                if raw is None and interval:
+                    raw = m["rate"] * interval / 3600
                 rows.append(
                     dict(
                         asset=a,
@@ -879,8 +891,10 @@ class EngineSource:
                         kind="perp",
                         mark=m["mark"],
                         rate=m["rate"],
-                        raw_rate=m.get("raw_rate", m["rate"] * interval / 3600),
+                        raw_rate=raw,
                         interval=interval,
+                        # The native APIs quote sizes in base units.
+                        contract_size=1.0,
                         next=m.get("next"),
                         received=m["received"],
                         fee=fee,

@@ -130,7 +130,7 @@ def order_rules(ex, m):
     """Size step, minimum amount (base units) and minimum cost of a CCXT market; book
     sizes are scaled by contractSize, so the rules are too. Unpublished rules stay None.
     """
-    size = finite(m.get("contractSize")) or 1.0
+    size = finite(m.get("contractSize"))
     step = finite((m.get("precision") or {}).get("amount"))
     if step is not None and ccxt is not None:
         mode = getattr(ex, "precisionMode", None)
@@ -140,10 +140,12 @@ def order_rules(ex, m):
             step = None
     limits = m.get("limits") or {}
     minimum = finite((limits.get("amount") or {}).get("min"))
+    # Without a published contract size the base-unit rules are unknown, not 1:1.
     return dict(
-        step=step * size if step else None,
-        minimum=minimum * size if minimum else None,
+        step=step * size if step and size else None,
+        minimum=minimum * size if minimum and size else None,
         min_quote=finite((limits.get("cost") or {}).get("min")),
+        contract_size=size,
     )
 
 
@@ -943,10 +945,14 @@ class WideMarkets:
             if t and abs(at - t / 1000) > 30:
                 raise ValueError("Defter eski")
             multiplier = (
-                number(ex.market(row["symbol"]).get("contractSize") or 1)
+                finite(ex.market(row["symbol"]).get("contractSize"))
                 if kind == "perp"
                 else 1
             )
+            if not multiplier:
+                raise ValueError(
+                    "Kontrat büyüklüğü bilinmiyor; defter miktarı çevrilemez"
+                )
             bids = [
                 (number(x[0]), number(x[1]) * multiplier)
                 for x in book["bids"]
@@ -982,7 +988,7 @@ def expanded_view(engine, base):
                     quote="USDG" if r["venue"] == "Lighter" else "USD",
                     oi=None,
                     volume=None,
-                    interval=3600,
+                    interval=r.get("interval"),
                     execution=r["venue"] in ("Lighter", "Extended"),
                 )
             )
