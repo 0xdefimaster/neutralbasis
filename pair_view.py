@@ -330,7 +330,7 @@ class PairViews:
                 fee = None
             native[v] = dict(
                 rate=m.get("rate"),
-                interval=m.get("interval") or 3600,
+                interval=m.get("interval"),
                 next=m.get("next"),
                 fee=fee,
                 mark=m.get("mark"),

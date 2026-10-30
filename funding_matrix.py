@@ -247,7 +247,7 @@ class MatrixCache:
                         asset=a,
                         rate=m.get("rate"),
                         mark=m.get("mark"),
-                        interval=m.get("interval") or 3600,
+                        interval=m.get("interval"),
                         fee=fee,
                         received=m.get("received"),
                     )
