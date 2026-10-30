@@ -1470,7 +1470,13 @@ class Engine:
                 fresh = self.evaluate(
                     best["asset"], best["long"], best["short"], bs, best["analysis"]
                 )
-                if fresh["eligible"] and self.running:
+                # A paper workspace replaces this two-venue desk: once one has started,
+                # this desk only monitors and closes what it already holds.
+                if (
+                    fresh["eligible"]
+                    and self.running
+                    and self.cfg.get("legacy_entries", True)
+                ):
                     self.open(fresh)
             self.candidates.sort(
                 key=lambda c: (not c["eligible"], -(c.get("net") or -1e9))
@@ -1776,11 +1782,30 @@ def serve(engine, port, host="127.0.0.1", password=None):
                     elif self.path == "/api/wide_reset" and hasattr(
                         engine, "wide_paper"
                     ):
+                        if body.get("venue_capital") is None:
+                            raise ValueError(
+                                "Ortak cüzdanla yeni dönem başlatılamaz; her borsa kendi "
+                                "teminatıyla çalışır (çalışma alanı)"
+                            )
                         engine.wide_paper.reset(
                             body.get("capital"),
                             body.get("venue_capital"),
                             body.get("venues"),
                         )
+                    elif self.path == "/api/wide_workspace" and hasattr(
+                        engine, "start_workspace"
+                    ):
+                        engine.start_workspace(body)
+                    elif self.path == "/api/wide_venue" and hasattr(
+                        engine, "wide_paper"
+                    ):
+                        engine.wide_paper.set_venue_enabled(
+                            body.get("venue"), bool(body.get("enabled"))
+                        )
+                    elif self.path == "/api/wide_close_all" and hasattr(
+                        engine, "wide_paper"
+                    ):
+                        engine.wide_paper.close_all()
                     elif self.path == "/api/wide_fees" and hasattr(
                         engine, "wide_paper"
                     ):

@@ -238,3 +238,23 @@ Yakınsama artık "fark geçmişte en fazla ne kadar açıldıysa o çizgi" kura
   - Ödemeleri yayımlanan aralıkla uyuşmayan piyasa da tek başına araştırmada kalır.
 - **Panel:** Borsalar sayfasında 9 DEX × 22 yetenek tablosu ve borsa başına paper uygunluğu. Hücre ipucu yöntemi, kaynağı, sınırı ve son doğrulama zamanını gösterir.
 - **Ne zaman uygun olur:** motor çalıştıkça kanıt birikir. İşaret ve aralık doğrulanana kadar o borsa bacaklı funding ve yakınsama işlemi açılmaz. Doğrulama birkaç tur ile birkaç saat arası sürer.
+
+## Paper çalışma alanı (Faz 0.2)
+Çoklu paper sayfasının başında "Çalışma alanı" kartı var.
+- **Yeni dönem:** yalnızca ilk perp DEX evreninden taranan borsalar seçilebilir; CEX'ler salt okunur referanstır.
+  - Seçilebilenler: Hyperliquid, Paradex, Lighter Core, Lighter RH, Extended, RISEx, TxFlow, Arcus. Variational'ın bağlayıcısı olmadığı için seçilemez.
+  - Her borsaya ayrı teminat girilir. Funding ve yakınsama seçilir; hibrit Faz 2'de gelecek.
+  - Ayarlar başlangıçta birlikte uygulanır: büyüklük, kaldıraç, azami pozisyon, kayıp limitleri, asgari net, yakınsama kaldıracı ve stop ayarları. Bunlar dönemin yapılandırması sayılır, dönem içi değişiklik sayılmaz.
+  - Her borsa satırında o borsanın funding ve yakınsama uygunluğu (yetenek kaydı) görünür.
+- **Başlatma açık bir eylemdir;** kendiliğinden sıfırlama yoktur.
+  - Önceki dönem kendi çalışma alanı ve ayarlarıyla arşivlenir.
+  - Açık pozisyon varken başlatılamaz.
+  - Çalışma alanı başlayınca eski Lighter RH–Extended masası yeni giriş açmaz; açık pozisyonlarını izlemeye devam eder. Böylece iki paper evreni yan yana çalışmaz.
+- **Ortak cüzdanla yeni dönem başlatılamaz.** Çalışma alanı öncesi dönemler arşivde "çalışma alanı öncesi" etiketiyle okunur kalır.
+- **Çalışan dönem:** borsalar, başlangıç teminatı, özsermaye, strateji ve ayarlar görünür.
+  - Bir borsada yeni girişler kapatılıp açılabilir. Bu teminatı ve açık bacakları değiştirmez; dönem raporunda ayar değişikliği sayılır. Huni bu borsaları "Çalışma alanı dışında" sayar.
+  - "Tüm paper pozisyonlarını kapat" bütün pozisyonları bir sonraki turda kapatır.
+- **API:**
+  - `POST /api/wide_workspace` — `{venues: {borsa: tutar}, strategies: {funding, convergence}, config: {...}}`
+  - `POST /api/wide_venue` — `{venue, enabled}`
+  - `POST /api/wide_close_all`
