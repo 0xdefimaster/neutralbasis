@@ -178,6 +178,13 @@ class LedgerTests(unittest.TestCase):
             (position,),
         ).fetchall()
 
+    def kinds(self, position):
+        return self.store.db.execute(
+            "select event_key, kind, amount from ledger_events where position=?"
+            " order by id",
+            (position,),
+        ).fetchall()
+
     def test_a_closed_trade_reconciles_with_its_payments(self):
         self.setup_pair()
         self.desk.cycle()
@@ -222,8 +229,15 @@ class LedgerTests(unittest.TestCase):
             self.src.books[(v, "BTC")] = book(100.0, self.clock)
         self.src.rows = [dict(r, received=self.clock) for r in self.src.rows]
         self.desk.cycle(entries=False)
-        zeros = [k for k, a in self.events(p["id"]) if a == 0 and "Binance" in k]
-        self.assertTrue(zeros)
+        # An unpublished payment is recorded with no amount, never as a realized 0.
+        unsettled = [
+            (k, kind, a)
+            for k, kind, a in self.kinds(p["id"])
+            if "Binance" in k and kind == "funding_not_recorded"
+        ]
+        self.assertTrue(unsettled)
+        self.assertTrue(all(a is None for _, _, a in unsettled))
+        self.assertFalse([a for k, _, a in self.kinds(p["id"]) if a == 0])
         self.store.mark("Binance", "BTC", T0 + 8 * 3600 - 10, 100.0)
         self.src.rates[("Binance", "BTC")].append(
             dict(ts=T0 + 8 * 3600, rate=0.0008, value=None, audit_id=None)
@@ -233,7 +247,11 @@ class LedgerTests(unittest.TestCase):
         late = [(k, a) for k, a in self.events(p["id"]) if k.endswith(":late")]
         self.assertEqual(len(late), 1)
         self.assertGreater(late[0][1], 0)
-        paid = sum(a for k, a in self.events(p["id"]) if k.startswith("payment:"))
+        paid = sum(
+            a
+            for k, a in self.events(p["id"])
+            if k.startswith("payment:") and a is not None
+        )
         self.assertAlmostEqual(paid, p["funding"], places=9)
 
     def test_periods_follow_resets_and_workspaces(self):
