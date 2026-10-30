@@ -19,7 +19,13 @@ import urllib.parse
 
 from .clients import LABELS, make_client
 from .clients.base import CONFLICT, DECLARED, OBSERVED, UNKNOWN, VERIFIED
-from .clients.records import REQUIRED, record_key
+from .clients.records import (
+    REQUIRED,
+    configured_tolerance,
+    counted,
+    record_key,
+    same_event_tolerance,
+)
 from .matching import observed_interval
 from .storage import VENUE_DIRS, iso, sha256
 
@@ -254,8 +260,10 @@ def coverage(store, cfg, now=None):
         client = make_client(v, store, cfg)
         markets = store.checkpoint("markets:" + v) or []
         snaps = store.records("funding_snapshot", v)
-        paid = store.latest("settlement", v)
+        all_paid = store.latest("settlement", v)
+        paid = counted(all_paid)  # AMBIGUOUS payments are never counted
         corrections = store.records("settlement_correction", v)
+        withdrawn = store.records("settlement_withdrawn", v)
         candles = store.records("candle", v)
         books = store.records("orderbook", v)
         comps = store.comparisons(v)
@@ -335,6 +343,22 @@ def coverage(store, cfg, now=None):
                     p.get("settled_rate_status") == "CONFLICT" for p in mp
                 ),
                 corrected_payments=sum(str(c["market_id"]) == key for c in corrections),
+                ambiguous_payments=sum(
+                    str(p["market_id"]) == key
+                    and p.get("identity_status") == "AMBIGUOUS"
+                    for p in all_paid
+                ),
+                withdrawn_payments=sum(str(w["market_id"]) == key for w in withdrawn),
+                excluded_comparisons=sum(
+                    str(c["market_id"]) == key
+                    and c["comparison_status"] in store.EXCLUDED
+                    for c in comps
+                ),
+                reconcile=store.checkpoint("reconcile:%s:%s" % (v, mid)),
+                same_event_tolerance=same_event_tolerance(
+                    configured_tolerance(cfg, v, m["asset"]),
+                    store.observed_interval(v, mid) or client.declared_interval,
+                ),
                 jitter_merged=stats.get("jitter_merged", 0),
                 out_of_order=stats.get("out_of_order", 0)
                 + stats.get("candle_out_of_order", 0),
@@ -538,6 +562,28 @@ def text_report(cov, cons=None):
                     m["corrected_payments"],
                     m["conflicting_payments"],
                     m["jitter_merged"],
+                ),
+                "  - Belirsiz kimlikli ödeme (sayılmaz): %d · listeden kaybolan: %d · dışlanan karşılaştırma: %d · tolerans %.1f sn"
+                % (
+                    m["ambiguous_payments"],
+                    m["withdrawn_payments"],
+                    m["excluded_comparisons"],
+                    m["same_event_tolerance"],
+                ),
+                "  - Son mutabakat: %s"
+                % (
+                    "yok"
+                    if not m["reconcile"]
+                    else "%s, son %s saat, %s"
+                    % (
+                        iso(m["reconcile"]["at"]),
+                        m["reconcile"]["window_hours"],
+                        {
+                            k: x
+                            for k, x in m["reconcile"].items()
+                            if k not in ("at", "window_hours")
+                        },
+                    )
                 ),
                 "  - Published/settled comparisons: %d %s"
                 % (m["comparisons"], m["comparison_statuses"] or ""),

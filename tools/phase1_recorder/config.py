@@ -43,6 +43,13 @@ DEFAULTS = dict(
     # Minimum spacing between two requests to one venue (seconds).
     min_spacing=dict(Hyperliquid=0.3, LighterCore=1.0, Lighter=1.0, Extended=0.3),
     candle_retry_limit=3,
+    # Two settlement times of one market closer than this may be one payment. Per
+    # venue or per "Venue|ASSET"; the effective value is also capped at 60 s and at
+    # 1% of the market's payment interval (records.same_event_tolerance).
+    same_event_seconds=dict(Hyperliquid=60, LighterCore=60, Lighter=60, Extended=60),
+    # Historical reconciliation: how often, and how far back (capped at backfill_days).
+    reconcile_seconds=6 * 3600,
+    reconcile_hours=24,
 )
 
 

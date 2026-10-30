@@ -466,8 +466,12 @@ class PersistenceTests(Base):
             )
             for c in fundings
         ]
-        # Only the last two hours before the checkpoint are read again, not 2 days.
-        self.assertTrue(all(s >= self.clock() - 4 * 3600 for s in starts), starts)
+        # The settlement task reads only the last two hours before the checkpoint;
+        # the reconciliation task reads its 24-hour window; nothing reads 2 days.
+        recent = [s for s in starts if s >= self.clock() - 4 * 3600]
+        older = [s for s in starts if s < self.clock() - 4 * 3600]
+        self.assertTrue(recent, starts)
+        self.assertTrue(all(s >= self.clock() - 24 * 3600 - 60 for s in older), starts)
         candle_calls = [c for c in later if "candles" in c[1]]
         self.assertTrue(len(candle_calls) <= 4)
 
