@@ -267,7 +267,16 @@ def coverage(store, cfg, now=None):
             mid = m["market_id"]
             key = str(mid)
             mp = [p for p in paid if str(p["market_id"]) == key]
-            mc = [c for c in comps if str(c["market_id"]) == key]
+            # One completed comparison per actual settlement, whatever the index holds.
+            mc = list(
+                {
+                    int(round(c["settled_at"])): c
+                    for c in comps
+                    if str(c["market_id"]) == key
+                    and c.get("settled_at") is not None
+                    and c["comparison_status"] in store.FINAL
+                }.values()
+            )
             hours = {
                 int(c["open_time"])
                 for c in candles
@@ -364,8 +373,38 @@ def unverified_fields(v, client, snaps):
     return out
 
 
+def comparison_index(store):
+    """Problems of the comparison index: rows repeated for one settlement, rows
+    without a settlement, and disagreement with the normalized comparison records."""
+    rows, distinct = store.comparison_counts()
+    problems = []
+    if rows != distinct:
+        problems.append("aynı ödeme için %d fazla satır" % (rows - distinct))
+    with store.lock:
+        index = {
+            (v, m, t)
+            for v, m, t in store.db.execute(
+                "select venue, market_id, settled_at from comparisons"
+            )
+        }
+    jsonl = {
+        (c["venue"], str(c["market_id"]), int(round(c["settled_at"])))
+        for c in store.records("comparison")
+        if c.get("settled_at") is not None
+    }
+    if any(t is None for _, _, t in index):
+        problems.append("ödeme zamanı olmayan satır")
+    if index != jsonl:
+        problems.append(
+            "dizin ile JSONL farklı: dizinde fazla %d, JSONL'de fazla %d"
+            % (len(index - jsonl), len(jsonl - index))
+        )
+    return dict(rows=rows, distinct=distinct, jsonl=len(jsonl), problems=problems)
+
+
 def consistency(store, cfg):
     bad_hashes, raw_count = verify_hashes(store)
+    comp = comparison_index(store)
     bad_schemas, rec_count = verify_schemas(store)
     replayed, replay_problems = replay(store, cfg)
     return dict(
@@ -379,7 +418,12 @@ def consistency(store, cfg):
         replay_problems=[
             dict(sha256=s, endpoint=e, problem=p) for s, e, p in replay_problems
         ],
-        ok=not bad_hashes and not bad_schemas and not replay_problems,
+        comparison_index=comp,
+        repair=store.checkpoint("repair:comparisons"),
+        ok=not bad_hashes
+        and not bad_schemas
+        and not replay_problems
+        and not comp["problems"],
     )
 
 
@@ -449,6 +493,17 @@ def text_report(cov, cons=None):
             % (cons["raw_files"], len(cons["raw_hash_failures"])),
             "  Kayıt: %d, şema hatası: %d"
             % (cons["records"], len(cons["schema_failures"])),
+            "  Karşılaştırma dizini: %d satır, %d tekil ödeme, JSONL %d%s"
+            % (
+                cons["comparison_index"]["rows"],
+                cons["comparison_index"]["distinct"],
+                cons["comparison_index"]["jsonl"],
+                (
+                    (" · " + "; ".join(cons["comparison_index"]["problems"]))
+                    if cons["comparison_index"]["problems"]
+                    else ""
+                ),
+            ),
             "  Yeniden ayrıştırılan yanıt: %d, sorun: %d"
             % (cons["replayed_responses"], len(cons["replay_problems"])),
         ]
