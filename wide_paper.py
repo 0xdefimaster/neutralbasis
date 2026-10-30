@@ -14,7 +14,14 @@ the venue's real public order book. Capital is one pooled paper wallet.
 import collections, csv, datetime as dt, io, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
 import capabilities
-from ledger import Ledger
+from ledger import (
+    NOT_RECORDED,
+    SETTLED,
+    SETTLED_ESTIMATED_PRICE,
+    UNKNOWN,
+    Ledger,
+    payment_status,
+)
 from connectors import (
     FEED_VENUES,
     NATIVE,
@@ -2578,9 +2585,11 @@ class WidePaper:
                 rows = self.funding_rows(v, a, leg["entered"])
             except Exception as ex:
                 pending.append(v + ": funding geçmişi alınamadı (" + str(ex)[:80] + ")")
-                continue
+                # The schedule is still recorded: each payment due is UNKNOWN, with its
+                # possible cost, until the history can be read.
+                rows = None
             seen = set()
-            for r in rows:
+            for r in rows or []:
                 if not leg["entered"] < r["ts"] <= end:
                     continue
                 t = int(round(r["ts"] / 60)) * 60
@@ -2620,6 +2629,7 @@ class WidePaper:
                     cash=cash,
                     price=price,
                     valuation_estimated=estimated,
+                    status=SETTLED_ESTIMATED_PRICE if estimated else SETTLED,
                     audit_id=r.get("audit_id"),
                 )
                 with self.store.lock:
@@ -2628,11 +2638,13 @@ class WidePaper:
                     if estimated:
                         p["estimated_funding"] += cash
                     if late:
-                        p["funding_unverified"] = [
-                            x
-                            for x in p.get("funding_unverified", [])
-                            if (x["venue"], x["payment_time"]) != (v, t)
-                        ]
+                        for name in ("funding_unverified", "funding_unknown"):
+                            if name in p:
+                                p[name] = [
+                                    x
+                                    for x in p[name]
+                                    if (x["venue"], x["payment_time"]) != (v, t)
+                                ]
                     self.store.db.execute(
                         "insert or replace into payments values(?,?,?)",
                         (key, r["ts"], json.dumps(body)),
@@ -2648,53 +2660,101 @@ class WidePaper:
                     cash=cash,
                 )
             # Venue schedule known: a payment never published after the wait is
-            # recorded as unverified zero, never invented.
+            # NOT_RECORDED; one due while the history cannot be read is UNKNOWN. Both
+            # are kept with their possible cost and no amount, never invented.
             first, iv = leg.get("first_payment"), leg.get("interval")
             if first and iv:
                 t = first
                 while t <= end:
                     tm = int(round(t / 60)) * 60
                     if tm not in seen and now() - t >= FUNDING_UNVERIFIED_AFTER:
-                        key = p["id"] + ":" + v + ":" + str(tm)
-                        with self.store.lock:
-                            exists = self.store.db.execute(
-                                "select 1 from payments where key=?", (key,)
-                            ).fetchone()
-                            if not exists:
-                                p.setdefault("funding_unverified", []).append(
-                                    dict(
-                                        payment_time=tm,
-                                        venue=v,
-                                        recorded=now(),
-                                        risk=self.unverified_risk(p, leg, rows, tm),
-                                    )
-                                )
-                                zero = dict(
-                                    position=p["id"],
-                                    venue=v,
-                                    asset=a,
-                                    rate=None,
-                                    cash=0.0,
-                                    unverified=True,
-                                )
-                                self.ledger.record_payment(key, tm, zero)
-                                self.store.db.execute(
-                                    "insert into payments values(?,?,?)",
-                                    (key, tm, json.dumps(zero)),
-                                )
-                                self.persist()
-                        if not exists:
-                            self.events(
-                                "FUNDING_UNVERIFIED",
-                                "Funding oranı yayımlanmadı; doğrulanmamış 0 kaydedildi",
-                                position=p["id"],
-                                venue=v,
-                                payment_time=tm,
-                            )
+                        self.unsettled(p, leg, rows, tm, known=rows is not None)
                     elif tm not in seen:
                         pending.append(v + ": " + str(tm))
                     t += iv
         p["pending_funding"] = pending
+
+    def unsettled(self, p, leg, rows, tm, known):
+        """Record a payment due at `tm` that has no published rate: NOT_RECORDED when
+        the history was read and lacks it, UNKNOWN when it could not be read. An
+        UNKNOWN one becomes NOT_RECORDED once the history is read; a published rate
+        later replaces either (the late path in settle). No cash moves."""
+        v, a = leg["venue"], p["asset"]
+        key = p["id"] + ":" + v + ":" + str(tm)
+        status = NOT_RECORDED if known else UNKNOWN
+        with self.store.lock:
+            row = self.store.db.execute(
+                "select body from payments where key=?", (key,)
+            ).fetchone()
+            if row is not None:
+                old = json.loads(row[0])
+                if not (known and payment_status(old) == UNKNOWN):
+                    return
+                # The history is readable again and still lacks this payment.
+                body = dict(old, status=NOT_RECORDED, unverified=True)
+                entry = next(
+                    (
+                        x
+                        for x in p.get("funding_unknown", [])
+                        if (x["venue"], x["payment_time"]) == (v, tm)
+                    ),
+                    None,
+                )
+                p["funding_unknown"] = [
+                    x for x in p.get("funding_unknown", []) if x is not entry
+                ]
+                p.setdefault("funding_unverified", []).append(
+                    entry
+                    or dict(
+                        payment_time=tm,
+                        venue=v,
+                        recorded=now(),
+                        risk=self.unverified_risk(p, leg, rows or [], tm),
+                    )
+                )
+                self.store.db.execute(
+                    "update payments set body=? where key=?", (json.dumps(body), key)
+                )
+                self.ledger.record_payment(key, tm, body, suffix=":not_recorded")
+                self.persist()
+                kind = "FUNDING_UNVERIFIED"
+            else:
+                p.setdefault(
+                    "funding_unverified" if known else "funding_unknown", []
+                ).append(
+                    dict(
+                        payment_time=tm,
+                        venue=v,
+                        recorded=now(),
+                        risk=self.unverified_risk(p, leg, rows or [], tm),
+                    )
+                )
+                zero = dict(
+                    position=p["id"],
+                    venue=v,
+                    asset=a,
+                    rate=None,
+                    cash=0.0,
+                    unverified=True,
+                    status=status,
+                )
+                self.ledger.record_payment(key, tm, zero)
+                self.store.db.execute(
+                    "insert into payments values(?,?,?)", (key, tm, json.dumps(zero))
+                )
+                self.persist()
+                kind = "FUNDING_UNVERIFIED" if known else "FUNDING_UNKNOWN"
+        self.events(
+            kind,
+            (
+                "Funding oranı yayımlanmadı; ödeme doğrulanmadı (tutar yok)"
+                if known
+                else "Funding geçmişi okunamadı; ödeme bilinmiyor (tutar yok)"
+            ),
+            position=p["id"],
+            venue=v,
+            payment_time=tm,
+        )
 
     def unverified_risk(self, p, leg, rows, t):
         """What an unpublished payment would have cost this leg at its last known rate
@@ -3055,7 +3115,7 @@ class WidePaper:
             for p in self.closed[-50:]:
                 # Late-published rates replace unverified zero hours for a week after close.
                 if p.get("pending_funding") or (
-                    p.get("funding_unverified")
+                    (p.get("funding_unverified") or p.get("funding_unknown"))
                     and now() - p.get("closed_at", now()) < LATE_FUNDING_WINDOW
                 ):
                     self.settle(p)
@@ -3269,6 +3329,32 @@ class WidePaper:
             self.store.put("wide_equity", samples[-24 * 120 :])
 
     @staticmethod
+    def accounting(p, open_position=False):
+        """The three results of a position, kept apart (the wallet, the position's
+        net and every limit are unchanged by this split):
+          realized         price PnL realized so far, fees and SETTLED funding only;
+          estimated        realized + funding valued at an estimated price, and for
+                           an open position its unrealized PnL;
+          uncertainty_risk possible cost of NOT_RECORDED and UNKNOWN payments (<= 0).
+        """
+        estimated_funding = p.get("estimated_funding", 0.0) or 0.0
+        realized = (
+            p.get("price_pnl", 0.0)
+            + (p.get("funding", 0.0) - estimated_funding)
+            - p.get("fees", 0.0)
+        )
+        risk = lambda name: sum(x.get("risk") or 0.0 for x in p.get(name, []))
+        return dict(
+            realized_pnl=realized,
+            estimated_pnl=realized
+            + estimated_funding
+            + (p.get("unrealized", 0.0) if open_position else 0.0),
+            uncertainty_risk=risk("funding_unverified") + risk("funding_unknown"),
+            not_recorded=len(p.get("funding_unverified", [])),
+            unknown=len(p.get("funding_unknown", [])),
+        )
+
+    @staticmethod
     def ledger_entry(p):
         side = {leg.get("side"): leg.get("venue") for leg in p["legs"]}
         return dict(
@@ -3292,6 +3378,11 @@ class WidePaper:
             unverified_risk=sum(
                 x.get("risk") or 0.0 for x in p.get("funding_unverified", [])
             ),
+            unknown=len(p.get("funding_unknown", [])),
+            unknown_risk=sum(
+                x.get("risk") or 0.0 for x in p.get("funding_unknown", [])
+            ),
+            realized_pnl=WidePaper.accounting(p)["realized_pnl"],
             fill_ratio=p.get("fill_ratio", 1.0),
             slippage=p.get("slippage"),
         )
@@ -3353,6 +3444,7 @@ class WidePaper:
         )
         unverified = sum(p["unverified"] for p in done)
         unverified_risk = sum(p.get("unverified_risk") or 0.0 for p in settled)
+        accounting = self.period_accounting(done, opened)
         pf = gains / losses if losses else (None if not gains else math.inf)
         top3 = sum(nets[:3]) / total if total > 0 else None
         days = span / 86400
@@ -3398,8 +3490,9 @@ class WidePaper:
             ),
             (
                 "Doğrulanmamış funding aleyhte sayılınca net",
-                f"{unverified} ödeme · {total + unverified_risk:+.2f} $",
-                total + unverified_risk > 0,
+                f"{unverified + accounting['unknown']} ödeme · "
+                f"{total + unverified_risk + accounting['closed_unknown_risk']:+.2f} $",
+                total + unverified_risk + accounting["closed_unknown_risk"] > 0,
             ),
             ("Dönem içinde ayar değişikliği", str(len(changes)), not changes),
             (
@@ -3429,12 +3522,58 @@ class WidePaper:
             collateral_closes=collateral,
             unverified_payments=unverified,
             unverified_risk=unverified_risk,
+            accounting=accounting,
             venues=dict(sorted(venues.items(), key=lambda kv: -kv[1])),
             checks=[dict(label=a, value=b, ok=bool(c)) for a, b, c in checks],
             ready=all(c for _, _, c in checks),
             stress=stress,
             stress_unmeasured=sum(p.get("slippage") is None for p in settled),
             scorecard=scorecard(settled),
+        )
+
+    def period_accounting(self, done, opened):
+        """Realized PnL, estimated PnL and uncertainty risk of the period (closed
+        trades plus open positions), and its payments by status. Entries kept before
+        these fields existed are read from their own fields."""
+        realized = estimated = risk = closed_unknown_risk = 0.0
+        unknown = 0
+        for x in done:
+            est = x.get("estimated_funding") or 0.0
+            r = x.get("realized_pnl", (x.get("net") or 0.0) - est)
+            realized += r
+            estimated += r + est
+            closed_unknown_risk += x.get("unknown_risk") or 0.0
+            risk += (x.get("unverified_risk") or 0.0) + (x.get("unknown_risk") or 0.0)
+            unknown += x.get("unknown") or 0
+        for p in opened:
+            a = self.accounting(p, open_position=True)
+            realized += a["realized_pnl"]
+            estimated += a["estimated_pnl"]
+            risk += a["uncertainty_risk"]
+            unknown += a["unknown"]
+        ids = {p["id"] for p in opened} | {x.get("id") for x in done}
+        statuses = {}
+        with self.store.lock:
+            rows = self.store.db.execute("select body from payments").fetchall()
+        for (body,) in rows:
+            b = json.loads(body)
+            if b.get("position") in ids:
+                k = payment_status(b)
+                statuses[k] = statuses.get(k, 0) + 1
+        return dict(
+            realized_pnl=realized,
+            estimated_pnl=estimated,
+            uncertainty_risk=risk,
+            unknown=unknown,
+            closed_unknown_risk=closed_unknown_risk,
+            payments=statuses,
+            note=(
+                "Gerçekleşmiş: fiyat PnL'si, ücret ve yalnız SETTLED funding. Tahmini: "
+                "gerçekleşmiş + tahmini fiyatlı funding + açık pozisyonların "
+                "gerçekleşmemiş PnL'si. Belirsizlik riski: NOT_RECORDED ve UNKNOWN "
+                "ödemelerin olası maliyeti. Cüzdan, pozisyon neti ve limitler bu "
+                "ayrımdan etkilenmez."
+            ),
         )
 
     @staticmethod
@@ -3670,6 +3809,11 @@ class WidePaper:
             fees=self.fees,
             daily_pnl=self.daily_pnl(),
             positions=self.positions,
+            position_accounting={
+                p["id"]: self.accounting(p, open_position=True)
+                for p in self.positions
+                if p.get("id")
+            },
             closed=self.closed[-100:],
             report=self.report(),
             candidates=self.candidates[:40],

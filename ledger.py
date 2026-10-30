@@ -9,7 +9,17 @@ a repeated write never doubles a cash flow:
   trade:<id>:price               a closed trade's realized price PnL
   trade:<id>:fees                its fees (negative)
 
-A closed trade reconciles when its events sum to its net (price + funding - fees).
+Each funding payment carries a status (`payment_status`):
+
+  SETTLED                  published rate, observed price: realized cash
+  SETTLED_ESTIMATED_PRICE  published rate, price estimated (the entry fill): an
+                           estimate, not realized
+  NOT_RECORDED             the venue published no rate after the wait
+  UNKNOWN                  the venue's history could not be read
+
+NOT_RECORDED and UNKNOWN are written with no amount (null), never as a realized zero.
+A closed trade reconciles when its SETTLED events (price, fees and settled funding)
+sum to its realized result: net minus its estimated funding.
 """
 
 import json
@@ -78,15 +88,42 @@ def trade_events(p):
     ]
 
 
-def payment_event(key, ts, body, late=False):
+SETTLED = "SETTLED"
+SETTLED_ESTIMATED_PRICE = "SETTLED_ESTIMATED_PRICE"
+NOT_RECORDED = "NOT_RECORDED"
+UNKNOWN = "UNKNOWN"
+UNSETTLED = (NOT_RECORDED, UNKNOWN)
+KIND = {
+    SETTLED: "funding",
+    SETTLED_ESTIMATED_PRICE: "funding_estimated",
+    NOT_RECORDED: "funding_not_recorded",
+    UNKNOWN: "funding_unknown",
+}
+
+
+def payment_status(body):
+    """A payment's status; records written before statuses existed are read from
+    their flags (unverified zero, estimated valuation)."""
+    if body.get("status"):
+        return body["status"]
+    if body.get("unverified"):
+        return NOT_RECORDED
+    if body.get("valuation_estimated"):
+        return SETTLED_ESTIMATED_PRICE
+    return SETTLED
+
+
+def payment_event(key, ts, body, late=False, suffix=None):
+    status = payment_status(body)
+    kind = KIND[status] + ("_late" if late and status not in UNSETTLED else "")
     return (
-        "payment:%s%s" % (key, ":late" if late else ""),
+        "payment:%s%s" % (key, suffix or (":late" if late else "")),
         ts,
-        "funding_late" if late else "funding",
+        kind,
         body.get("position"),
         body.get("venue"),
-        body.get("cash", 0.0) or 0.0,
-        json.dumps(body, default=str),
+        None if status in UNSETTLED else (body.get("cash", 0.0) or 0.0),
+        json.dumps(dict(body, status=status), default=str),
     )
 
 
@@ -184,28 +221,50 @@ class Ledger:
                 )
             db.commit()
 
-    def record_payment(self, key, ts, body, late=False):
-        """Append the cash event of a settled payment (late: the correction to a zero)."""
+    def record_payment(self, key, ts, body, late=False, suffix=None):
+        """Append the event of a payment: the cash of a settled one (late: the cash
+        that replaced an unsettled one), or an unsettled one with no amount."""
         if not self.ready():
             return
         with self.store.lock:
             self.store.db.execute(
                 "insert or ignore into ledger_events(event_key, ts, kind, position,"
                 " venue, amount, body) values(?,?,?,?,?,?,?)",
-                payment_event(key, ts, body, late),
+                payment_event(key, ts, body, late, suffix),
             )
 
     def reconcile(self, period_id=None):
-        """Closed trades of a period whose ledger events do not sum to their net:
-        [(trade id, ledger sum, trade net)]."""
+        """Closed trades of a period whose SETTLED events do not sum to their realized
+        result (net minus estimated funding): [(trade id, settled sum, realized)].
+        Estimated and unsettled payments never enter it."""
         with self.store.lock:
             db = self.store.db
             pid = self.current_period() if period_id is None else period_id
-            rows = db.execute(
-                "select t.id, t.net, coalesce(sum(e.amount), 0) from paper_trades t"
-                " left join ledger_events e on e.position = t.id"
-                " where t.period_id=? and t.body not like '%\"ledger\": true%'"
-                " group by t.id",
+            trades = db.execute(
+                "select id, net, body from paper_trades where period_id=?"
+                " and body not like '%\"ledger\": true%'",
                 (pid,),
             ).fetchall()
-        return [(i, s, n) for i, n, s in rows if abs((s or 0) - (n or 0)) > 1e-6]
+            events = {}
+            for position, kind, amount, body in db.execute(
+                "select position, kind, amount, body from ledger_events"
+                " where position in (select id from paper_trades where period_id=?)",
+                (pid,),
+            ):
+                events.setdefault(position, []).append((kind, amount, body))
+        out = []
+        for tid, net, body in trades:
+            realized = (net or 0.0) - (json.loads(body).get("estimated_funding") or 0.0)
+            total = 0.0
+            for kind, amount, ebody in events.get(tid, []):
+                if amount is None:
+                    continue
+                if (
+                    kind.startswith("funding")
+                    and payment_status(json.loads(ebody or "{}")) != SETTLED
+                ):
+                    continue
+                total += amount
+            if abs(total - realized) > 1e-6:
+                out.append((tid, total, realized))
+        return out
