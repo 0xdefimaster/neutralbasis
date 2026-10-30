@@ -393,6 +393,7 @@ class WideMarkets:
                 next=nxt / 1000 if nxt else None,
                 fee=finite(m.get("taker")),
                 mark=finite(r.get("markPrice")),
+                index=finite(r.get("indexPrice")),
                 leverage=finite(m.get("limits", {}).get("leverage", {}).get("max")),
                 **order_rules(ex, m),
                 volume=quote_volume(ticks.get(m["symbol"])),
@@ -588,6 +589,7 @@ class WideMarkets:
                             kind="perp",
                             symbol=m["symbol"],
                             mark=mark,
+                            index=finite(r.get("indexPrice")),
                             price_type=ptype,
                             rate=(
                                 raw_rate / (interval / 3600)

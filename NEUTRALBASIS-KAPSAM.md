@@ -219,3 +219,22 @@ Yakınsama artık "fark geçmişte en fazla ne kadar açıldıysa o çizgi" kura
 - **Geçmiş şartı:** bir kademe, o genişliğe kadar açılıp azami bekleme süresi içinde normale dönen en az `wide_conv_min_episodes` (3) örnek ister; dönmeyen örnek en fazla 1 olabilir. Kademe 1 bu şartı sağlamazsa girilmez. Daha geniş bir kademe sağlamazsa o kademenin riski alınmaz. Bugünkü sapma en büyük sapmanın üstündeyse girilmez.
 - **İleri dönem kontrolü:** stop geçmişten alındığı için, aynı geçmişte hiç aşılmamış görünür. Bu yüzden ilk yarının en büyük sapması ikinci yarıda stop payı kadar kaç ayrı kez aşıldı diye bakılır. 1'den fazlaysa çift reddedilir ("Geçmiş sınır ileri dönemde aşıldı", 6 saat beklemeye alınır).
 - Funding yine en yavaş dönüş süresince yalnızca maliyet olarak düşülür. Kapanış: fark normal bölgeye dönünce, azami süre dolunca, stopta ya da kayıp limitlerinde.
+
+## Yetenek kaydı (Faz 0.3)
+`capabilities.py`, ilk perp DEX evreni için her borsa ve her yetenekte dört durumdan birini tutar: tam, kısmi, yok, doğrulanmadı. Evren: Hyperliquid, Paradex, Lighter Core, Lighter RH, Extended, RISEx, TxFlow, Arcus, Variational Omni. Lighter RH ve Lighter Core ayrı borsadır: ayrı API sunucusu, ayrı piyasalar, RH'de USDG teminat.
+- **Beyan:** her borsa için bağlayıcının neyi uyguladığı yazılıdır (kaynak ve bilinen sınır). Birkaç örnek:
+  - Arcus işlem fiyatı geçmişi: yok (oracle).
+  - TxFlow gerçekleşmiş funding: yok.
+  - Variational: bağlayıcı yok.
+  - Hesap, pozisyon ve emir yetenekleri hiçbir borsada yazılmadı.
+- **Doğrulama canlı veriden yapılır, bağlantı testinden değil:**
+  - taze piyasa satırları: keşif, kontrat bilgisi, mark/endeks, funding oranı, OI, hacim, ücret kaynağı;
+  - her defter okuması: geçerli ve taze mi, son bir saat;
+  - geçmiş kaydedicinin 30 günlük kapsamı;
+  - funding aralığı: kayıtlı gerçekleşmiş ödemelerin ortanca aralığı, yayımlanan aralıkla %5 içinde mi;
+  - funding işareti: mark endeksten en az 5 bp uzakken funding'in yönü primle aynı mı (3 günde en az 10 gözlem, %80 uyum). Uyum %20'nin altındaysa işaret ters sayılır ve borsa funding'de kullanılmaz.
+- **Kapı:** funding ve yakınsama için şu yeteneklerin tam ya da kısmi olması gerekir: keşif, kontrat bilgisi, işlem fiyatı geçmişi, funding oranı, gerçekleşmiş funding, aralık, işaret ve ücret. Eksik bacaklı çift "yalnız araştırma" olarak listede görünür; derin kontrole girmez, işlem açılmaz. Huni bunu "Yürütülemez (araştırma)" satırında sayar.
+  - Emir defteri kapıda değil, çünkü her kullanımda zaten taze ve çapraz değil mi diye kontrol ediliyor. Kayıt yine de son okumayı gösterir.
+  - Ödemeleri yayımlanan aralıkla uyuşmayan piyasa da tek başına araştırmada kalır.
+- **Panel:** Borsalar sayfasında 9 DEX × 22 yetenek tablosu ve borsa başına paper uygunluğu. Hücre ipucu yöntemi, kaynağı, sınırı ve son doğrulama zamanını gösterir.
+- **Ne zaman uygun olur:** motor çalıştıkça kanıt birikir. İşaret ve aralık doğrulanana kadar o borsa bacaklı funding ve yakınsama işlemi açılmaz. Doğrulama birkaç tur ile birkaç saat arası sürer.
