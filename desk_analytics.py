@@ -435,7 +435,23 @@ class DeskHistorySource:
         prices = self.engine.history.db.candles(v, a, kind, start)
         if len(prices) < 720 * 0.95:
             return None
-        return dict(prices=prices, price_type="trade", audit_ids=[], end=hour(now()))
+        return dict(
+            prices=prices,
+            price_type=self.price_type(v, a),
+            audit_ids=[],
+            end=hour(now()),
+        )
+
+    def price_type(self, v, a):
+        """What the stored closes are: rows keep no label, so it comes from the source.
+        A feed venue priced by its oracle (Arcus) stays "oracle", and the history checks
+        refuse it as they refuse the live series; an unknown feed source is not taken
+        for a trade series. Lighter, Extended and the scanned venues store trade closes.
+        """
+        if v not in VENUES or v in ("Lighter", "Extended"):
+            return "trade"
+        meta = self.engine.feed.meta.get(v, {}).get(a)
+        return meta.get("price_type", "trade") if meta else "oracle"
 
 
 class DeskEngine(RiskEngine):
