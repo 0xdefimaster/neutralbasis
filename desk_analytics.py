@@ -489,6 +489,18 @@ class DeskEngine(RiskEngine):
         self.read_lock = threading.RLock()
         self.read_jobs = {}
 
+    def capability_registry(self):
+        """The full capability registry: every venue, capability, status and evidence."""
+        from capabilities import CAPABILITIES, LABELS, STATUSES, REQUIRED
+
+        return dict(
+            venues=self.wide_paper.registry,
+            capabilities=list(CAPABILITIES),
+            labels=LABELS,
+            statuses=list(STATUSES),
+            required=REQUIRED,
+        )
+
     def funding_matrix(self):
         return self.matrix.get()
 

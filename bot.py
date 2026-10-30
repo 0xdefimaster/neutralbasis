@@ -1630,6 +1630,10 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 return self.send(engine.backtest_status())
             if self.path == "/api/funding-matrix" and hasattr(engine, "funding_matrix"):
                 return self.send(engine.funding_matrix())
+            if self.path == "/api/capabilities" and hasattr(
+                engine, "capability_registry"
+            ):
+                return self.send(engine.capability_registry())
             if self.path.startswith(("/api/asset?", "/api/pair?")) and hasattr(
                 engine, "pair_view"
             ):

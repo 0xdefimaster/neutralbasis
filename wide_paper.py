@@ -13,6 +13,7 @@ the venue's real public order book. Capital is one pooled paper wallet.
 
 import collections, csv, datetime as dt, io, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
+import capabilities
 
 # Native venues whose taker fee is configured; the rest come from the CCXT scanner.
 NATIVE = ("Lighter", "Extended")
@@ -852,6 +853,7 @@ def universe_rows(universe, rows, held=()):
                     minimum=x.get("minimum"),
                     min_quote=x.get("min_quote"),
                     contract_size=x.get("contract_size"),
+                    index=x.get("index"),
                 )
             )
     return out
@@ -895,6 +897,7 @@ class EngineSource:
                         interval=interval,
                         # The native APIs quote sizes in base units.
                         contract_size=1.0,
+                        index=m.get("index"),
                         next=m.get("next"),
                         received=m["received"],
                         fee=fee,
@@ -919,6 +922,14 @@ class EngineSource:
         if v in FEED_VENUES:
             return self.engine.feed.book(v, a)
         return self.engine.wide.book(v, a)
+
+    def history_states(self):
+        """The history keeper's per-market state (coverage, complete), by key."""
+        keeper = getattr(self.engine, "history", None)
+        if keeper is None:
+            return {}
+        with keeper.lock:
+            return {k: dict(v) for k, v in keeper.state.items() if k[2] == "perp"}
 
     def prices(self, v, a):
         keeper = getattr(self.engine, "history", None)
@@ -1055,6 +1066,36 @@ class WidePaper:
         self.extra_slippage = 0.0001
         # Measured round trips of each venue's public book request, in seconds.
         self.rtt = collections.defaultdict(lambda: collections.deque(maxlen=50))
+        # What each venue's connector is verified to support, from live evidence.
+        self.capabilities = capabilities.Registry(store.get("capability_state", {}))
+        self.registry = self.capabilities.evaluate(now())
+
+    def update_registry(self, rows, at):
+        """Feed this round's evidence to the capability registry and re-derive it."""
+        reg = self.capabilities
+        reg.observe_rows(rows, at)
+        states = getattr(self.source, "history_states", None)
+        if states:
+            try:
+                reg.observe_history(states())
+            except Exception:
+                pass
+        stored = getattr(self.source, "stored_funding", None)
+        if stored:
+            reg.check_intervals(rows, stored, at, at - PERSIST_DAYS * 86400)
+        self.registry = reg.evaluate(at)
+        self.store.put("capability_state", reg.state())
+
+    def capability_summary(self):
+        """Per venue: which strategies it may trade and what blocks the others."""
+        return {
+            v: dict(
+                perp_dex=x["perp_dex"],
+                connector=x["connector"],
+                blocked=x["strategies"],
+            )
+            for v, x in self.registry.items()
+        }
 
     # --- state ---------------------------------------------------------------
     def persist(self):
@@ -1985,8 +2026,13 @@ class WidePaper:
 
     def book(self, v, a):
         started = time.monotonic()
-        b = self.source.book(v, a)
+        try:
+            b = self.source.book(v, a)
+        except Exception as ex:
+            self.capabilities.observe_book(v, False, now(), ex)
+            raise
         self.rtt[v].append(time.monotonic() - started)
+        self.capabilities.observe_book(v, True, now())
         return b
 
     def latency(self, v):
@@ -2820,6 +2866,40 @@ class WidePaper:
             self.candidates, rfq_funding = split_rfq(self.candidates)
             self.conv_candidates, rfq_conv = split_rfq(self.conv_candidates)
             self.rfq_review = rfq_funding + rfq_conv
+            if rows is not None:
+                self.update_registry(rows, at)
+            # A pair whose leg lacks a verified capability stays visible as research
+            # and is never deep-checked or executed.
+            stored = getattr(self.source, "stored_funding", None)
+            for key, ranked in (
+                ("funding", self.candidates),
+                ("convergence", self.conv_candidates),
+            ):
+                for i, c in enumerate(ranked):
+                    # The legs about to be deep-checked get their own schedule check.
+                    if stored and i < 4 * self.cfg["wide_deep_top"]:
+                        for v, iv in (
+                            (c["long"], c.get("interval_long")),
+                            (c["short"], c.get("interval_short")),
+                        ):
+                            if iv and self.capabilities.due(v, c["asset"], at):
+                                self.capabilities.check_market(
+                                    v,
+                                    c["asset"],
+                                    iv,
+                                    stored,
+                                    at,
+                                    at - PERSIST_DAYS * 86400,
+                                )
+                    why = capabilities.blockers(
+                        self.registry, key, (c["long"], c["short"])
+                    ) + [
+                        "%s: funding aralığı ödemelerle uyuşmuyor" % v
+                        for v in (c["long"], c["short"])
+                        if not self.capabilities.market_ok(v, c["asset"])
+                    ]
+                    if why:
+                        c["research"] = why
             self.assessed = []
             if (
                 entries
@@ -2841,6 +2921,8 @@ class WidePaper:
                         # deep-check slot; the total per round stays bounded.
                         if counted >= top or len(picked) >= top * 4 or c["score"] <= 0:
                             break
+                        if c.get("research"):
+                            continue
                         if (
                             self.blocked(c)
                             or any(x["asset"] == c["asset"] for x in picked)
@@ -3292,6 +3374,7 @@ class WidePaper:
                     self.rejected.get(k, {}).get("until", 0) > at
                     or at - self.checked.get(k, -math.inf) < REJECT_COOLDOWN
                     or self.blocked(c)
+                    or c.get("research")
                 ):
                     reached += 1
                     continue
@@ -3300,6 +3383,14 @@ class WidePaper:
                 enabled=bool(self.cfg[flag]),
                 candidates=len(ranked),
                 positive=len(positive),
+                research=sum(bool(c.get("research")) for c in positive),
+                research_reasons=dict(
+                    collections.Counter(
+                        r.split(": ", 1)[1]
+                        for c in positive
+                        for r in c.get("research") or []
+                    ).most_common(4)
+                ),
                 reached=reached,
                 checked=sum(k[0] == key for k in self.checked),
                 waiting=sum(x["strategy"] == key for x in waiting),
@@ -3360,6 +3451,7 @@ class WidePaper:
             epoch_start=self.store.get("wide_epoch_start", None),
             venues=venues,
             last_cycle=self.last_cycle,
+            capabilities=self.capability_summary(),
             cycle_seconds=self.cycle_seconds,
             downtime_gap=DOWNTIME_GAP,
             error=self.error,

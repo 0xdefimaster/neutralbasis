@@ -95,6 +95,9 @@ class WidePaperTests(unittest.TestCase):
         patcher = [
             mock.patch.object(bot, "now", lambda: self.clock),
             mock.patch.object(wide_paper, "now", lambda: self.clock),
+            # The fixture venues stand in for verified ones; the capability gate
+            # itself is tested in test_capabilities and CapabilityGateTests.
+            mock.patch.object(wide_paper.capabilities, "blockers", lambda *a: []),
         ]
         for p in patcher:
             p.start()
@@ -2056,6 +2059,68 @@ class WidePaperTests(unittest.TestCase):
 
 
 FUNDING_WAIT = bot.FUNDING_UNVERIFIED_AFTER
+
+
+REAL_BLOCKERS = wide_paper.capabilities.blockers
+
+
+class CapabilityGateTests(unittest.TestCase):
+    """The real capability gate on the fixture desk (WidePaperTests' fixture, without
+    the stand-in that treats the fixture venues as verified)."""
+
+    tearDown = WidePaperTests.tearDown
+    setup_pair = WidePaperTests.setup_pair
+    fund_history = WidePaperTests.fund_history
+
+    def setUp(self):
+        WidePaperTests.setUp(self)
+        p = mock.patch.object(wide_paper.capabilities, "blockers", REAL_BLOCKERS)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def evidence(self, venues):
+        reg = self.desk.capabilities
+        for v in venues:
+            reg.history[v] = dict(markets=1, complete=1)
+            for a in ("BTC", "X1", "X2"):
+                reg.intervals["%s|%s" % (v, a)] = dict(
+                    at=T0, published=3600, gap=3600, match=True
+                )
+            reg.signs[v] = {"S%d|0" % i: [T0, True] for i in range(10)}
+
+    def test_unverified_venues_stay_research_only(self):
+        self.setup_pair()
+        self.src.rows = [dict(r, contract_size=1.0) for r in self.src.rows]
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertEqual(self.desk.assessed, [])
+        (c,) = self.desk.candidates
+        self.assertTrue(any("Funding işareti" in r for r in c["research"]))
+        f = self.desk.funnel["strategies"]["funding"]
+        self.assertEqual((f["research"], f["reached"]), (1, 1))
+        self.assertIn("Funding işareti doğrulanmadı", f["research_reasons"])
+
+    def test_verified_venues_trade(self):
+        self.setup_pair()
+        self.src.rows = [dict(r, contract_size=1.0) for r in self.src.rows]
+        self.evidence(("Hyperliquid", "Binance"))
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        self.assertNotIn("research", self.desk.candidates[0])
+        summary = self.desk.snapshot()["capabilities"]
+        self.assertEqual(summary["Hyperliquid"]["blocked"]["funding"], [])
+
+    def test_a_market_whose_payments_contradict_its_interval_is_research(self):
+        self.setup_pair()
+        self.src.rows = [dict(r, contract_size=1.0) for r in self.src.rows]
+        self.evidence(("Hyperliquid", "Binance"))
+        self.desk.capabilities.intervals["Binance|BTC"].update(gap=3600, match=False)
+        self.desk.cycle()
+        self.assertEqual(self.desk.positions, [])
+        self.assertIn(
+            "Binance: funding aralığı ödemelerle uyuşmuyor",
+            self.desk.candidates[0]["research"],
+        )
 
 
 class DeskIntegrationTests(unittest.TestCase):
