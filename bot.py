@@ -124,7 +124,7 @@ def first_at(db, table, column, cutoff):
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, migrate=True):
         self.lock = threading.RLock()
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.execute("pragma journal_mode=WAL")
@@ -141,6 +141,10 @@ class Store:
    create table if not exists payments(key text primary key,ts real,body text);"""
         )
         self.db.commit()
+        if migrate:
+            import migrations
+
+            migrations.migrate(self, str(path))
 
     def get(self, k, default):
         with self.lock:
