@@ -258,3 +258,14 @@ Yakınsama artık "fark geçmişte en fazla ne kadar açıldıysa o çizgi" kura
   - `POST /api/wide_workspace` — `{venues: {borsa: tutar}, strategies: {funding, convergence}, config: {...}}`
   - `POST /api/wide_venue` — `{venue, enabled}`
   - `POST /api/wide_close_all`
+
+## Tipli bağlayıcı katmanı (Faz 0.4)
+`connectors.py`, paper masasının veri kaynağını borsa başına bir bağlayıcıya ayırır:
+- `NativeConnector`: kendi beslememiz (Lighter RH, Extended, TxFlow, RISEx, Arcus).
+- `CcxtConnector`: CCXT tarayıcı.
+
+Hepsinin çağrıları aynıdır: piyasalar, defter, gerçekleşmiş funding, güncel funding, canlı mumlar ve yetenek beyanı. Satırların sözlük biçimi aynen korunur (`MarketSnapshot.row`); yanında tipli, normalleştirilmiş görünümler vardır: `MarketSnapshot`, `Instrument`, `Book`, `FundingPayment`. Bunlarda bilinmeyen değer her zaman None'dur, hiçbir zaman varsayılan değildir.
+
+`EngineSource` artık yönlendirmeyi bağlayıcılara bırakıyor. Davranış değişmedi: bir test, yeni katmanın eski algoritmayla birebir aynı satırları ürettiğini doğrular. Yeni bir derin bağlayıcı (WebSocket defter, hesap okuma) stratejilere dokunmadan bu arayüze takılabilir.
+
+Bu sırada bir hata düzeltildi: canlı mum okuması başarısız olunca kayıtlı geçmişe düşülen yol, Arcus'un oracle kapanışlarını "trade" diye etiketliyordu. Artık kaynağın etiketi korunuyor.

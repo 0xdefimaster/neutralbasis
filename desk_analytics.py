@@ -360,7 +360,7 @@ class DeskHistorySource:
             out.append(key + (interval, "trade"))
         # Every liquid perp the paper desk could trade (its own OI/volume floor), so a
         # deep check finds the history already stored instead of waiting for it.
-        from wide_paper import UNIVERSE_MIN_USD
+        from connectors import UNIVERSE_MIN_USD
 
         universe = e.wide.universe_snapshot()
         for v, entries in universe.items():
