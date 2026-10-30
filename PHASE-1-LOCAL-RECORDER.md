@@ -138,6 +138,24 @@ phase1-evidence/
   Yapılan onarım `--validate-only` raporunda görünür.
 - 3 tutarlı karşılaştırma raporda belirtilir; bu tek başına üretim güvenilirliği değildir.
 
+## Ödeme kimliği ve veri güvenilirliği
+- **Ödeme kimliği:** her ödemenin kimliği borsa + piyasa + `settled_at` üçlüsüdür. `settled_at` her borsada tam saniye UTC epoch değeridir; API'nin verdiği tam zaman `settled_at_api` alanında ayrıca saklanır.
+- **Zaman kayması:** aynı piyasada 60 saniye içindeki iki zaman aynı ödeme sayılır. Saniye altı farklar iki ayrı kayıt oluşturmaz; dört borsada da ödeme aralığı en az 1 saattir.
+- **Borsa düzeltmesi:** borsa kayıtlı bir ödemenin değerini sonradan değiştirirse yeni bir revizyon olarak saklanır.
+  - İlk sürüm silinmez.
+  - Önceki ve yeni değer bir `settlement_correction` kaydına yazılır.
+  - O ödemenin karşılaştırması yeni değerle yeniden hesaplanır ve eskisinin yerine geçer; sayı artmaz.
+  - Düzeltmeler yalnızca her turda yeniden okunan son 2 saat içinde yakalanır.
+- **Çelişkili kayıt:** aynı yanıtta aynı ödeme için farklı değerler gelirse ödeme `CONFLICT` olarak işaretlenir ve oranı bilinmiyor kabul edilir; değerlerden biri seçilmez. Eşleştirmede `NO_SIGNED_RATE` olur ve tutarlılık sayısına girmez.
+- **Eksik veri:** eksik veri hiçbir yerde sıfır sayılmaz: eksik alan `null` kalır, zorunlu alan eksikse yanıt reddedilir.
+- **Çökme güvenliği:**
+  - Çökme sırasında yarım kalan bir JSONL satırı okunurken atlanır ve raporlanır. Sonraki kayıt yeni satırdan başlar.
+  - Aynı satır iki kez yazılmışsa bir kez okunur.
+  - Ödeme ve karşılaştırma dizinleri her açılışta JSONL kayıtlarıyla karşılaştırılır; farklıysa tek bir işlem içinde yeniden kurulur. Yarıda kesilen bir onarım eski durumu bırakır ve bir sonraki açılışta tamamlanır.
+- **Veri kaynağı:** her klasör veri kaynağını kaydeder: `LIVE_PUBLIC_API` ya da `MOCK:<test taşıyıcısı>`. Bir klasöre iki tür veri birlikte yazılamaz.
+  - Gerçek olmayan klasörün raporunda, paketinde ve manifestinde (`live_data: false`) bu açıkça yazar.
+  - Böyle bir klasörde VERIFIED, OBSERVED ve CONFLICT durumları `MOCK:` önekiyle gösterilir.
+
 ## Rapordaki durumlar
 - `VERIFIED`: kayıtlı veriyle ölçüldü ve beyanla uyuşuyor. Örnek: gözlenen ödeme aralığı beyan edilen aralıkla %5 içinde ve düzenli.
 - `OBSERVED`: borsanın yanıtında var ya da veriden ölçüldü, ama belgeyle doğrulanmadı. Örnek: yayımlanan oran ödemeyle aynı büyüklükte (medyan oran 0,8–1,25). Belge okunmadığı için oran birimi hiçbir zaman VERIFIED yazılmaz.

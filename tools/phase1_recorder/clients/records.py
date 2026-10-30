@@ -117,14 +117,32 @@ def record_key(kind, r):
     if kind == "funding_snapshot":
         return "%s|%d" % (mid, int(r["received_at"]))
     if kind == "settlement":
-        return "%s|%d" % (mid, int(round(r["settled_at"])))
+        return revised("%s|%d" % (mid, int(round(r["settled_at"]))), r)
     if kind == "candle":
         return "%s|%d" % (mid, int(r["open_time"]))
     if kind == "orderbook":
         return "%s|%d" % (mid, int(r["received_at"]))
     if kind == "comparison":
-        return "%s|%d" % (mid, int(round(r["settled_at"])))
+        return revised(
+            "%s|%d" % (mid, int(round(r["settled_at"]))),
+            r,
+            r.get("settlement_revision"),
+        )
+    if kind == "settlement_correction":
+        return "%s|%d|r%d" % (mid, int(round(r["settled_at"])), r["revision"])
     raise ValueError(kind)
+
+
+def revised(key, r, revision=None):
+    """A first version keeps the plain key; a corrected one adds its revision."""
+    n = revision if revision is not None else r.get("revision", 1)
+    return key if (n or 1) <= 1 else "%s|r%d" % (key, n)
+
+
+# Two settlement times this close are one payment (a venue may report the same
+# payment with a different sub-second part); every interval here is >= 1 hour.
+SAME_EVENT = 60
+SETTLED_FIELDS = ("settled_rate_raw", "direction_raw", "value_raw")
 
 
 def market(venue, asset, market_id, at, sha, **kw):
@@ -186,11 +204,15 @@ def snapshot(client, asset, market_id, rate_raw, at, sha, endpoint, **kw):
 
 
 def settlement(client, ctx, settled_at, rate_raw, at, sha, endpoint, **kw):
+    """`settled_at` is whole UTC epoch seconds for every venue; the time exactly as
+    the API gave it (in seconds) is kept in `settled_at_api`."""
     out = dict(
         venue=client.venue,
         asset=ctx["asset"],
         market_id=ctx["market_id"],
-        settled_at=settled_at,
+        settled_at=int(round(settled_at)),
+        settled_at_api=settled_at,
+        revision=1,
         settled_rate_raw=rate_raw,
         settled_rate=num(rate_raw),
         settled_rate_status=DECLARED,
@@ -244,6 +266,32 @@ def series_stats(times, at):
         future=sum(t > at + 300 for t in times),
         too_old=sum(t < 1_420_000_000 for t in times),
     )
+
+
+def dedupe_settlements(rows):
+    """One record per payment of one response. Entries within SAME_EVENT seconds are
+    one payment: identical ones are duplicates; differing ones are a conflict, kept
+    as one record whose settled rate is unknown (never a value picked from them)."""
+    out, stats = [], dict(conflicting_duplicates=0, jitter_merged=0)
+    for r in sorted(rows, key=lambda r: r["settled_at_api"]):
+        # Sorted by time: only the latest kept entry can be the same payment.
+        same = (
+            out[-1]
+            if out and r["settled_at_api"] - out[-1]["settled_at_api"] <= SAME_EVENT
+            else None
+        )
+        if same is None:
+            out.append(r)
+            continue
+        if int(round(same["settled_at_api"])) != int(round(r["settled_at_api"])):
+            stats["jitter_merged"] += 1
+        if any(same[f] != r[f] for f in SETTLED_FIELDS):
+            stats["conflicting_duplicates"] += 1
+            same.setdefault("conflict_values", [{f: same[f] for f in SETTLED_FIELDS}])
+            same["conflict_values"].append({f: r[f] for f in SETTLED_FIELDS})
+            same["settled_rate"] = None
+            same["settled_rate_status"] = "CONFLICT"
+    return out, stats
 
 
 def dedupe(records, field):

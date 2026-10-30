@@ -185,7 +185,7 @@ class ComparisonIdentityTests(Base):
         for venue in self.venues:
             m = cov["venues"][venue]["markets"]["BTC"]
             self.assertEqual(m["comparison_statuses"].get("MATCHED"), 3, venue)
-            self.assertEqual(m["rate_unit"], "OBSERVED", venue)
+            self.assertEqual(m["rate_unit"], "MOCK:OBSERVED", venue)
 
     def test_9_one_settlement_processed_many_times_cannot_reach_three(self):
         self.boot()

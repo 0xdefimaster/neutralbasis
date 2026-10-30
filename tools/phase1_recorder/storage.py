@@ -66,6 +66,7 @@ class Store:
         if os.path.basename(path) == ENGINE_DB:
             raise ValueError("Motor veritabanına yazılmaz")
         self.lock = threading.RLock()
+        self.read_problems = set()
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.execute("pragma journal_mode=wal")
         self.db.executescript("""
@@ -82,8 +83,17 @@ class Store:
               at real);
             create table if not exists sessions(id integer primary key, started real,
               ended real, mode text, stopped_by text);
+            create table if not exists settlement_index(venue text not null,
+              market_id text not null, settled_at integer not null, revision integer,
+              settled_values text, record_key text,
+              primary key(venue, market_id, settled_at));
             """)
         self.db.commit()
+        cols = [r[1] for r in self.db.execute("pragma table_info(sessions)")]
+        if "source" not in cols:
+            self.db.execute("alter table sessions add column source text")
+            self.db.commit()
+        self.settlement_repair = self.ensure_settlement_index()
         self.repair = self.ensure_comparisons()
 
     def close(self):
@@ -153,9 +163,20 @@ class Store:
             )
             if cur.rowcount == 0:
                 return False
-            os.makedirs(os.path.dirname(os.path.join(self.root, rel)), exist_ok=True)
-            with open(os.path.join(self.root, rel), "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+            path = os.path.join(self.root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            line = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
+            # A line cut off by a crash must not swallow the next record.
+            if os.path.exists(path) and os.path.getsize(path):
+                with open(path, "rb") as f:
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) != b"\n":
+                        line = "\n" + line
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+            # The index row commits only after the line is written: a crash in between
+            # leaves a line without its row; the record is then written again, and
+            # readers keep one record per key.
             self.db.commit()
         return True
 
@@ -184,8 +205,36 @@ class Store:
             for name in sorted(os.listdir(folder)):
                 if name.endswith(".jsonl") and (first is None or name >= first):
                     with open(os.path.join(folder, name), encoding="utf-8") as f:
-                        out += [json.loads(line) for line in f if line.strip()]
-        return out
+                        for i, line in enumerate(f, 1):
+                            if not line.strip():
+                                continue
+                            try:
+                                out.append(json.loads(line))
+                            except ValueError:
+                                # A line cut off by a crash: reported, never guessed.
+                                self.read_problems.add((kind, d, name, i))
+        return self._one_per_key(kind, out)
+
+    @staticmethod
+    def _one_per_key(kind, rows):
+        from .clients.records import KINDS, record_key
+
+        if kind not in KINDS:
+            return rows
+        seen = {}
+        for r in rows:
+            seen[(r.get("venue"), record_key(kind, r))] = r
+        return list(seen.values())
+
+    def latest(self, kind, venue=None, since=None):
+        """Settlements or comparisons: the highest revision of each payment."""
+        best = {}
+        for r in self.records(kind, venue, since):
+            k = (r["venue"], str(r["market_id"]), int(round(r["settled_at"])))
+            rev = r.get("revision", r.get("settlement_revision")) or 1
+            if k not in best or rev >= best[k][0]:
+                best[k] = (rev, r)
+        return [r for _, r in best.values()]
 
     # --- checkpoints ----------------------------------------------------------------
     def checkpoint(self, name, default=None):
@@ -216,70 +265,266 @@ class Store:
     )
 
     def ensure_comparisons(self):
-        """Create the comparison index, or repair one written before the identity fix
-        (keyed on the announced time, which is null for Hyperliquid and Lighter, so
-        one comparison could be stored many times). The old table is renamed, never
-        dropped; the index is rebuilt from the normalized comparison records, which
-        were always keyed by the actual settlement time. Nothing else is touched.
-        Returns a description of the repair, or None."""
+        """Create the comparison index, or rebuild it when it does not hold exactly the
+        normalized comparison records: an index written before the identity fix (keyed
+        on the announced time, null for Hyperliquid and Lighter, so one comparison
+        could be stored many times), or one left behind by a crash. The rebuild runs
+        in one transaction, so an interrupted one leaves the previous state and runs
+        again on the next open. An old-schema table is renamed and kept, never
+        dropped; raw responses and every other record are untouched. Returns a
+        description of the repair, or None."""
+        wanted = {}
+        for c in self.latest("comparison"):
+            if c.get("settled_at") is not None and c["comparison_status"] in self.FINAL:
+                wanted[self._comparison_key(c)] = c
         with self.lock:
             cols = [r[1] for r in self.db.execute("pragma table_info(comparisons)")]
+            current = "expected_settlement_at" in cols
             if not cols:
                 self.db.execute(self.SCHEMA)
                 self.db.commit()
-                return None
-            current = "expected_settlement_at" in cols
-            if current:
-                total, distinct = self.db.execute(
-                    "select count(*), (select count(*) from (select distinct venue,"
-                    " market_id, settled_at from comparisons)) from comparisons"
-                ).fetchone()
-                if total == distinct:
+            elif current:
+                have = {}
+                for v, m, t, body in self.db.execute(
+                    "select venue, market_id, settled_at, body from comparisons"
+                ):
+                    have[(v, m, t)] = json.loads(body).get("settlement_revision") or 1
+                rows = self.db.execute("select count(*) from comparisons").fetchone()[0]
+                want = {k: c.get("settlement_revision") or 1 for k, c in wanted.items()}
+                if rows == len(have) and have == want:
                     return None
-            before = self.db.execute("select count(*) from comparisons").fetchone()[0]
-            legacy = "comparisons_legacy_%d" % int(time.time())
-            self.db.execute("alter table comparisons rename to %s" % legacy)
-            self.db.execute(self.SCHEMA)
+            if not cols and not wanted:
+                return None
+            before = (
+                self.db.execute("select count(*) from comparisons").fetchone()[0]
+                if cols
+                else 0
+            )
+            legacy = None
             self.db.commit()
-        rebuilt = self.rebuild_comparisons()
-        note = dict(
-            at=time.time(),
-            legacy_table=legacy,
-            legacy_rows=before,
-            rebuilt_rows=rebuilt,
-            reason="eski anahtar" if not current else "yinelenen satır",
-        )
-        self.set_checkpoint("repair:comparisons", note)
+            try:
+                self.db.execute("begin")
+                if cols and not current:
+                    legacy = "comparisons_legacy_%d" % int(time.time())
+                    n = 1
+                    while self.db.execute(
+                        "select 1 from sqlite_master where name=?", (legacy,)
+                    ).fetchone():
+                        n += 1
+                        legacy = "comparisons_legacy_%d_%d" % (int(time.time()), n)
+                    self.db.execute("alter table comparisons rename to %s" % legacy)
+                    self.db.execute(self.SCHEMA)
+                else:
+                    self.db.execute("delete from comparisons")
+                self.db.executemany(
+                    "insert into comparisons values(?,?,?,?,?,?,?,?)",
+                    [
+                        self._comparison_row(c, c.get("observed_at"))
+                        for c in wanted.values()
+                    ],
+                )
+                note = dict(
+                    at=time.time(),
+                    legacy_table=legacy,
+                    legacy_rows=before,
+                    rebuilt_rows=len(wanted),
+                    reason=(
+                        "eski anahtar"
+                        if cols and not current
+                        else "dizin JSONL kayıtlarıyla uyuşmuyordu"
+                    ),
+                )
+                self.db.execute(
+                    "insert or replace into checkpoints values(?,?,?)",
+                    ("repair:comparisons", json.dumps(note), note["at"]),
+                )
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
         return note
 
     def rebuild_comparisons(self):
-        """Refill the comparison index from the normalized comparison records."""
-        n = 0
-        for c in self.records("comparison"):
-            n += self.put_comparison(c, c.get("observed_at") or time.time())
-        return n
+        """Rebuild the comparison index from the normalized records (see above)."""
+        note = self.ensure_comparisons()
+        return note["rebuilt_rows"] if note else self.comparison_counts()[0]
+
+    @staticmethod
+    def _comparison_key(c):
+        return (c["venue"], str(c["market_id"]), int(round(c["settled_at"])))
+
+    def _comparison_row(self, c, at):
+        return (
+            c["venue"],
+            str(c["market_id"]),
+            int(round(c["settled_at"])),
+            c["asset"],
+            c["comparison_status"],
+            c.get("expected_settlement_at"),
+            json.dumps(c, sort_keys=True),
+            at,
+        )
 
     def put_comparison(self, c, at):
         """Store a completed comparison once per (venue, market, actual settlement
-        time); True when it is new. A pending one has no settlement: refused."""
+        time); True when it is new. A comparison of a corrected payment (a higher
+        settlement revision) replaces the earlier one. A pending one is refused."""
         if c.get("settled_at") is None or c.get("comparison_status") not in self.FINAL:
             raise ValueError("Yalnız tamamlanmış karşılaştırma kaydedilir")
         with self.lock:
-            cur = self.db.execute(
-                "insert or ignore into comparisons values(?,?,?,?,?,?,?,?)",
-                (
-                    c["venue"],
-                    str(c["market_id"]),
-                    int(round(c["settled_at"])),
-                    c["asset"],
-                    c["comparison_status"],
-                    c.get("expected_settlement_at"),
-                    json.dumps(c, sort_keys=True),
-                    at,
-                ),
+            old = self.db.execute(
+                "select body from comparisons where venue=? and market_id=?"
+                " and settled_at=?",
+                self._comparison_key(c),
+            ).fetchone()
+            if old is not None:
+                prev = json.loads(old[0]).get("settlement_revision") or 1
+                if (c.get("settlement_revision") or 1) <= prev:
+                    return False
+                self.db.execute(
+                    "delete from comparisons where venue=? and market_id=?"
+                    " and settled_at=?",
+                    self._comparison_key(c),
+                )
+            self.db.execute(
+                "insert into comparisons values(?,?,?,?,?,?,?,?)",
+                self._comparison_row(c, at),
             )
             self.db.commit()
-            return cur.rowcount == 1
+            return True
+
+    # --- settlements: one record per payment, corrections as revisions --------------
+    def ensure_settlement_index(self):
+        """Keep the per-payment index equal to the normalized settlement records (a
+        crash between the two, or a folder from before the index, is repaired in one
+        transaction). Returns a description of the repair, or None."""
+        latest = self.latest("settlement")
+        with self.lock:
+            have = {
+                (v, m, t): r
+                for v, m, t, r in self.db.execute(
+                    "select venue, market_id, settled_at, revision from settlement_index"
+                )
+            }
+            want = {
+                (r["venue"], str(r["market_id"]), int(round(r["settled_at"]))): r.get(
+                    "revision", 1
+                )
+                for r in latest
+            }
+            if have == want:
+                return None
+            self.db.commit()
+            try:
+                self.db.execute("begin")
+                self.db.execute("delete from settlement_index")
+                self.db.executemany(
+                    "insert into settlement_index values(?,?,?,?,?,?)",
+                    [self._settlement_row(r) for r in latest],
+                )
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
+        return dict(before=len(have), after=len(want))
+
+    @staticmethod
+    def _values(r):
+        from .clients.records import SETTLED_FIELDS
+
+        return json.dumps(
+            [r.get(f) for f in SETTLED_FIELDS]
+            + [r.get("settled_rate_status") == "CONFLICT"]
+        )
+
+    def _settlement_row(self, r):
+        from .clients.records import record_key
+
+        return (
+            r["venue"],
+            str(r["market_id"]),
+            int(round(r["settled_at"])),
+            r.get("revision", 1),
+            self._values(r),
+            record_key("settlement", r),
+        )
+
+    def put_settlement(self, r, at):
+        """Record one settled payment; returns what it was:
+        new         a payment not seen before;
+        same        already recorded with the same values (also when the venue
+                    reported its time with a different sub-second part);
+        correction  the venue now reports different values for a recorded payment:
+                    kept as a new revision with the previous values beside it, and
+                    a settlement_correction record; the first version stays.
+        """
+        from .clients.records import SAME_EVENT, SETTLED_FIELDS, record_key
+
+        t = int(round(r["settled_at"]))
+        mid = str(r["market_id"])
+        with self.lock:
+            row = self.db.execute(
+                "select settled_at, revision, settled_values, record_key"
+                " from settlement_index"
+                " where venue=? and market_id=? and settled_at between ? and ?"
+                " order by abs(settled_at - ?) limit 1",
+                (r["venue"], mid, t - SAME_EVENT, t + SAME_EVENT, t),
+            ).fetchone()
+            if row is None:
+                r = dict(r, settled_at=t, revision=1)
+                self.db.execute(
+                    "insert into settlement_index values(?,?,?,?,?,?)",
+                    self._settlement_row(r),
+                )
+                self.put_record(
+                    "settlement", r["venue"], record_key("settlement", r), r, at
+                )
+                return "new"
+            first_t, rev, values, key = row
+            if values == self._values(r):
+                return "same"
+            before = json.loads(values)
+            r = dict(
+                r,
+                settled_at=first_t,
+                revision=rev + 1,
+                correction_of=key,
+                previous=dict(zip(list(SETTLED_FIELDS) + ["conflict"], before)),
+            )
+            self.db.execute(
+                "update settlement_index set revision=?, settled_values=?, record_key=?"
+                " where venue=? and market_id=? and settled_at=?",
+                (
+                    rev + 1,
+                    self._values(r),
+                    record_key("settlement", r),
+                    r["venue"],
+                    mid,
+                    first_t,
+                ),
+            )
+            note = dict(
+                venue=r["venue"],
+                asset=r["asset"],
+                market_id=r["market_id"],
+                settled_at=first_t,
+                revision=rev + 1,
+                before=r["previous"],
+                after={f: r.get(f) for f in SETTLED_FIELDS},
+                raw_sha256=r["raw_sha256"],
+                detected_at=at,
+            )
+            self.put_record(
+                "settlement_correction",
+                r["venue"],
+                record_key("settlement_correction", note),
+                note,
+                at,
+            )
+            self.put_record(
+                "settlement", r["venue"], record_key("settlement", r), r, at
+            )
+            return "correction"
 
     def comparisons(self, venue=None, status=None):
         q, args = "select body from comparisons where 1=1", []
@@ -302,10 +547,11 @@ class Store:
             ).fetchone()
 
     # --- sessions -------------------------------------------------------------------
-    def start_session(self, mode, at):
+    def start_session(self, mode, at, source=None):
         with self.lock:
             cur = self.db.execute(
-                "insert into sessions(started, mode) values(?,?)", (at, mode)
+                "insert into sessions(started, mode, source) values(?,?,?)",
+                (at, mode, source or self.checkpoint("data_source")),
             )
             self.db.commit()
             return cur.lastrowid

@@ -124,10 +124,18 @@ def export(store, cfg, now=None, repo=None):
                 warnings.append(
                     "%s %s: oran birimi %s" % (x["label"], asset, m["rate_unit"])
                 )
+    if not cov.get("live"):
+        warnings.insert(
+            0,
+            "GERÇEK BORSA VERİSİ DEĞİL: veri kaynağı %s"
+            % (cov.get("data_source") or "yok"),
+        )
     if not cons["ok"]:
         warnings.append("Tutarlılık kontrolünde sorun var (consistency_report.json)")
     manifest = dict(
         recorder_version=VERSION,
+        data_source=cov.get("data_source"),
+        live_data=bool(cov.get("live")),
         git_commit=sources["git_commit"],
         created_at=iso(now),
         capture_start=iso(min((s[0] for s in sessions), default=None)),

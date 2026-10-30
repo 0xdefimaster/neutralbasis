@@ -20,6 +20,8 @@ from .clients.records import record_key
 from .storage import Store, iso
 
 TASKS = ("metadata", "funding", "settlements", "candles", "orderbook")
+LIVE = "LIVE_PUBLIC_API"
+MOCK_PREFIX = "MOCK:"
 LOCK_STALE = 180
 
 
@@ -147,8 +149,19 @@ class VenueRecorder:
                 failed += 1
                 self.error("settlements", mid, ex, at)
                 continue
-            self.bump(mid, stats)
-            new += self.put("settlement", rows, at)
+            outcome = {}
+            for r in rows:
+                o = self.store.put_settlement(r, at)
+                outcome[o] = outcome.get(o, 0) + 1
+            if outcome.get("correction"):
+                self.log.warning(
+                    "%s %s: %d ödeme borsa tarafından düzeltildi",
+                    self.venue,
+                    mid,
+                    outcome["correction"],
+                )
+            self.bump(mid, dict(stats, corrections=outcome.get("correction", 0)))
+            new += outcome.get("new", 0)
             if rows:
                 self.store.set_checkpoint(name, max(r["settled_at"] for r in rows), at)
             self.match(m, at)
@@ -166,7 +179,7 @@ class VenueRecorder:
         ]
         paid = [
             s
-            for s in self.store.records("settlement", self.venue, since)
+            for s in self.store.latest("settlement", self.venue, since)
             if s["market_id"] == mid
         ]
         final, pending = matching.compare(
@@ -317,6 +330,19 @@ class Recorder:
         self.cfg = cfg
         self.clock = clock
         self.store = Store(cfg["root"])
+        # Where the data comes from: the real public APIs, or a test transport. One
+        # folder never mixes the two, and every report says which it holds.
+        self.source = (
+            LIVE if transport is None else MOCK_PREFIX + type(transport).__name__
+        )
+        held = self.store.checkpoint("data_source")
+        if held and (held == LIVE) != (self.source == LIVE):
+            self.store.close()
+            raise ValueError(
+                "Bu klasörde %s verisi var; %s verisi aynı klasöre yazılmaz"
+                % (held, self.source)
+            )
+        self.store.set_checkpoint("data_source", self.source)
         self.stop = threading.Event()
         self.log = setup_log(cfg["root"])
         self.venues = [
@@ -338,7 +364,7 @@ class Recorder:
         if os.path.exists(self.stop_file):
             os.remove(self.stop_file)
         started = self.clock()
-        sid = self.store.start_session(mode, started)
+        sid = self.store.start_session(mode, started, self.source)
         stopped_by = "bitti"
         until = started + (hours or 0) * 3600
         threads = [
