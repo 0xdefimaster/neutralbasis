@@ -51,6 +51,14 @@ class FakeVenues:
         # every venue), and ones it no longer lists.
         self.revised = {}
         self.withdrawn = set()
+        # Variational stats body (MOCK keys; the real ones are what discovery finds).
+        self.variational = lambda now: {
+            "listings": [
+                {"ticker": a, "mock_value": "1.0", "mock_nested": {"a": 1}}
+                for a in self.assets
+            ],
+            "mock_total": 2,
+        }
 
     def __call__(self, method, url, body, timeout):
         self.calls.append((method, url, body))
@@ -157,7 +165,10 @@ class FakeVenues:
                     }
                     for h in hs
                 ]
-                return list(reversed(rows)) if self.shuffle_candles else rows
+                if self.shuffle_candles and len(rows) > 2:
+                    # Mixed order: one entry out of place in an ascending list.
+                    rows[0], rows[1] = rows[1], rows[0]
+                return rows
             if t == "l2Book":
                 return {
                     "coin": body["coin"],
@@ -319,4 +330,7 @@ class FakeVenues:
                         "ask": [{"price": "100.1", "qty": "1"}],
                     },
                 }
+        if "variational" in u.netloc:
+            assert method == "GET" and u.path == "/metadata/stats"
+            return self.variational(now)
         raise AssertionError("Beklenmeyen istek: %s %s" % (method, url))

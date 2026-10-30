@@ -17,7 +17,7 @@ import statistics
 import time
 import urllib.parse
 
-from .clients import LABELS, make_client
+from .clients import DISCOVERY, LABELS, make_client
 from .clients.base import CONFLICT, DECLARED, OBSERVED, UNKNOWN, VERIFIED
 from .clients.records import (
     REQUIRED,
@@ -132,6 +132,8 @@ def signature(kind, r):
         return (mid, int(r["open_time"]), r["close"])
     if kind == "orderbook":
         return (mid, json.dumps(r["bids"]), json.dumps(r["asks"]))
+    if kind == "schema":
+        return (mid, r["schema_sha256"])
     return (mid,)
 
 
@@ -257,6 +259,9 @@ def coverage(store, cfg, now=None):
         for v, n, ok, rl, lok, lerr in audit
     }
     for v in cfg["venues"]:
+        if v in DISCOVERY:
+            out["venues"][v] = discovery_coverage(store, v, api)
+            continue
         client = make_client(v, store, cfg)
         markets = store.checkpoint("markets:" + v) or []
         snaps = store.records("funding_snapshot", v)
@@ -389,6 +394,56 @@ def coverage(store, cfg, now=None):
         venue["unverified_fields"] = unverified_fields(v, client, snaps)
         out["venues"][v] = venue
     return label_source(out, store.checkpoint("data_source"))
+
+
+def discovery_coverage(store, v, api):
+    """A discovery venue: what was polled and what its responses contain. No field is
+    given a meaning, so every market-evidence state is UNKNOWN."""
+    a = api.get(v, dict(requests=0, ok=0, errors=0, rate_limited=0))
+    d = store.checkpoint("discovery:" + v, {})
+    schemas = sorted(store.records("schema", v), key=lambda r: r["first_seen_at"])
+    with store.lock:
+        last = store.db.execute(
+            "select headers from audit where venue=? and error is null"
+            " order by id desc limit 1",
+            (v,),
+        ).fetchone()
+    headers = json.loads(last[0]) if last and last[0] else {}
+    gaps = d.get("change_gaps") or []
+    return dict(
+        label=LABELS.get(v, v),
+        connection=(
+            "BAĞLANTI YOK (hiç istek yapılmadı)"
+            if a["requests"] == 0
+            else "BAĞLANTI KURULAMADI" if a["ok"] == 0 else "BAĞLANDI"
+        ),
+        api=a,
+        markets_listed=d.get("listing_count") or 0,
+        markets={},
+        discovery=dict(
+            polls=d.get("polls", 0),
+            first_at=iso(d.get("first_at")),
+            last_at=iso(d.get("last_at")),
+            content_changes=d.get("content_changes", 0),
+            median_change_seconds=(round(statistics.median(gaps), 1) if gaps else None),
+            cache_headers={
+                k: headers[k] for k in ("age", "cache-control", "date") if k in headers
+            },
+            listing_count=d.get("listing_count"),
+            top_keys=d.get("top_keys"),
+            listing_keys=d.get("listing_keys"),
+            sample=d.get("sample"),
+            schemas=len(schemas),
+            schema_changes=d.get("schema_changes", 0),
+            paths=schemas[-1]["paths"] if schemas else {},
+            paths_truncated=bool(schemas and schemas[-1].get("paths_truncated")),
+        ),
+        unverified_fields=[
+            "Keşif modu: hiçbir alan funding, fiyat veya ödeme olarak yorumlanmadı",
+            "Funding aralığı, oran birimi, yön, ödeme geçmişi: UNKNOWN (veri yok)",
+            "Alan anlamları belge veya ödeme kanıtı olmadan belirlenmeyecek",
+        ],
+    )
 
 
 LIVE = "LIVE_PUBLIC_API"
@@ -609,6 +664,8 @@ def text_report(cov, cons=None):
                 lines.append(
                     "  - En az 3 tutarlı karşılaştırma var; bu tek başına üretim güvenilirliği değildir."
                 )
+        if x.get("discovery"):
+            lines += discovery_lines(x["discovery"])
         lines.append("  Doğrulanmamış alanlar:")
         lines += ["  * " + f for f in x["unverified_fields"]]
         lines.append("")
@@ -646,6 +703,47 @@ def text_report(cov, cons=None):
             % (cons["replayed_responses"], len(cons["replay_problems"])),
         ]
     return "\n".join(lines) + "\n"
+
+
+def discovery_lines(d, limit=60):
+    lines = [
+        "  KEŞİF (yalnız ham yanıt ve şema; alanlar yorumlanmadı)",
+        "  - Yoklama: %d · ilk %s · son %s" % (d["polls"], d["first_at"], d["last_at"]),
+        "  - İçerik değişimi: %d kez · medyan aralık %s sn · önbellek başlıkları %s"
+        % (
+            d["content_changes"],
+            d["median_change_seconds"],
+            d["cache_headers"] or "yok",
+        ),
+        "  - Listing sayısı: %s · üst düzey anahtarlar: %s"
+        % (d["listing_count"], d["top_keys"]),
+        "  - Şema: %d sürüm, %d değişim, %d alan yolu%s"
+        % (
+            d["schemas"],
+            d["schema_changes"],
+            len(d["paths"]),
+            " (KESİLDİ)" if d["paths_truncated"] else "",
+        ),
+    ]
+    if d["listing_keys"]:
+        lines.append("  - Listing alanları (kaç listing'de var):")
+        lines += ["      %s: %d" % (k, n) for k, n in sorted(d["listing_keys"].items())]
+    if d["sample"]:
+        lines.append("  - İlk listing (yayımlandığı gibi, kısaltılmış):")
+        lines += [
+            "      %s = %s" % (k, json.dumps(v, ensure_ascii=False))
+            for k, v in d["sample"].items()
+        ]
+    shown = list(d["paths"].items())[:limit]
+    if shown:
+        lines.append("  - Alan yolları ve tipleri:")
+        lines += ["      %s: %s" % (p, "|".join(t)) for p, t in shown]
+        if len(d["paths"]) > limit:
+            lines.append(
+                "      ... %d yol daha (coverage_report.json)"
+                % (len(d["paths"]) - limit)
+            )
+    return lines
 
 
 def write_reports(store, cfg, now=None, with_consistency=True):

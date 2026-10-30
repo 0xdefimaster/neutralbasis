@@ -352,12 +352,48 @@ class DataQualityTests(Base):
         stats = rec.store.checkpoint("stats:Hyperliquid:BTC")
         self.assertGreater(stats["candle_out_of_order"], 0)
 
+    def test_a_consistently_newest_first_response_is_not_out_of_order(self):
+        # Extended lists newest first: that is an order, not a disorder.
+        desc = [T0 - h * 3600 for h in range(720)]
+        self.assertEqual(series_stats(desc, T0)["out_of_order"], 0)
+        self.assertEqual(series_stats(desc[::-1], T0)["out_of_order"], 0)
+        mixed = desc[:]
+        mixed[3], mixed[4] = mixed[4], mixed[3]
+        self.assertEqual(series_stats(mixed, T0)["out_of_order"], 1)
+
     def test_old_and_future_timestamps(self):
         st = series_stats([100.0, T0, T0 + 10 * 86400], T0)
         self.assertEqual((st["too_old"], st["future"]), (1, 1))
         self.assertEqual(epoch(T0 * 1000), T0)
         self.assertEqual(epoch(T0 * 10**9), T0)
         self.assertIsNone(epoch("x"))
+
+
+class ConsoleTests(Base):
+    def test_progress_lines_reach_the_console_and_one_dead_venue_does_not_block(self):
+        self.fake.fail["hyperliquid"] = [(None, OSError("DNS"))] * 1000
+        lines = []
+        self.recorder = Recorder(
+            self.cfg,
+            transport=self.fake,
+            clock=self.clock,
+            sleep=self.clock.sleep,
+            console=lines.append,
+        )
+        self.recorder.run("once")
+        text = "\n".join(lines)
+        self.assertIn("Kayıt başladı", text)
+        self.assertIn("MOCK:", lines[0])  # test data is labelled on screen too
+        self.assertIn("Lighter metadata:", text)
+        self.assertIn("Hyperliquid metadata: HATA", text)
+        self.assertIn("atlandı: borsa erişilemiyor", text)
+        self.assertIn("Kayıt bitti", lines[-1])
+        # Skipped tasks made no Hyperliquid request beyond the ones that failed.
+        hl = [c for c in self.fake.calls if "hyperliquid" in c[1]]
+        self.assertLessEqual(
+            len(hl), self.cfg["unreachable_after"] * (self.cfg["retries"] + 1)
+        )
+        self.assertTrue(self.recorder.store.records("market", "Extended"))
 
 
 class HttpTests(Base):
@@ -401,6 +437,38 @@ class HttpTests(Base):
         h.request("x", "https://e/x")
         self.assertGreaterEqual(self.clock() - start, 7)
         self.assertEqual(self.errors(store)[0][2], 1)
+
+    def test_an_unreachable_venue_is_skipped_for_the_cooldown(self):
+        calls = []
+
+        def down(method, url, body, timeout):
+            calls.append(1)
+            raise OSError("getaddrinfo failed")
+
+        h, store = self.http(down)
+        per_request = self.cfg["retries"] + 1
+        for _ in range(self.cfg["unreachable_after"]):
+            with self.assertRaises(HttpError):
+                h.request("x", "https://e/x")
+        self.assertEqual(len(calls), self.cfg["unreachable_after"] * per_request)
+        # Now skipped with no network call and no audit row (nothing was asked).
+        with self.assertRaises(HttpError) as cm:
+            h.request("x", "https://e/x")
+        self.assertIn("erişilemiyor", str(cm.exception))
+        self.assertEqual(len(calls), self.cfg["unreachable_after"] * per_request)
+        self.assertEqual(len(self.errors(store)), len(calls))
+        # After the cooldown it is tried again.
+        self.clock.sleep(self.cfg["unreachable_cooldown_seconds"] + 1)
+        with self.assertRaises(HttpError):
+            h.request("x", "https://e/x")
+        self.assertEqual(len(calls), (self.cfg["unreachable_after"] + 1) * per_request)
+
+    def test_an_http_error_answer_does_not_mark_the_venue_unreachable(self):
+        h, store = self.http(lambda *a: (503, {}, b"down"))
+        for _ in range(self.cfg["unreachable_after"] + 1):
+            with self.assertRaises(HttpError):
+                h.request("x", "https://e/x")
+        self.assertEqual(h.unreachable(), 0)
 
     def test_5xx_retries_then_gives_up(self):
         h, store = self.http(lambda *a: (503, {}, b"down"))

@@ -9,6 +9,7 @@ python -m tools.phase1_recorder --stop                 ask a running session to 
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -58,9 +59,9 @@ def main(argv=None, transport=None):
         assets=args.assets.split(",") if args.assets else None,
         all_markets=True if args.all_markets else None,
     )
-    from .clients import VENUES
+    from .clients import ALL_VENUES
 
-    unknown = [v for v in cfg["venues"] if v not in VENUES]
+    unknown = [v for v in cfg["venues"] if v not in ALL_VENUES]
     if unknown:
         print("Bilinmeyen borsa: " + ", ".join(unknown), file=sys.stderr)
         return 2
@@ -103,7 +104,17 @@ def main(argv=None, transport=None):
         return 0 if not problems else 1
     from .recorder import Recorder
 
-    rec = Recorder(cfg, transport=transport)
+    if args.once:
+        from .config import ONCE_OVERRIDES
+
+        user = {}
+        if args.config:
+            with open(args.config, encoding="utf-8") as f:
+                user = json.load(f)
+        cfg.update({k: v for k, v in ONCE_OVERRIDES.items() if k not in user})
+    rec = Recorder(
+        cfg, transport=transport, console=lambda line: print(line, flush=True)
+    )
     try:
         stopped = rec.run("once" if args.once else "duration", args.duration_hours)
         _, _, text = write_reports(rec.store, cfg, with_consistency=False)
