@@ -3,12 +3,13 @@
 - **Tarih:** 2026-11-02
 - **Dal:** `claude/friendly-hamilton-v2g1fw`, HEAD `7e0747e` (PR #54 açık, birleştirilmedi)
 - **Kapsam:** salt okuma. Bu belge dışında hiçbir dosya değiştirilmedi.
+- **Revizyon 2026-11-02 (yalnız dokümantasyon):** paper-only politikası eklendi (bölüm T, `CLAUDE.md`). Yol haritası düzeltildi: Faz 7 = paper yürütme motoru, Faz 9 = ayrıca yetkilendirilecek gelecek kilometre taşı. Commit edilmemiş çalışma notu güncellendi. Kaynak kod, test ve ayar değişmedi.
 
 Durum terimleri: **IMPLEMENTED**, **PARTIALLY IMPLEMENTED**, **MISSING**, **VERIFIED**, **REQUIRES VERIFICATION**, **BLOCKED**.
 
 Kanıt kuralı: **VERIFIED** yalnız gerçek borsa verisiyle gözlenen davranış için kullanılır. Bu bulut ortamı borsa API'lerine ve belgelerine erişemiyor (proxy 403 / DNS). Gerçek veri yalnız kullanıcının bilgisayarında üretiliyor. Bu belgede "kodda var" ifadesi "çalıştığı kanıtlandı" anlamına gelmez.
 
-> **Not — commit edilmemiş çalışma:** çalışma ağacında izlenmeyen `marketdata/`, `test_marketdata.py` ve `Veri-Yetenekleri.cmd` dosyaları var. Bunlar önceki "Faz 1: yetenek manifesti + kanonik şema" görevinden kaldı; 17 testi geçiyor. Bu denetim sırasında commit edilmedi ve değiştirilmedi. Ne yapılacağı kullanıcının kararı (bkz. R).
+> **Not — gözden geçirilmemiş çalışma:** `marketdata/`, `test_marketdata.py` ve `Veri-Yetenekleri.cmd` önceki "Faz 1: yetenek manifesti + kanonik şema" görevinden kaldı (17 test geçiyor). Denetim sırasında değiştirilmediler. Oturum kapanınca kaybolmasınlar diye denetimden sonra `b328f3e` olarak commit edildiler; commit mesajında "unreviewed" olarak işaretliler ve hiçbir modül onları kullanmıyor. Kabul ya da geri alma kararı kullanıcıda (bkz. R).
 
 ---
 
@@ -131,7 +132,7 @@ Durum sütunları kodu anlatır; "Canlı kanıt" sütunu gerçek veriyi.
   - FiveFeed: önbellek (`max_age`) ve hata fırlatma.
   - CCXT: `enableRateLimit` ve 6 sn timeout.
   - Bir borsanın hatası diğerlerini durdurmuyor (thread ayrımı). Hata sessizce yutulmuyor; panelde ve events tablosunda görünüyor.
-- **Hesap ve trading yetenekleri:** dokuz borsanın hiçbirinde yok. Bakiye, teminat, marjin, açık emir, kaldıraç ayarı ve tasfiye bilgisi okunmuyor; emir verme, iptal, durum sorgulama ve dolum okuma da yok. Hepsi **MISSING**.
+- **Hesap ve trading yetenekleri:** dokuz borsanın hiçbirinde yok. Bakiye, teminat, marjin, açık emir, kaldıraç ayarı ve tasfiye bilgisi okunmuyor; emir verme, iptal, durum sorgulama ve dolum okuma da yok. Paper-only politikası (bölüm T) gereği bunlar **kapsam dışı**: eksik değiller ve eklenmeyecekler. Hesap ve emir olayları paper motorunda simüle edilir.
 - **Doğrulama kaydı:** registry'nin (`capabilities.py`) beyanlarının çoğu hâlâ `NOT_VERIFIED`. Canlı kanıt geldikçe paper motoru içinde yükseliyor, ama motorun gerçek PC kaydı bu ortamdan görülemiyor (**REQUIRES VERIFICATION**).
 - **Lighter adlandırması:** kodda `Lighter` = RH, `LighterCore` = Core. İki entegrasyon zaten ayrı (ayrı host, ayrı market_id, ayrı klasör). Commit edilmemiş `marketdata/venues.py` açık kimlikler öneriyor: `lighter_rh`, `lighter_core`.
 
@@ -282,7 +283,7 @@ Ayar sınırları `LIMITS` sözlüğünde doğrulanıyor.
   - Ödemeler, cüzdan ve pozisyon tek işlemde kalıcı yazılıyor (`bot.py:1046`), böylece yeniden başlatma çift kredi yazmıyor.
   - Defter olayları benzersiz anahtarla yazılıyor (idempotent).
 - **Emir durum makinesi yok.** Yalnız pozisyon durumları var: OPENING, OPEN, DATA_WAIT, RECOVERY, CLOSING, CLOSED.
-- **Zaman aşımı sonrası durum mutabakatı** paper'da anlamsız; gerçek yürütmede sıfırdan tasarlanmalı.
+- **Zaman aşımı sonrası durum mutabakatı** bugünkü paper dolumunda yok. Faz 7 (paper yürütme motoru) belirsiz emir durumu, ret ve zaman aşımı senaryolarını **simüle ederek** modellemeli. Gerçek borsa yürütmesi kapsam dışı (bölüm T).
 
 ---
 
@@ -396,7 +397,9 @@ Kural: çalışan yolları değiştirmeden önce yenisini gölgede paralel çal�
 4. **Faz 4 — Tek kâr fonksiyonu.** `priced` + `accounting` mantığı tek bir saf fonksiyona çıkarılır ve altın testlerle eski sonuçlarla birebir karşılaştırılır. Para tutarları `Decimal`'a geçirilir; önce yalnız muhasebe katmanında.
 5. **Faz 5/6 — Simülasyon ve risk.** Mevcut dolum simülasyonu korunur; iyimser/temel/muhafazakâr çalıştırma eklenir. Portföy maruziyet limitleri ve drawdown eklenir. Belirsizlik riskinin günlük limite dahil edilmesi ayrı tasarım ve onay gerektirir.
 6. **`wide_paper.py` bölme.** Davranışı değiştirmeden, test paketi korunarak modüllere ayrılır.
-7. **Faz 7–9.** Emir durum makinesi ve hesap okuma yalnız belgeler ve kimlik bilgileri gelince. Canlı işlem ayrı açık onay olmadan yok.
+7. **Faz 7 — PAPER YÜRÜTME MOTORU.** Canlı yürütme entegrasyonu değil. Simüle emir durum makinesi (CREATED … RECOVERY_REQUIRED), idempotent simüle emir kimlikleri, kısmi dolum, hedge kurtarma, simüle ret ve zaman aşımı, yeniden başlatma kurtarması ve iç pozisyon mutabakatı. Hepsi mevcut paper dolum simülasyonunun üzerine kurulur. Borsa hesabı okunmaz, emir gönderilmez, kimlik bilgisi gerekmez.
+8. **Faz 8 — Paper trading doğrulaması.** Gerçek public veriyle, yalnız simüle yürütme.
+9. **Faz 9 — Canlı hazırlık incelemesi.** Gelecekteki, ayrıca yetkilendirilecek bir kilometre taşı. Otomatik başlamaz. Başarılı bir paper dönemi de onu başlatmaz. Ancak tam bir hazırlık incelemesi ve proje sahibinin açık yazılı onayıyla açılabilir.
 
 Paralel ve ucuz iş: CI (GitHub Actions ücretsiz kotası) ile her push'ta test.
 
@@ -409,8 +412,8 @@ Paralel ve ucuz iş: CI (GitHub Actions ücretsiz kotası) ile her push'ta test.
 | 9 borsanın resmî API belgeleri (funding işareti, birimi, aralığı, tavanı; zaman damgası anlamı; hız limitleri) | Bu ortam belgeleri okuyamıyor; kurallar DECLARED | Funding motoru doğrulaması, VERIFIED etiketleri | Kaydedicinin canlı kanıtı |
 | Kaydedicinin kullanıcı PC'sindeki ≥72 saatlik çıktısı (`Phase1-Paket.cmd` ZIP'i) | Canlı kanıt yalnız orada | Birim ve işaret doğrulaması | Analiz kodu |
 | Variational gerçek `metadata/stats` yanıtı | Alan anlamları bilinmiyor | Variational bağdaştırıcısı | Yok |
-| Hesap/trading API erişimi (salt okunur anahtarlar) | Hesap ve emir yetenekleri doğrulanamaz | Faz 7+ | Yok; şimdilik gerekmiyor |
-| Commit edilmemiş `marketdata/` için karar (commit / gözden geçir / at) | Önceki görevden kaldı | Faz 1b | — |
+| ~~Hesap/trading API erişimi~~ **Gerekmiyor** | Paper-only politikası: hesap ve emir olayları simüle edilir; Extended anahtarı da istenmez (bölüm T) | — | Her şey |
+| Gözden geçirilmemiş `marketdata/` (`b328f3e`) için karar: kabul / değiştir / geri al | Önceki görevden kaldı | Faz 1b | — |
 | Railway dağıtımı hâlâ çalışıyor mu? | Güvenlik yüzeyi | O bölümü | — |
 | PR #54 birleştirilecek mi? | Yeni iş bu dalın üstünde | Dal stratejisi | — |
 
@@ -426,9 +429,94 @@ Paralel ve ucuz iş: CI (GitHub Actions ücretsiz kotası) ile her push'ta test.
 | Kâr hesabı | PARTIALLY IMPLEMENTED; tek fonksiyon yok, `float` |
 | Simülasyon | PARTIALLY IMPLEMENTED; paper için iyi; senaryo katmanları yok |
 | Risk | PARTIALLY IMPLEMENTED; pozisyon ve gün düzeyinde var, portföy düzeyinde yok |
-| Yürütme (gerçek) | MISSING (bilinçli) |
+| Paper yürütme | PARTIALLY IMPLEMENTED; dolum, kısmi dolum ve bacak kurtarma var; emir durum makinesi yok (Faz 7) |
+| Yürütme (gerçek) | Kapsam dışı: politika gereği DISABLED (bölüm T) |
 | Muhasebe | IMPLEMENTED (paper); borsa mutabakatı MISSING |
 | Paper trading | IMPLEMENTED; sonuçların güvenilirliği veri doğrulamasına bağlı (REQUIRES VERIFICATION) |
-| Canlı trading | BLOCKED: kod yok, onay yok, doğrulama yok |
+| Canlı trading | DISABLED (politika); kod yok; Faz 9 ayrı yazılı onay gerektirir |
 
 **Bütçe etkisi:** bu fazda $0. Önerilen sıranın ilk adımları da $0 (yerel çalışma, ücretsiz API'ler, GitHub Actions ücretsiz kotası). VPS ancak sürekli kayıt gerekirse önerilir; o zaman ayrıca fiyat ve onay istenecek.
+
+---
+
+## T. Paper-only işletim politikası ve güvenlik doğrulaması
+
+### T.1 Politika
+Kalıcı proje kuralı (`CLAUDE.md`): **varsayılan mod PAPER, canlı mod DISABLED.**
+- Bütün geliştirme, deney, strateji değerlendirmesi ve test simüle yürütmeyle yapılır.
+- Gerçek public piyasa verisi kullanılabilir.
+- Emir, dolum, kısmi dolum, ücret, kayma, funding ödemesi, bakiye, pozisyon, marjin ve PnL simüle edilir.
+- Gerçek emir gönderilmez. Özel anahtar, imza, trading nonce'u ya da trading kimlik bilgisi gerekmez ve istenmez.
+- İsteğe bağlı salt okunur kimlik bilgileri, public bilgi yeterliyse asla zorunlu olmaz.
+- Paper ve canlı yürütme yalıtılmış kalır. Hiçbir uygulama ya da ayar değişikliği canlı yürütmeyi açamaz.
+- Canlı işleme geçiş ayrı bir hazırlık incelemesi ve proje sahibinin açık yazılı onayını gerektirir (Faz 9).
+
+### T.2 Gerçek public veri ve simüle hesap olayları
+
+| Gözlenen borsa verisi (gerçek, public) | Nerede |
+|---|---|
+| Ham HTTP yanıtları | `audit` (paper deposu); kaydedicide `raw/` + `audit` |
+| Mark fiyatları | `marks` |
+| Mum ve gerçekleşen funding **oranları** | `hist_candles`, `hist_funding`; kaydedici `normalized/` |
+| Extended RFQ defter mesajları | `rfq_messages` |
+| Anlık oranlar, defterler, OI/hacim | Bellek içi satırlar (`WideMarkets`, `FiveFeed`); her biri bir audit kaydına bağlı |
+
+| Simüle hesap olayları (paper) | Nerede |
+|---|---|
+| Cüzdan / bakiye (başlangıç `wide_capital` ayarından) | `kv` → `wide_wallet` |
+| Açık ve kapalı pozisyonlar, dolumlar, kısmi dolumlar, unwind | `kv` → `wide_positions`, `wide_closed`; `events` |
+| Funding **nakdi** (gerçek yayımlanmış oran × simüle miktar × mark) | `payments`, `ledger_events` |
+| Ücretler, kayma, gerçekleşen / tahmini PnL, belirsizlik riski | Pozisyon kaydı, `paper_trades`, `ledger_events` |
+| Paper dönemleri | `paper_periods` |
+
+Sınır: bir funding ödemesi iki parçalıdır. Oran gözlenen veridir; nakit simüle olaydır. Kayıtta ikisi ayrı tutulur: oran `audit_id` ve kaynak alanlarıyla, nakit ödeme durumuyla (SETTLED / SETTLED_ESTIMATED_PRICE / NOT_RECORDED / UNKNOWN).
+
+### T.3 Güvenlik doğrulaması
+
+**Yöntem:** HEAD `b328f3e` üzerinde statik kod incelemesi: bütün Python ve panel JS dosyalarında arama, sonra eşleşen satırların okunması. Kod çalıştırılarak ağ trafiği izlenmedi.
+
+| İddia | Durum | Kanıt | Sınır / varsayım |
+|---|---|---|---|
+| Gerçek emir gönderilmiyor | **VERIFIED (kod incelemesi)** | Testler dışında `create_order`, `edit_order` ya da emir uç noktası yok. CCXT'de yalnız public çağrılar var: `load_markets`, `fetch_tickers`, `fetch_ticker`, `fetch_order_book`, `fetch_ohlcv`, `fetch_funding_rate(s)`, `fetch_funding_rate_history`, `fetch_funding_intervals`, `fetch_mark_prices`, `fetch_open_interest(s)`, HTX public `swap_batch_funding_rate` (`wide_markets.py:235`). POST yalnız Hyperliquid `/info` (kaydedicide 4 tür izinli listesi, `clients/hyperliquid.py`) ve TxFlow `/info` (`perpMeta`, `activeAssetCtx`, `candleSnapshot`, `l2Book`, `risk_scan.py`) uçlarına gidiyor. Panel JS yalnız yerel `/api/...` çağırıyor. | CCXT kütüphanesinin içi denetlenmedi. CCXT nesneleri anahtarsız kuruluyor (`wide_markets.py:293`), bu yüzden kimlik isteyen uç noktaların çalışmaması **beklenir**: bu CCXT tasarımına dayanan bir varsayım. Ağ düzeyinde kanıt için paper deposundaki `audit` URL listesi kullanıcı PC'sinde taranabilir (REQUIRES VERIFICATION). |
+| Borsada emir iptali yok | **VERIFIED (kod incelemesi)** | `cancel_order`, `cancel_all` ya da iptal uç noktası yok. | Aynı sınır. |
+| Özel anahtarla imza yok | **VERIFIED (kod incelemesi)** | İmza kütüphanesi (eth_account, ecdsa, starknet) ya da özel anahtar alanı yok. `hmac` yalnız panel parolasının sabit zamanlı karşılaştırması için (`bot.py:1575`). | — |
+| Trading nonce'u gerekmiyor | **VERIFIED (kod incelemesi)** | `nonce` hiçbir kaynakta geçmiyor. | — |
+| Trading izni gerekmiyor | **VERIFIED (kod incelemesi)** | Tek kimlik bilgisi isteğe bağlı salt okunur Extended anahtarı (T.4). | — |
+| Paper işletimi için gerçek bakiye gerekmiyor | **VERIFIED (kod incelemesi + testler)** | Bakiye ya da pozisyon okuyan çağrı yok (`fetch_balance`, `fetch_positions` geçmiyor). Paper cüzdanı ayardan başlıyor (`wide_paper.py:993`, `wide_capital`). 482 testlik paket kimlik bilgisi olmadan çalışıp geçiyor. | — |
+| Paper ve canlı yalıtımı | **VERIFIED (dolaylı)** | Canlı yürütme yolu yok; yalıtılacak ikinci bir yol bulunmuyor. | Gelecekte bir yol eklenirse yalıtım ayrıca tasarlanmalı ve test edilmeli (Faz 9). |
+| Kod değişince garanti sürüyor | **Garanti edilmez** | Bu doğrulama yalnız incelenen commit için geçerli. | Öneri (onaylanırsa, ayrı iş): yasaklı çağrı adlarını arayan bir test ya da CI kontrolü. Bu turda kod değişikliği yapılmadı. |
+
+### T.4 İsteğe bağlı Extended ücret kimlik bilgisi
+- **Ne yapıyor:** panelde "İsteğe bağlı salt okunur API anahtarı" alanı var (`panel.js`). Girilirse yalnız `GET https://api.starknet.extended.exchange/api/v1/user/fees?market=BTC-USD` isteğine `X-Api-Key` başlığıyla gidiyor (`connections.py:116-127, 187-230`). Windows'ta DPAPI ile şifreli, başka yerde yalnız bellekte saklanıyor.
+- **Kullanımı (VERIFIED, kod incelemesi):** okunan ücret yalnız `verified_extended_fees` anahtarına yazılıyor ve sadece bağlantılar sayfasında gösteriliyor. Bu anahtarı okuyan tek modül `connections.py`. Paper motoru bu değeri kullanmıyor; panel de bunu söylüyor: "Paper ücret varsayımı otomatik düşürülmez".
+- **Paper ücretleri anahtarsız olarak şuradan geliyor:**
+  - Lighter/Extended için ayar varsayılanları (`bot.DEFAULTS`: `extended_fee=0.00025`, `lighter_fee=0.00028`; ayar alt sınırları bu değerlere eşit, daha düşük girilemez);
+  - CCXT piyasa bilgisindeki public `taker` alanı;
+  - Arcus public `feetiers`;
+  - kullanıcının panelde elle girdiği ücret (`wide_fees`).
+- **Neden gereksiz:** public tarife yeterliyse anahtar hiçbir paper hesabını değiştirmez. Uygulama anahtarsız tam çalışıyor (bütün testler anahtarsız).
+- **Politika:** Extended API anahtarı **istenmez**. Alan isteğe bağlı olarak kalır. Bu turda kod değişmediği için alan panelde hâlâ görünüyor.
+- **Açık nokta:** `extended_fee=0.00025` ve `lighter_fee=0.00028` varsayılanlarının borsaların güncel public tarifesiyle uyuşup uyuşmadığı **REQUIRES VERIFICATION**. Belgeler bu ortamdan okunamıyor.
+
+### T.5 Paper yürütme mimarisi ve sınırları
+- **Mimari:** `WidePaper.open` her bacağı sırayla taze bir defter okuyarak doldurur:
+  - venue gecikmesi: yapılandırılmış 750 ms ya da ölçülen p90 RTT, hangisi büyükse;
+  - limit fiyatla IOC, 1 bp ek kayma;
+  - kısmi dolumda ikinci bacak birinciye göre boyutlanır, eşleşmeyen kısım hemen kapatılır (`unwind`);
+  - hiç dolmazsa işlem sayılmaz; bacak kurtarılamazsa `RECOVERY`.
+- **Muhasebe:** ödemeler, cüzdan ve pozisyon tek işlemde yazılır. Defter olayları benzersiz anahtarlı ve append-only.
+- **Sınırlar:**
+  - Kuyruk sırası, maker dolum ve piyasa etkisinin defter sonrası toparlanması modellenmiyor. Yalnız taker varsayılıyor; bu bilinçli olarak muhafazakâr.
+  - Borsa reddi, API zaman aşımında belirsiz emir durumu ve venue kesintisi simüle edilmiyor (Faz 7).
+  - Çıkış likiditesi giriş anının defterinden tahmin ediliyor.
+  - Tasfiye, borsa motoru değil yaklaşık mesafe kuralıyla izleniyor (`LEG_SAFETY`).
+  - Para tutarları `float`.
+  - Funding nakdi DECLARED işaret ve birim kurallarına dayanıyor (bölüm E).
+
+### T.6 Gelecek geliştirme kısıtları
+- Her yeni modül paper ile uyumlu olmalı. Yürütme yalnız simüle yürütme arayüzü üzerinden yapılır.
+- Hata senaryoları (ret, zaman aşımı, kısmi dolum, başarısız hedge, yeniden başlatma) simüle yürütmeyle test edilir.
+- Borsa bağdaştırıcılarına hesap, emir, iptal ya da imza çağrısı eklenmez. Bir kütüphane bunları sunsa bile çağrılmaz.
+- Gözlenen veri ile simüle olay kayıtta, raporda ve panelde ayırt edilebilir kalır.
+- Canlı moda geçişi açan bir ayar, bayrak ya da ortam değişkeni eklenmez.
+- Faz 9 otomatik başlamaz; ayrı bir hazırlık incelemesi ve yazılı onay gerektirir.
