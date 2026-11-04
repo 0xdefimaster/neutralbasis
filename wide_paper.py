@@ -14,7 +14,15 @@ the venue's real public order book. Capital is one pooled paper wallet.
 import collections, csv, datetime as dt, io, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
 import capabilities
-from ledger import Ledger
+import zero_trade
+from ledger import (
+    NOT_RECORDED,
+    SETTLED,
+    SETTLED_ESTIMATED_PRICE,
+    UNKNOWN,
+    Ledger,
+    payment_status,
+)
 from connectors import (
     FEED_VENUES,
     NATIVE,
@@ -1022,6 +1030,8 @@ class WidePaper:
         self.capabilities = capabilities.Registry(store.get("capability_state", {}))
         self.registry = self.capabilities.evaluate(now())
         self.capability_saved = 0
+        # Why no paper position was opened: stage counts and coded reasons per cycle.
+        self.diag = zero_trade.Diagnostics(store.get("wide_zero_trade", {}))
 
     def update_registry(self, rows, at):
         """Feed this round's evidence to the capability registry and re-derive it."""
@@ -1075,6 +1085,7 @@ class WidePaper:
                 ("wide_closed", self.closed[-500:]),
                 ("wide_wallet", self.wallet),
                 ("wide_config", self.cfg),
+                ("wide_zero_trade", self.diag.state()),
             ):
                 self.store.db.execute(
                     "insert or replace into kv values(?,?)", (k, json.dumps(v))
@@ -2578,9 +2589,11 @@ class WidePaper:
                 rows = self.funding_rows(v, a, leg["entered"])
             except Exception as ex:
                 pending.append(v + ": funding geçmişi alınamadı (" + str(ex)[:80] + ")")
-                continue
+                # The schedule is still recorded: each payment due is UNKNOWN, with its
+                # possible cost, until the history can be read.
+                rows = None
             seen = set()
-            for r in rows:
+            for r in rows or []:
                 if not leg["entered"] < r["ts"] <= end:
                     continue
                 t = int(round(r["ts"] / 60)) * 60
@@ -2620,6 +2633,7 @@ class WidePaper:
                     cash=cash,
                     price=price,
                     valuation_estimated=estimated,
+                    status=SETTLED_ESTIMATED_PRICE if estimated else SETTLED,
                     audit_id=r.get("audit_id"),
                 )
                 with self.store.lock:
@@ -2628,11 +2642,13 @@ class WidePaper:
                     if estimated:
                         p["estimated_funding"] += cash
                     if late:
-                        p["funding_unverified"] = [
-                            x
-                            for x in p.get("funding_unverified", [])
-                            if (x["venue"], x["payment_time"]) != (v, t)
-                        ]
+                        for name in ("funding_unverified", "funding_unknown"):
+                            if name in p:
+                                p[name] = [
+                                    x
+                                    for x in p[name]
+                                    if (x["venue"], x["payment_time"]) != (v, t)
+                                ]
                     self.store.db.execute(
                         "insert or replace into payments values(?,?,?)",
                         (key, r["ts"], json.dumps(body)),
@@ -2648,53 +2664,101 @@ class WidePaper:
                     cash=cash,
                 )
             # Venue schedule known: a payment never published after the wait is
-            # recorded as unverified zero, never invented.
+            # NOT_RECORDED; one due while the history cannot be read is UNKNOWN. Both
+            # are kept with their possible cost and no amount, never invented.
             first, iv = leg.get("first_payment"), leg.get("interval")
             if first and iv:
                 t = first
                 while t <= end:
                     tm = int(round(t / 60)) * 60
                     if tm not in seen and now() - t >= FUNDING_UNVERIFIED_AFTER:
-                        key = p["id"] + ":" + v + ":" + str(tm)
-                        with self.store.lock:
-                            exists = self.store.db.execute(
-                                "select 1 from payments where key=?", (key,)
-                            ).fetchone()
-                            if not exists:
-                                p.setdefault("funding_unverified", []).append(
-                                    dict(
-                                        payment_time=tm,
-                                        venue=v,
-                                        recorded=now(),
-                                        risk=self.unverified_risk(p, leg, rows, tm),
-                                    )
-                                )
-                                zero = dict(
-                                    position=p["id"],
-                                    venue=v,
-                                    asset=a,
-                                    rate=None,
-                                    cash=0.0,
-                                    unverified=True,
-                                )
-                                self.ledger.record_payment(key, tm, zero)
-                                self.store.db.execute(
-                                    "insert into payments values(?,?,?)",
-                                    (key, tm, json.dumps(zero)),
-                                )
-                                self.persist()
-                        if not exists:
-                            self.events(
-                                "FUNDING_UNVERIFIED",
-                                "Funding oranı yayımlanmadı; doğrulanmamış 0 kaydedildi",
-                                position=p["id"],
-                                venue=v,
-                                payment_time=tm,
-                            )
+                        self.unsettled(p, leg, rows, tm, known=rows is not None)
                     elif tm not in seen:
                         pending.append(v + ": " + str(tm))
                     t += iv
         p["pending_funding"] = pending
+
+    def unsettled(self, p, leg, rows, tm, known):
+        """Record a payment due at `tm` that has no published rate: NOT_RECORDED when
+        the history was read and lacks it, UNKNOWN when it could not be read. An
+        UNKNOWN one becomes NOT_RECORDED once the history is read; a published rate
+        later replaces either (the late path in settle). No cash moves."""
+        v, a = leg["venue"], p["asset"]
+        key = p["id"] + ":" + v + ":" + str(tm)
+        status = NOT_RECORDED if known else UNKNOWN
+        with self.store.lock:
+            row = self.store.db.execute(
+                "select body from payments where key=?", (key,)
+            ).fetchone()
+            if row is not None:
+                old = json.loads(row[0])
+                if not (known and payment_status(old) == UNKNOWN):
+                    return
+                # The history is readable again and still lacks this payment.
+                body = dict(old, status=NOT_RECORDED, unverified=True)
+                entry = next(
+                    (
+                        x
+                        for x in p.get("funding_unknown", [])
+                        if (x["venue"], x["payment_time"]) == (v, tm)
+                    ),
+                    None,
+                )
+                p["funding_unknown"] = [
+                    x for x in p.get("funding_unknown", []) if x is not entry
+                ]
+                p.setdefault("funding_unverified", []).append(
+                    entry
+                    or dict(
+                        payment_time=tm,
+                        venue=v,
+                        recorded=now(),
+                        risk=self.unverified_risk(p, leg, rows or [], tm),
+                    )
+                )
+                self.store.db.execute(
+                    "update payments set body=? where key=?", (json.dumps(body), key)
+                )
+                self.ledger.record_payment(key, tm, body, suffix=":not_recorded")
+                self.persist()
+                kind = "FUNDING_UNVERIFIED"
+            else:
+                p.setdefault(
+                    "funding_unverified" if known else "funding_unknown", []
+                ).append(
+                    dict(
+                        payment_time=tm,
+                        venue=v,
+                        recorded=now(),
+                        risk=self.unverified_risk(p, leg, rows or [], tm),
+                    )
+                )
+                zero = dict(
+                    position=p["id"],
+                    venue=v,
+                    asset=a,
+                    rate=None,
+                    cash=0.0,
+                    unverified=True,
+                    status=status,
+                )
+                self.ledger.record_payment(key, tm, zero)
+                self.store.db.execute(
+                    "insert into payments values(?,?,?)", (key, tm, json.dumps(zero))
+                )
+                self.persist()
+                kind = "FUNDING_UNVERIFIED" if known else "FUNDING_UNKNOWN"
+        self.events(
+            kind,
+            (
+                "Funding oranı yayımlanmadı; ödeme doğrulanmadı (tutar yok)"
+                if known
+                else "Funding geçmişi okunamadı; ödeme bilinmiyor (tutar yok)"
+            ),
+            position=p["id"],
+            venue=v,
+            payment_time=tm,
+        )
 
     def unverified_risk(self, p, leg, rows, t):
         """What an unpublished payment would have cost this leg at its last known rate
@@ -3007,6 +3071,16 @@ class WidePaper:
 
     def cycle(self, entries=True):
         self.error = None
+        diag = self.diag
+        diag.start(
+            now(),
+            dict(
+                enabled=bool(self.cfg["wide_enabled"]),
+                funding=bool(self.cfg["wide_funding_enabled"]),
+                convergence=bool(self.cfg["wide_conv_enabled"]),
+                entries=bool(entries),
+            ),
+        )
         try:
             try:
                 rows = self.with_fees(self.source.market_rows())
@@ -3055,7 +3129,7 @@ class WidePaper:
             for p in self.closed[-50:]:
                 # Late-published rates replace unverified zero hours for a week after close.
                 if p.get("pending_funding") or (
-                    p.get("funding_unverified")
+                    (p.get("funding_unverified") or p.get("funding_unknown"))
                     and now() - p.get("closed_at", now()) < LATE_FUNDING_WINDOW
                 ):
                     self.settle(p)
@@ -3117,6 +3191,19 @@ class WidePaper:
                     )
                     if why:
                         c["research"] = why
+            diag.set("funding_candidates", len(self.candidates))
+            diag.set("price_gap_candidates", len(self.conv_candidates))
+            for ranked in (self.candidates, self.conv_candidates):
+                for c in ranked:
+                    if c["score"] <= 0:
+                        diag.current["codes"]["COST_EXCEEDS_EDGE"] = (
+                            diag.current["codes"].get("COST_EXCEEDS_EDGE", 0) + 1
+                        )
+                        continue
+                    diag.add("economic_candidates")
+                    if c.get("research"):
+                        diag.add("evidence_blocked")
+                        diag.note(c, at, "research", c["research"], "evidence")
             self.price_research(at)
             self.assessed = []
             if (
@@ -3147,6 +3234,8 @@ class WidePaper:
                             or self.pair_key(c) in self.rejected
                         ):
                             self.review["skipped"] += 1
+                            if self.blocked(c):
+                                diag.note(c, at, "skipped", self.blocked(c), "pre_check")
                             continue
                         x = self.assess(c)
                         self.checked[self.pair_key(c)] = at
@@ -3158,6 +3247,12 @@ class WidePaper:
                     self.assessed += picked
                 for x in self.assessed:
                     self.note_review(x, at)
+                    if x["eligible"]:
+                        diag.add("simulation_passed")
+                    else:
+                        diag.add("positions_rejected")
+                        diag.note(x, at, "rejected", x["reasons"] or ["Bilinmeyen"],
+                                  "deep_check")
                 # Every qualifying pair is entered, best first, one per asset, while
                 # position slots and margin headroom last.
                 ready = sorted(
@@ -3174,9 +3269,14 @@ class WidePaper:
                             self.decide(
                                 x, at, "skipped", ["Yeni girişler durdu: " + halt]
                             )
+                            diag.add("positions_rejected")
+                            diag.note(x, at, "skipped",
+                                      ["Yeni girişler durdu: " + halt], "risk")
                         break
                     if self.blocked(best):
                         self.decide(best, at, "skipped", self.blocked(best))
+                        diag.add("positions_rejected")
+                        diag.note(best, at, "skipped", self.blocked(best), "risk")
                         continue
                     # Sized against the headroom before earlier entries this round.
                     if self.per_venue():
@@ -3191,6 +3291,9 @@ class WidePaper:
                             self.decide(
                                 best, at, "skipped", ["Borsa teminatı yetersiz"]
                             )
+                            diag.add("positions_rejected")
+                            diag.note(best, at, "skipped",
+                                      ["Borsa teminatı yetersiz"], "risk")
                             continue
                     else:
                         need = (1 + FILL_TOLERANCE) * (
@@ -3198,11 +3301,16 @@ class WidePaper:
                         )
                         if need > self.headroom():
                             self.decide(best, at, "skipped", ["Teminat yetersiz"])
+                            diag.add("positions_rejected")
+                            diag.note(best, at, "skipped", ["Teminat yetersiz"], "risk")
                             continue
                     if self.worst_loss(best) > self.risk_budget() + 1e-6:
                         self.decide(
                             best, at, "skipped", ["Günün kalan kayıp bütçesi yetmiyor"]
                         )
+                        diag.add("positions_rejected")
+                        diag.note(best, at, "skipped",
+                                  ["Günün kalan kayıp bütçesi yetmiyor"], "risk")
                         continue
                     # Both legs are re-checked right before the fills: market,
                     # evidence, fees and books, then the funding quote.
@@ -3219,6 +3327,8 @@ class WidePaper:
                         self.review["eligible"] -= 1
                         self.reject(best, stale, at)
                         self.decide(best, at, "rejected")
+                        diag.add("positions_rejected")
+                        diag.note(best, at, "rejected", stale, "entry_check")
                         self.events(
                             "ENTRY_SKIP",
                             stale[0],
@@ -3227,24 +3337,46 @@ class WidePaper:
                             reasons=stale,
                         )
                     else:
+                        diag.add("risk_approved")
+                        diag.add("paper_orders_created")
                         missed = self.open(best)
                         if missed:
                             # Eligible, but the orders filled nothing: not a trade.
                             self.decide(best, at, "skipped", [missed])
+                            diag.add("positions_rejected")
+                            diag.note(best, at, "skipped",
+                                      ["Paper emirleri doldurmadı: %s" % missed],
+                                      "execution")
                         else:
                             self.review["opened"] += 1
                             self.decide(best, at, "opened", [])
+                            diag.add("positions_opened")
+                            diag.note(best, at, "opened", [], "opened")
+            elif entries and rows is not None and self.cfg["wide_enabled"]:
+                # No round ran: the open positions decide why.
+                halt = self.entry_halt()
+                if halt:
+                    code = zero_trade.code_of(halt)[0]
+                    diag.current["codes"][code] = diag.current["codes"].get(code, 0) + 1
             if rows is not None:
                 self.funnel = self.build_funnel(rows, ranked_rows, at)
+                diag.set("markets_discovered", self.funnel["markets"])
+                diag.set("data_quality_passed", self.funnel["usable"])
+                diag.set("instruments_matched", self.funnel["assets"])
+                if not self.funnel["assets"]:
+                    diag.current["codes"]["NO_COMMON_INSTRUMENT"] = 1
             previous, self.last_cycle = self.last_cycle, now()
             # Open positions are checked once a cycle; a gap over DOWNTIME_GAP between two
             # cycles counts as downtime in the period report.
             self.cycle_seconds = self.last_cycle - previous if previous else None
             self.record_run(self.last_cycle, entries and self.cfg["wide_enabled"])
+            diag.finish(now(), self.error)
             self.persist()
         except Exception as ex:
             self.error = str(ex)
             self.events("ERROR", str(ex))
+            if diag.current is not None:
+                diag.finish(now(), self.error)
 
     def record_run(self, at, entries=True):
         """Downtime between cycles, time with new entries switched off, and an hourly
@@ -3267,6 +3399,32 @@ class WidePaper:
             )
             samples.append([t, equity])
             self.store.put("wide_equity", samples[-24 * 120 :])
+
+    @staticmethod
+    def accounting(p, open_position=False):
+        """The three results of a position, kept apart (the wallet, the position's
+        net and every limit are unchanged by this split):
+          realized         price PnL realized so far, fees and SETTLED funding only;
+          estimated        realized + funding valued at an estimated price, and for
+                           an open position its unrealized PnL;
+          uncertainty_risk possible cost of NOT_RECORDED and UNKNOWN payments (<= 0).
+        """
+        estimated_funding = p.get("estimated_funding", 0.0) or 0.0
+        realized = (
+            p.get("price_pnl", 0.0)
+            + (p.get("funding", 0.0) - estimated_funding)
+            - p.get("fees", 0.0)
+        )
+        risk = lambda name: sum(x.get("risk") or 0.0 for x in p.get(name, []))
+        return dict(
+            realized_pnl=realized,
+            estimated_pnl=realized
+            + estimated_funding
+            + (p.get("unrealized", 0.0) if open_position else 0.0),
+            uncertainty_risk=risk("funding_unverified") + risk("funding_unknown"),
+            not_recorded=len(p.get("funding_unverified", [])),
+            unknown=len(p.get("funding_unknown", [])),
+        )
 
     @staticmethod
     def ledger_entry(p):
@@ -3292,6 +3450,11 @@ class WidePaper:
             unverified_risk=sum(
                 x.get("risk") or 0.0 for x in p.get("funding_unverified", [])
             ),
+            unknown=len(p.get("funding_unknown", [])),
+            unknown_risk=sum(
+                x.get("risk") or 0.0 for x in p.get("funding_unknown", [])
+            ),
+            realized_pnl=WidePaper.accounting(p)["realized_pnl"],
             fill_ratio=p.get("fill_ratio", 1.0),
             slippage=p.get("slippage"),
         )
@@ -3353,6 +3516,7 @@ class WidePaper:
         )
         unverified = sum(p["unverified"] for p in done)
         unverified_risk = sum(p.get("unverified_risk") or 0.0 for p in settled)
+        accounting = self.period_accounting(done, opened)
         pf = gains / losses if losses else (None if not gains else math.inf)
         top3 = sum(nets[:3]) / total if total > 0 else None
         days = span / 86400
@@ -3398,8 +3562,9 @@ class WidePaper:
             ),
             (
                 "Doğrulanmamış funding aleyhte sayılınca net",
-                f"{unverified} ödeme · {total + unverified_risk:+.2f} $",
-                total + unverified_risk > 0,
+                f"{unverified + accounting['unknown']} ödeme · "
+                f"{total + unverified_risk + accounting['closed_unknown_risk']:+.2f} $",
+                total + unverified_risk + accounting["closed_unknown_risk"] > 0,
             ),
             ("Dönem içinde ayar değişikliği", str(len(changes)), not changes),
             (
@@ -3429,12 +3594,58 @@ class WidePaper:
             collateral_closes=collateral,
             unverified_payments=unverified,
             unverified_risk=unverified_risk,
+            accounting=accounting,
             venues=dict(sorted(venues.items(), key=lambda kv: -kv[1])),
             checks=[dict(label=a, value=b, ok=bool(c)) for a, b, c in checks],
             ready=all(c for _, _, c in checks),
             stress=stress,
             stress_unmeasured=sum(p.get("slippage") is None for p in settled),
             scorecard=scorecard(settled),
+        )
+
+    def period_accounting(self, done, opened):
+        """Realized PnL, estimated PnL and uncertainty risk of the period (closed
+        trades plus open positions), and its payments by status. Entries kept before
+        these fields existed are read from their own fields."""
+        realized = estimated = risk = closed_unknown_risk = 0.0
+        unknown = 0
+        for x in done:
+            est = x.get("estimated_funding") or 0.0
+            r = x.get("realized_pnl", (x.get("net") or 0.0) - est)
+            realized += r
+            estimated += r + est
+            closed_unknown_risk += x.get("unknown_risk") or 0.0
+            risk += (x.get("unverified_risk") or 0.0) + (x.get("unknown_risk") or 0.0)
+            unknown += x.get("unknown") or 0
+        for p in opened:
+            a = self.accounting(p, open_position=True)
+            realized += a["realized_pnl"]
+            estimated += a["estimated_pnl"]
+            risk += a["uncertainty_risk"]
+            unknown += a["unknown"]
+        ids = {p["id"] for p in opened} | {x.get("id") for x in done}
+        statuses = {}
+        with self.store.lock:
+            rows = self.store.db.execute("select body from payments").fetchall()
+        for (body,) in rows:
+            b = json.loads(body)
+            if b.get("position") in ids:
+                k = payment_status(b)
+                statuses[k] = statuses.get(k, 0) + 1
+        return dict(
+            realized_pnl=realized,
+            estimated_pnl=estimated,
+            uncertainty_risk=risk,
+            unknown=unknown,
+            closed_unknown_risk=closed_unknown_risk,
+            payments=statuses,
+            note=(
+                "Gerçekleşmiş: fiyat PnL'si, ücret ve yalnız SETTLED funding. Tahmini: "
+                "gerçekleşmiş + tahmini fiyatlı funding + açık pozisyonların "
+                "gerçekleşmemiş PnL'si. Belirsizlik riski: NOT_RECORDED ve UNKNOWN "
+                "ödemelerin olası maliyeti. Cüzdan, pozisyon neti ve limitler bu "
+                "ayrımdan etkilenmez."
+            ),
         )
 
     @staticmethod
@@ -3670,6 +3881,11 @@ class WidePaper:
             fees=self.fees,
             daily_pnl=self.daily_pnl(),
             positions=self.positions,
+            position_accounting={
+                p["id"]: self.accounting(p, open_position=True)
+                for p in self.positions
+                if p.get("id")
+            },
             closed=self.closed[-100:],
             report=self.report(),
             candidates=self.candidates[:40],
@@ -3681,6 +3897,7 @@ class WidePaper:
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
             review=self.review_snapshot(),
             funnel=self.funnel,
+            why_no_trade=self.diag.report(now()),
             epochs=self.epochs(),
             period=self.period_report(),
             trades=self.trade_log()[:200],
