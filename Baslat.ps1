@@ -12,7 +12,14 @@ if (Test-Path -LiteralPath $taskPidFile) {
     $taskOldPid = [int](Get-Content -LiteralPath $taskPidFile)
     $taskOld = $null
     try { $taskOld = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/identity' -TimeoutSec 2 } catch {}
-    if ($taskOld -and $taskOld.pid -eq $taskOldPid -and $taskOld.root -eq $taskRoot -and $taskOld.mode -eq 'PAPER') {
+    # The .venv python.exe is a launcher: paper.pid holds the launcher, the engine that
+    # answers /api/identity is its child. Either one is the registered engine.
+    $taskOurs = $taskOld -and $taskOld.pid -eq $taskOldPid
+    if ($taskOld -and -not $taskOurs) {
+        $taskChild = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$taskOld.pid) -ErrorAction SilentlyContinue
+        $taskOurs = [bool]($taskChild -and $taskChild.ParentProcessId -eq $taskOldPid -and $taskChild.CommandLine -like '*risk_main.py*')
+    }
+    if ($taskOurs -and $taskOld.root -eq $taskRoot -and $taskOld.mode -eq 'PAPER') {
         Write-Output 'Paper motor zaten çalışıyor: http://127.0.0.1:8765'
         return
     }
