@@ -203,20 +203,22 @@ class SignTests(unittest.TestCase):
                 T0 + h,
             )
 
-    def test_rates_that_follow_the_premium_verify_the_sign(self):
+    def test_the_premium_heuristic_alone_verifies_nothing(self):
+        # On real data it agreed about half the time even on venues whose convention
+        # is known; it is shown as evidence and never sets the venue status.
         reg = Registry()
         self.feed(reg, "Hyperliquid", cap.SIGN_MIN)
         x = status(reg, "Hyperliquid", "funding_sign", T0 + 100)
-        self.assertEqual(x["status"], PARTIAL)
-        self.assertIn("10/10", x["method"])
-        self.assertIn("doğrulanmadı", x["limitation"])
+        self.assertEqual(x["status"], UNVERIFIED)
+        self.assertIn("10/10", x["evidence"]["heuristic"])
+        self.assertIn("karar vermez", x["evidence"]["heuristic"])
 
-    def test_inverted_signs_are_not_supported(self):
+    def test_an_inverted_heuristic_does_not_refuse_the_sign_either(self):
         reg = Registry()
         self.feed(reg, "Paradex", cap.SIGN_MIN, agree=False)
-        self.assertEqual(
-            status(reg, "Paradex", "funding_sign", T0 + 100)["status"], NONE
-        )
+        x = status(reg, "Paradex", "funding_sign", T0 + 100)
+        self.assertEqual(x["status"], UNVERIFIED)
+        self.assertIn("0/10", x["evidence"]["heuristic"])
 
     def test_small_premiums_and_few_observations_decide_nothing(self):
         reg = Registry()
@@ -251,8 +253,9 @@ class EligibilityTests(unittest.TestCase):
             T0,
             T0 - 7 * 86400,
         )
-        for h in range(cap.SIGN_MIN):
-            reg.observe_sign(venue, row(venue, "S%d" % h, mark=100.1), T0 + h)
+        # The venue sign rests on each market's published rate against its payment.
+        for i in range(3):
+            settle(reg, venue, "A%d" % i)
         return reg
 
     def test_full_evidence_makes_a_venue_eligible(self):
@@ -270,8 +273,10 @@ class EligibilityTests(unittest.TestCase):
             [
                 "Arcus: Funding modeli bilinmiyor; yalnız araştırma",
                 "Arcus: İşlem fiyatı geçmişi yok",
-                # An unknown model has no payment gap to check.
+                # An unknown model has no payment gap to check, nor a published
+                # rate to compare with one.
                 "Arcus: Funding aralığı doğrulanmadı",
+                "Arcus: Funding işareti doğrulanmadı",
                 "Nowhere: yetenek kaydı yok",
             ],
         )
@@ -348,8 +353,6 @@ def rows_for(*markets, at=AT, **kw):
 
 def full_registry(markets, at=T0):
     reg = Registry()
-    for v in {v for v, _ in markets}:
-        premium_heuristic(reg, v, at=at)
     for v, a in markets:
         verify_market(reg, v, a, at=at)
     # Venue-level interval and history need a few markets per venue.
@@ -461,10 +464,62 @@ class PublishedSignTests(unittest.TestCase):
         reg = full_registry([("Hyperliquid", "BTC")])
         x = status(reg, "Hyperliquid", "funding_sign", AT)
         self.assertEqual(x["status"], PARTIAL)
-        self.assertIn("Sezgisel", x["method"])
-        self.assertIn("ödeme kanıtı değil", x["method"])
+        self.assertIn("Yayımlanan oran", x["method"])
+        self.assertIn("4/4", x["method"])
+        self.assertIn("ödeme nakdi değil", x["method"])
+        self.assertIn("beyanı", x["limitation"])
+        self.assertIn("doğrulanmadı", x["limitation"])
         self.assertEqual(x["evidence"]["account"], cap.NO_ACCOUNT)
         self.assertIn("4/4", x["evidence"]["published"])
+        self.assertIn("Sezgisel", x["evidence"]["heuristic"])
+
+    def venue(self, consistent=0, inverted=0, mixed=0, venue="Hyperliquid"):
+        reg = Registry()
+        names = itertools.count()
+        for n, published in ((consistent, 0.0001), (inverted, -0.0001)):
+            for _ in range(n):
+                settle(reg, venue, "M%d" % next(names), published=published)
+        for _ in range(mixed):
+            a = "M%d" % next(names)
+            settle(reg, venue, a, observed=3)
+            settle(reg, venue, a, observed=2, published=-0.0001, at=T0 + 3 * 3600)
+        return status(reg, venue, "funding_sign", T0 + 3 * 3600 + 100)
+
+    def test_too_few_decided_markets_decide_nothing(self):
+        x = self.venue(consistent=cap.PUBLISHED_VENUE_MIN - 1)
+        self.assertEqual(x["status"], UNVERIFIED)
+        self.assertIn("yetersiz", x["method"])
+
+    def test_inverted_markets_refuse_the_venue_sign(self):
+        x = self.venue(inverted=cap.PUBLISHED_VENUE_MIN)
+        self.assertEqual(x["status"], NONE)
+        self.assertIn("tersine", x["limitation"])
+
+    def test_contradicting_markets_leave_the_venue_sign_unverified(self):
+        x = self.venue(consistent=3, mixed=2)
+        self.assertEqual(x["status"], UNVERIFIED)
+        self.assertIn("tutarsız", x["method"])
+        # One inverted market in ten still verifies (that market stays blocked on its
+        # own evidence); one in five refuses the whole venue.
+        self.assertEqual(self.venue(consistent=9, inverted=1)["status"], PARTIAL)
+        self.assertEqual(self.venue(consistent=4, inverted=1)["status"], NONE)
+
+    def test_an_inverted_heuristic_does_not_outweigh_published_rates(self):
+        reg = full_registry([("Hyperliquid", "BTC")])
+        premium_heuristic(reg, "Hyperliquid", agree=False)
+        x = status(reg, "Hyperliquid", "funding_sign", AT)
+        self.assertEqual(x["status"], PARTIAL)
+        self.assertIn("inverted", x["evidence"]["heuristic"])
+
+    def test_an_undocumented_convention_is_never_verified(self):
+        saved = dict(cap.FUNDING_MODELS)
+        self.addCleanup(
+            lambda: (cap.FUNDING_MODELS.clear(), cap.FUNDING_MODELS.update(saved))
+        )
+        cap.FUNDING_MODELS["Hyperliquid"] = cap._model(cap.PERIODIC)
+        x = self.venue(consistent=4)
+        self.assertEqual(x["status"], UNVERIFIED)
+        self.assertIn("belgelenmedi", x["method"])
 
 
 class MarketEvidenceTests(unittest.TestCase):
@@ -558,18 +613,15 @@ class MarketEvidenceTests(unittest.TestCase):
             "LighterCore: funding işareti çelişkili · yayımlanan oran 0/4 ödemede aynı yönde",
             why,
         )
-        # The venue heuristic running against the premium blocks every market too.
+        # The venue heuristic running against the premium is shown, but the market's
+        # own published rates decide: it blocks nothing.
         reg = full_registry([("Hyperliquid", "BTC"), ("LighterCore", "BTC")])
-        reg.signs["LighterCore"] = {}
         premium_heuristic(reg, "LighterCore", agree=False)
-        why = gate(
-            reg,
-            pair("BTC", "Hyperliquid", "LighterCore"),
-            rows_for(("Hyperliquid", "BTC"), ("LighterCore", "BTC")),
-        )
-        self.assertIn(
-            "LighterCore: funding işareti prim yönünün tersine görünüyor", why
-        )
+        rows = rows_for(("Hyperliquid", "BTC"), ("LighterCore", "BTC"))
+        self.assertEqual(gate(reg, pair("BTC", "Hyperliquid", "LighterCore"), rows), [])
+        e = reg.market_evidence("LighterCore", "BTC", rows[("LighterCore", "BTC")], AT)
+        self.assertEqual(e["sign"]["heuristic"]["status"], "inverted")
+        self.assertEqual(e["confidence"], "orta")
 
     def test_unknown_fee(self):
         reg = full_registry([("Hyperliquid", "BTC"), ("LighterCore", "BTC")])
@@ -659,11 +711,6 @@ def _published(samples):
     return f
 
 
-def _heuristic_inverted(reg, rows):
-    reg.signs["LighterCore"] = {}
-    premium_heuristic(reg, "LighterCore", agree=False)
-
-
 def _model(model):
     def f(reg, rows):
         cap.FUNDING_MODELS["LighterCore"] = cap._model(model, direction=cap.LONG_PAYS)
@@ -697,7 +744,6 @@ GAPS = dict(
     published_expired=_published(
         [[AT - cap.PUBLISHED_WINDOW - i - 1, True, 1.0] for i in range(4)]
     ),
-    heuristic_inverted=_heuristic_inverted,
     model_continuous=_model(cap.CONTINUOUS),
     model_epoch=_model(cap.EPOCH),
     model_unknown=_model(cap.UNKNOWN),

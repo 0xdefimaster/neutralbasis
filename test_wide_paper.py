@@ -1,6 +1,7 @@
 import json, math, os, tempfile, unittest
 from unittest import mock
 import bot
+import capabilities
 import wide_paper
 from wide_paper import (
     WidePaper,
@@ -2222,11 +2223,15 @@ class CapabilityGateTests(unittest.TestCase):
 
     def evidence(self, markets, at=T0, venues=DEX):
         """Each market's own evidence: complete history, enough settled payments on
-        its published interval, and published rates that matched them; plus the venue
-        premium heuristic."""
+        its published interval, and published rates that matched them; plus enough
+        other markets whose published rates matched their payments for the venue
+        sign."""
         reg = self.desk.capabilities
         for v in venues:
-            reg.signs[v] = {"S%d|0" % i: [at, True] for i in range(10)}
+            for i in range(capabilities.PUBLISHED_VENUE_MIN):
+                reg.published["%s|V%d" % (v, i)] = [
+                    [at - j * 3600, True, 1.0] for j in range(capabilities.PUBLISHED_MIN)
+                ]
         for v, a in markets:
             r = next(x for x in self.src.rows if (x["venue"], x["asset"]) == (v, a))
             iv, rate = r["interval"], r["raw_rate"]
