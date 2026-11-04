@@ -52,7 +52,7 @@ class ToleranceTests(unittest.TestCase):
                     v.tolerance(dict(asset="BTC", market_id="BTC-USD")), 36
                 )
             finally:
-                rec.store.close()
+                rec.close()
 
 
 class IdentityFixture(unittest.TestCase):
@@ -206,12 +206,12 @@ class RecorderFixture(unittest.TestCase):
 
     def tearDown(self):
         if self.rec:
-            self.rec.store.close()
+            self.rec.close()
         self.dir.cleanup()
 
     def start(self):
         if self.rec:
-            self.rec.store.close()
+            self.rec.close()
         self.rec = Recorder(
             self.cfg, transport=self.fake, clock=self.clock, sleep=self.clock.sleep
         )

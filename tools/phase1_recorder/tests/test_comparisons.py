@@ -34,12 +34,12 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         if self.rec:
-            self.rec.store.close()
+            self.rec.close()
         self.dir.cleanup()
 
     def start(self):
         if self.rec:
-            self.rec.store.close()
+            self.rec.close()
         self.rec = Recorder(
             self.cfg, transport=self.fake, clock=self.clock, sleep=self.clock.sleep
         )
@@ -274,7 +274,7 @@ class LegacyRepairTests(Base):
         db.commit()
         legacy_rows = db.execute("select count(*) from comparisons").fetchone()[0]
         self.assertEqual(legacy_rows, 4 * good)  # the bug: nulls never collide
-        self.rec.store.close()
+        self.rec.close()
         self.rec = None
         store = Store(root)
         try:

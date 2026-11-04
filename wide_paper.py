@@ -14,6 +14,7 @@ the venue's real public order book. Capital is one pooled paper wallet.
 import collections, csv, datetime as dt, io, itertools, json, math, statistics, time, uuid
 from bot import now, hour, number, walk, corr, FILL_TOLERANCE, FUNDING_UNVERIFIED_AFTER
 import capabilities
+import zero_trade
 from ledger import (
     NOT_RECORDED,
     SETTLED,
@@ -1029,6 +1030,8 @@ class WidePaper:
         self.capabilities = capabilities.Registry(store.get("capability_state", {}))
         self.registry = self.capabilities.evaluate(now())
         self.capability_saved = 0
+        # Why no paper position was opened: stage counts and coded reasons per cycle.
+        self.diag = zero_trade.Diagnostics(store.get("wide_zero_trade", {}))
 
     def update_registry(self, rows, at):
         """Feed this round's evidence to the capability registry and re-derive it."""
@@ -1082,6 +1085,7 @@ class WidePaper:
                 ("wide_closed", self.closed[-500:]),
                 ("wide_wallet", self.wallet),
                 ("wide_config", self.cfg),
+                ("wide_zero_trade", self.diag.state()),
             ):
                 self.store.db.execute(
                     "insert or replace into kv values(?,?)", (k, json.dumps(v))
@@ -3067,6 +3071,16 @@ class WidePaper:
 
     def cycle(self, entries=True):
         self.error = None
+        diag = self.diag
+        diag.start(
+            now(),
+            dict(
+                enabled=bool(self.cfg["wide_enabled"]),
+                funding=bool(self.cfg["wide_funding_enabled"]),
+                convergence=bool(self.cfg["wide_conv_enabled"]),
+                entries=bool(entries),
+            ),
+        )
         try:
             try:
                 rows = self.with_fees(self.source.market_rows())
@@ -3177,6 +3191,19 @@ class WidePaper:
                     )
                     if why:
                         c["research"] = why
+            diag.set("funding_candidates", len(self.candidates))
+            diag.set("price_gap_candidates", len(self.conv_candidates))
+            for ranked in (self.candidates, self.conv_candidates):
+                for c in ranked:
+                    if c["score"] <= 0:
+                        diag.current["codes"]["COST_EXCEEDS_EDGE"] = (
+                            diag.current["codes"].get("COST_EXCEEDS_EDGE", 0) + 1
+                        )
+                        continue
+                    diag.add("economic_candidates")
+                    if c.get("research"):
+                        diag.add("evidence_blocked")
+                        diag.note(c, at, "research", c["research"], "evidence")
             self.price_research(at)
             self.assessed = []
             if (
@@ -3207,6 +3234,8 @@ class WidePaper:
                             or self.pair_key(c) in self.rejected
                         ):
                             self.review["skipped"] += 1
+                            if self.blocked(c):
+                                diag.note(c, at, "skipped", self.blocked(c), "pre_check")
                             continue
                         x = self.assess(c)
                         self.checked[self.pair_key(c)] = at
@@ -3218,6 +3247,12 @@ class WidePaper:
                     self.assessed += picked
                 for x in self.assessed:
                     self.note_review(x, at)
+                    if x["eligible"]:
+                        diag.add("simulation_passed")
+                    else:
+                        diag.add("positions_rejected")
+                        diag.note(x, at, "rejected", x["reasons"] or ["Bilinmeyen"],
+                                  "deep_check")
                 # Every qualifying pair is entered, best first, one per asset, while
                 # position slots and margin headroom last.
                 ready = sorted(
@@ -3234,9 +3269,14 @@ class WidePaper:
                             self.decide(
                                 x, at, "skipped", ["Yeni girişler durdu: " + halt]
                             )
+                            diag.add("positions_rejected")
+                            diag.note(x, at, "skipped",
+                                      ["Yeni girişler durdu: " + halt], "risk")
                         break
                     if self.blocked(best):
                         self.decide(best, at, "skipped", self.blocked(best))
+                        diag.add("positions_rejected")
+                        diag.note(best, at, "skipped", self.blocked(best), "risk")
                         continue
                     # Sized against the headroom before earlier entries this round.
                     if self.per_venue():
@@ -3251,6 +3291,9 @@ class WidePaper:
                             self.decide(
                                 best, at, "skipped", ["Borsa teminatı yetersiz"]
                             )
+                            diag.add("positions_rejected")
+                            diag.note(best, at, "skipped",
+                                      ["Borsa teminatı yetersiz"], "risk")
                             continue
                     else:
                         need = (1 + FILL_TOLERANCE) * (
@@ -3258,11 +3301,16 @@ class WidePaper:
                         )
                         if need > self.headroom():
                             self.decide(best, at, "skipped", ["Teminat yetersiz"])
+                            diag.add("positions_rejected")
+                            diag.note(best, at, "skipped", ["Teminat yetersiz"], "risk")
                             continue
                     if self.worst_loss(best) > self.risk_budget() + 1e-6:
                         self.decide(
                             best, at, "skipped", ["Günün kalan kayıp bütçesi yetmiyor"]
                         )
+                        diag.add("positions_rejected")
+                        diag.note(best, at, "skipped",
+                                  ["Günün kalan kayıp bütçesi yetmiyor"], "risk")
                         continue
                     # Both legs are re-checked right before the fills: market,
                     # evidence, fees and books, then the funding quote.
@@ -3279,6 +3327,8 @@ class WidePaper:
                         self.review["eligible"] -= 1
                         self.reject(best, stale, at)
                         self.decide(best, at, "rejected")
+                        diag.add("positions_rejected")
+                        diag.note(best, at, "rejected", stale, "entry_check")
                         self.events(
                             "ENTRY_SKIP",
                             stale[0],
@@ -3287,24 +3337,46 @@ class WidePaper:
                             reasons=stale,
                         )
                     else:
+                        diag.add("risk_approved")
+                        diag.add("paper_orders_created")
                         missed = self.open(best)
                         if missed:
                             # Eligible, but the orders filled nothing: not a trade.
                             self.decide(best, at, "skipped", [missed])
+                            diag.add("positions_rejected")
+                            diag.note(best, at, "skipped",
+                                      ["Paper emirleri doldurmadı: %s" % missed],
+                                      "execution")
                         else:
                             self.review["opened"] += 1
                             self.decide(best, at, "opened", [])
+                            diag.add("positions_opened")
+                            diag.note(best, at, "opened", [], "opened")
+            elif entries and rows is not None and self.cfg["wide_enabled"]:
+                # No round ran: the open positions decide why.
+                halt = self.entry_halt()
+                if halt:
+                    code = zero_trade.code_of(halt)[0]
+                    diag.current["codes"][code] = diag.current["codes"].get(code, 0) + 1
             if rows is not None:
                 self.funnel = self.build_funnel(rows, ranked_rows, at)
+                diag.set("markets_discovered", self.funnel["markets"])
+                diag.set("data_quality_passed", self.funnel["usable"])
+                diag.set("instruments_matched", self.funnel["assets"])
+                if not self.funnel["assets"]:
+                    diag.current["codes"]["NO_COMMON_INSTRUMENT"] = 1
             previous, self.last_cycle = self.last_cycle, now()
             # Open positions are checked once a cycle; a gap over DOWNTIME_GAP between two
             # cycles counts as downtime in the period report.
             self.cycle_seconds = self.last_cycle - previous if previous else None
             self.record_run(self.last_cycle, entries and self.cfg["wide_enabled"])
+            diag.finish(now(), self.error)
             self.persist()
         except Exception as ex:
             self.error = str(ex)
             self.events("ERROR", str(ex))
+            if diag.current is not None:
+                diag.finish(now(), self.error)
 
     def record_run(self, at, entries=True):
         """Downtime between cycles, time with new entries switched off, and an hourly
@@ -3825,6 +3897,7 @@ class WidePaper:
             assessed=[{k: v for k, v in c.items()} for c in self.assessed],
             review=self.review_snapshot(),
             funnel=self.funnel,
+            why_no_trade=self.diag.report(now()),
             epochs=self.epochs(),
             period=self.period_report(),
             trades=self.trade_log()[:200],

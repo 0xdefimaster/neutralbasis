@@ -1640,6 +1640,8 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 return self.send(engine.backtest_status())
             if self.path == "/api/funding-matrix" and hasattr(engine, "funding_matrix"):
                 return self.send(engine.funding_matrix())
+            if self.path == "/api/why-no-trade" and hasattr(engine, "why_no_trade"):
+                return self.send(engine.why_no_trade())
             if self.path == "/api/capabilities" and hasattr(
                 engine, "capability_registry"
             ):

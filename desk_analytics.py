@@ -505,6 +505,10 @@ class DeskEngine(RiskEngine):
             )
         return ws
 
+    def why_no_trade(self):
+        """Zero-trade diagnostics of the multi-venue paper desk (zero_trade.py)."""
+        return self.wide_paper.diag.report(now())
+
     def capability_registry(self):
         """The full capability registry: every venue, capability, status and evidence."""
         import capabilities as cap

@@ -11,6 +11,7 @@ Field states in the reports:
 """
 
 import gzip
+import hashlib
 import json
 import os
 import statistics
@@ -60,7 +61,7 @@ def verify_schemas(store):
         base = os.path.join(store.root, "normalized", kind)
         if not os.path.isdir(base):
             continue
-        seen = set()
+        seen = {}  # venue -> keys seen: the same (venue, key) test, smaller
         for d in sorted(os.listdir(base)):
             for name in sorted(os.listdir(os.path.join(base, d))):
                 path = os.path.join(base, d, name)
@@ -79,10 +80,11 @@ def verify_schemas(store):
                         if miss:
                             bad.append((kind, name, i, miss))
                             continue
-                        key = (r["venue"], record_key(kind, r))
-                        if key in seen:
+                        keys = seen.setdefault(r["venue"], set())
+                        key = record_key(kind, r)
+                        if key in keys:
                             repeated[kind] = repeated.get(kind, 0) + 1
-                        seen.add(key)
+                        keys.add(key)
     return bad, count, torn, repeated
 
 
@@ -137,46 +139,82 @@ def signature(kind, r):
     return (mid,)
 
 
+def _same(x):
+    """A value as Python's == sees it: 1, 1.0 and True are one number."""
+    if isinstance(x, (bool, int, float)):
+        return float(x)
+    return x
+
+
+def _digest(*parts):
+    """16-byte digest of a record identity, kept instead of the identity itself
+    (a book's identity holds both sides of the book as text). Equal identities give
+    equal digests; a collision of different ones is not a practical concern
+    (blake2b, 128 bits)."""
+    flat = [_same(p) for p in parts[:2]] + [_same(x) for x in parts[2]]
+    raw = json.dumps(flat, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.blake2b(raw.encode(), digest_size=16).digest()
+
+
+AUDIT_PAGE = 5000
+
+
 def replay(store, cfg):
     """Re-parse every successful stored response offline and check that each stored
     record is reproduced by a response of its own venue. Returns (checked responses,
-    problems)."""
+    problems). Responses are read page by page and records stream past one venue
+    and kind at a time; only digests are held, so days of records fit in memory."""
     asset_of = {}
     for m in store.records("market"):
         asset_of[str(m["market_id"])] = m["asset"]
     clients = {v: make_client(v, store, cfg) for v in VENUE_DIRS}
-    with store.lock:
-        rows = store.db.execute(
-            "select venue, endpoint, url, params, body, response_at, sha256 from audit"
-            " where error is null and sha256 is not null"
-        ).fetchall()
     covered, problems, done = set(), [], set()
-    for venue, endpoint, url, params, body, at, digest in rows:
-        ctx = _context(venue, url, params, body, asset_of)
-        key = (venue, endpoint, digest, str(ctx["market_id"]))
-        if key in done:
-            continue
-        done.add(key)
-        try:
-            obj = json.loads(store.read_raw(digest))
-            out = clients[venue].replay(endpoint, obj, ctx, at, digest)
-        except Exception as ex:
-            problems.append((digest, endpoint, "yeniden ayrıştırılamadı: %s" % ex))
-            continue
-        for kind, rs in out.items():
-            covered.update((venue, kind, signature(kind, r)) for r in rs)
+    last = -1
+    while True:
+        with store.lock:
+            rows = store.db.execute(
+                "select id, venue, endpoint, url, params, body, response_at, sha256"
+                " from audit where error is null and sha256 is not null and id > ?"
+                " order by id limit ?",
+                (last, AUDIT_PAGE),
+            ).fetchall()
+        if not rows:
+            break
+        last = rows[-1][0]
+        for _, venue, endpoint, url, params, body, at, digest in rows:
+            ctx = _context(venue, url, params, body, asset_of)
+            key = _digest(venue, endpoint, (digest, str(ctx["market_id"])))
+            if key in done:
+                continue
+            done.add(key)
+            try:
+                obj = json.loads(store.read_raw(digest))
+                out = clients[venue].replay(endpoint, obj, ctx, at, digest)
+            except Exception as ex:
+                problems.append((digest, endpoint, "yeniden ayrıştırılamadı: %s" % ex))
+                continue
+            for kind, rs in out.items():
+                covered.update(_digest(venue, kind, signature(kind, r)) for r in rs)
     for kind in REQUIRED:
         if kind == "comparison":
             continue
-        for r in store.records(kind):
-            if (r["venue"], kind, signature(kind, r)) not in covered:
-                problems.append(
-                    (
-                        r.get("raw_sha256"),
-                        kind,
-                        "%s kaydı ham yanıttan yeniden üretilemedi" % kind,
-                    )
+        base = os.path.join(store.root, "normalized", kind)
+        if not os.path.isdir(base):
+            continue
+        for d in sorted(os.listdir(base)):
+            # One record per key, the last line winning, in first-seen order: as
+            # `Store.records` reads them.
+            last_seen = {}
+            for r in store.iter_records(kind, d):
+                last_seen[(r.get("venue"), record_key(kind, r))] = (
+                    r.get("raw_sha256"),
+                    _digest(r["venue"], kind, signature(kind, r)),
                 )
+            for sha, ident in last_seen.values():
+                if ident not in covered:
+                    problems.append(
+                        (sha, kind, "%s kaydı ham yanıttan yeniden üretilemedi" % kind)
+                    )
     return len(done), problems
 
 
@@ -264,15 +302,46 @@ def coverage(store, cfg, now=None):
             continue
         client = make_client(v, store, cfg)
         markets = store.checkpoint("markets:" + v) or []
-        snaps = store.records("funding_snapshot", v)
         all_paid = store.latest("settlement", v)
         paid = counted(all_paid)  # AMBIGUOUS payments are never counted
         corrections = store.records("settlement_correction", v)
         withdrawn = store.records("settlement_withdrawn", v)
-        candles = store.records("candle", v)
-        books = store.records("orderbook", v)
         comps = store.comparisons(v)
         meta = store.records("market", v)
+
+        def bad(t):
+            return t > now + 300 or t < 1_420_000_000
+
+        # Snapshots, books and candles are counted while they stream past (one
+        # record per key, as `records` reads them): days of them are never held.
+        snap_flags = dict(seen=False, next_at=False, index=False)
+        snap_n, snap_bad, snap_max = {}, {}, {}
+        for s in _unique(store, "funding_snapshot", v):
+            snap_flags["seen"] = True
+            snap_flags["next_at"] = snap_flags["next_at"] or bool(
+                s.get("next_funding_at")
+            )
+            snap_flags["index"] = snap_flags["index"] or bool(s.get("index_price"))
+            k, t = str(s["market_id"]), s["received_at"]
+            snap_n[k] = snap_n.get(k, 0) + 1
+            snap_bad[k] = snap_bad.get(k, 0) + bad(t)
+            snap_max[k] = max(snap_max.get(k, t), t)
+        book_n = {}
+        for b in _unique(store, "orderbook", v):
+            k = str(b["market_id"])
+            book_n[k] = book_n.get(k, 0) + 1
+        candle_hours, candle_bad, candle_max = {}, {}, {}
+        for c in _unique(store, "candle", v):
+            k, t = str(c["market_id"]), c["open_time"]
+            if start <= t < end:
+                candle_hours.setdefault(k, set()).add(int(t))
+            candle_bad[k] = candle_bad.get(k, 0) + bad(t)
+            candle_max[k] = max(candle_max.get(k, t), t)
+        # Everything else is small: grouped by market once, not scanned per market.
+        by = _by_market
+        paid_by, all_paid_by = by(paid), by(all_paid)
+        corrections_by, withdrawn_by = by(corrections), by(withdrawn)
+        comps_by, meta_by = by(comps), by(meta)
         a = api.get(v, dict(requests=0, ok=0, errors=0, rate_limited=0))
         connection = (
             "BAĞLANTI YOK (hiç istek yapılmadı)"
@@ -289,36 +358,34 @@ def coverage(store, cfg, now=None):
         for m in markets:
             mid = m["market_id"]
             key = str(mid)
-            mp = [p for p in paid if str(p["market_id"]) == key]
+            mp = paid_by.get(key, [])
             # One completed comparison per actual settlement, whatever the index holds.
             mc = list(
                 {
                     int(round(c["settled_at"])): c
-                    for c in comps
-                    if str(c["market_id"]) == key
-                    and c.get("settled_at") is not None
+                    for c in comps_by.get(key, [])
+                    if c.get("settled_at") is not None
                     and c["comparison_status"] in store.FINAL
                 }.values()
             )
-            hours = {
-                int(c["open_time"])
-                for c in candles
-                if str(c["market_id"]) == key and start <= c["open_time"] < end
-            }
-            ms = [s for s in snaps if str(s["market_id"]) == key]
+            hours = candle_hours.get(key, set())
             interval, gap = _status_interval(mp, client.declared_interval)
             unit, ratio = _status_unit(mc)
             stats = store.checkpoint("stats:%s:%s" % (v, mid), {})
-            last_meta = [x for x in meta if str(x["market_id"]) == key]
+            last_meta = meta_by.get(key, [])
             statuses = {}
             for c in mc:
                 statuses[c["comparison_status"]] = (
                     statuses.get(c["comparison_status"], 0) + 1
                 )
-            times = (
-                [s["received_at"] for s in ms]
-                + [p["settled_at"] for p in mp]
-                + [c["open_time"] for c in candles if str(c["market_id"]) == key]
+            # Snapshot, payment and candle times: how many are impossible, the latest.
+            latest = [
+                x[key] for x in (snap_max, candle_max) if key in x
+            ] + [p["settled_at"] for p in mp]
+            bad_times = (
+                snap_bad.get(key, 0)
+                + candle_bad.get(key, 0)
+                + sum(bad(p["settled_at"]) for p in mp)
             )
             funding_expected = (
                 (end - start) // client.declared_interval
@@ -329,7 +396,7 @@ def coverage(store, cfg, now=None):
             venue["markets"][m["asset"]] = dict(
                 market_id=mid,
                 metadata="OK" if last_meta else "YOK",
-                funding_snapshots=len(ms),
+                funding_snapshots=snap_n.get(key, 0),
                 settled_payments=len(mp),
                 comparisons=len(mc),
                 comparison_statuses=statuses,
@@ -342,22 +409,20 @@ def coverage(store, cfg, now=None):
                     if funding_expected
                     else None
                 ),
-                orderbook_snapshots=sum(str(b["market_id"]) == key for b in books),
+                orderbook_snapshots=book_n.get(key, 0),
                 duplicate_payments=stats.get("duplicates", 0),
                 conflicting_payments=sum(
                     p.get("settled_rate_status") == "CONFLICT" for p in mp
                 ),
-                corrected_payments=sum(str(c["market_id"]) == key for c in corrections),
+                corrected_payments=len(corrections_by.get(key, [])),
                 ambiguous_payments=sum(
-                    str(p["market_id"]) == key
-                    and p.get("identity_status") == "AMBIGUOUS"
-                    for p in all_paid
+                    p.get("identity_status") == "AMBIGUOUS"
+                    for p in all_paid_by.get(key, [])
                 ),
-                withdrawn_payments=sum(str(w["market_id"]) == key for w in withdrawn),
+                withdrawn_payments=len(withdrawn_by.get(key, [])),
                 excluded_comparisons=sum(
-                    str(c["market_id"]) == key
-                    and c["comparison_status"] in store.EXCLUDED
-                    for c in comps
+                    c["comparison_status"] in store.EXCLUDED
+                    for c in comps_by.get(key, [])
                 ),
                 reconcile=store.checkpoint("reconcile:%s:%s" % (v, mid)),
                 same_event_tolerance=same_event_tolerance(
@@ -367,7 +432,7 @@ def coverage(store, cfg, now=None):
                 jitter_merged=stats.get("jitter_merged", 0),
                 out_of_order=stats.get("out_of_order", 0)
                 + stats.get("candle_out_of_order", 0),
-                bad_timestamps=sum(t > now + 300 or t < 1_420_000_000 for t in times),
+                bad_timestamps=bad_times,
                 funding_interval=interval,
                 observed_interval_seconds=gap,
                 declared_interval_seconds=client.declared_interval,
@@ -388,10 +453,10 @@ def coverage(store, cfg, now=None):
                     if statuses.get("MATCHED", 0) + statuses.get("SIGN_CONFLICT", 0)
                     else None
                 ),
-                last_observation=iso(max(times)) if times else None,
+                last_observation=iso(max(latest)) if latest else None,
                 pending=store.checkpoint("pending:%s:%s" % (v, mid), []),
             )
-        venue["unverified_fields"] = unverified_fields(v, client, snaps)
+        venue["unverified_fields"] = _unverified(v, **snap_flags)
         out["venues"][v] = venue
     return label_source(out, store.checkpoint("data_source"))
 
@@ -469,8 +534,34 @@ def label_source(cov, source):
     return cov
 
 
+def _unique(store, kind, v):
+    """A venue's records of a kind, streamed, one per key (as `Store.records`)."""
+    seen = set()
+    for r in store.iter_records(kind, v):
+        k = record_key(kind, r)
+        if k not in seen:
+            seen.add(k)
+            yield r
+
+
+def _by_market(rows):
+    out = {}
+    for r in rows:
+        out.setdefault(str(r["market_id"]), []).append(r)
+    return out
+
+
 def unverified_fields(v, client, snaps):
-    if not snaps:
+    return _unverified(
+        v,
+        seen=bool(snaps),
+        next_at=any(s.get("next_funding_at") for s in snaps),
+        index=any(s.get("index_price") for s in snaps),
+    )
+
+
+def _unverified(v, seen, next_at, index):
+    if not seen:
         return [
             "Anlık funding kaydı yok: alanlar değerlendirilemedi (önce bağlantı gerekir)"
         ]
@@ -479,9 +570,9 @@ def unverified_fields(v, client, snaps):
         "Funding işaret kuralı: DECLARED; borsa belgesi okunmadı",
         "Normalize saatlik oran: üretilmedi (birim doğrulanmadı)",
     ]
-    if not any(s.get("next_funding_at") for s in snaps):
+    if not next_at:
         out.append("Sonraki funding zamanı: API yayımlamıyor (UNKNOWN)")
-    if not any(s.get("index_price") for s in snaps):
+    if not index:
         out.append("Endeks fiyatı: yanıtta yok (UNKNOWN)")
     if v in ("Lighter", "LighterCore"):
         out.append(

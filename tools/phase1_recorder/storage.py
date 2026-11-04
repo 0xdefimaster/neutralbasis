@@ -10,8 +10,20 @@ checkpoints. Nothing here ever touches the paper engine's database.
 Writes are idempotent: a raw body is stored once per venue and hash, a fixture once
 per key.
 All times are UTC epoch seconds.
+
+Batched writes (optional; the recorder turns them on, every other caller gets the
+original commit per write): normalized lines are kept in memory and index changes in
+an open transaction until `flush`, which runs when `batch_records` changes are
+waiting, when the oldest waiting change is `batch_seconds` old (checked at the next
+write), when the recorder finishes a task, before JSONL files are read, at session
+start and end, and at close. A flush writes the lines first and commits the index
+after them, as each single write always did: a crash between the two leaves lines
+without index rows, which are written again and read once per key. A crash before a
+flush loses the waiting changes together (lines and rows): history is fetched again
+on the next run; live observations of that interval are lost.
 """
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -59,7 +71,7 @@ def check_root(root):
 
 
 class Store:
-    def __init__(self, root):
+    def __init__(self, root, batch_records=1, batch_seconds=0.0):
         self.root = check_root(root)
         for d in SUBDIRS:
             os.makedirs(os.path.join(self.root, d), exist_ok=True)
@@ -68,7 +80,32 @@ class Store:
             raise ValueError("Motor veritabanına yazılmaz")
         self.lock = threading.RLock()
         self.read_problems = set()
+        self.closed = False
+        # Batched writes (see the module notes). 1 change per batch = commit per write.
+        self.batch_records = max(1, int(batch_records))
+        self.batch_seconds = max(0.0, float(batch_seconds))
+        self._lines = {}  # path -> [normalized lines not yet written]
+        self._pending = 0
+        self._pending_since = None
+        self._depth = 0
+        self.write_stats = dict(
+            flushes=0,
+            changes=0,
+            max_batch=0,
+            max_flush_ms=0.0,
+            max_wait_seconds=0.0,
+            errors=0,
+            last_error=None,
+        )
         self.db = sqlite3.connect(path, check_same_thread=False)
+        try:
+            self._open()
+        except BaseException:
+            # A failed open (e.g. an interrupted repair) must not leave the file held.
+            self.db.close()
+            raise
+
+    def _open(self):
         self.db.execute("pragma journal_mode=wal")
         self.db.executescript("""
             create table if not exists audit(id integer primary key, venue text,
@@ -105,13 +142,97 @@ class Store:
 
     def close(self):
         with self.lock:
-            self.db.commit()
-            self.db.close()
+            if self.closed:
+                return
+            try:
+                self.flush()
+            finally:
+                self.closed = True
+                try:
+                    self.db.commit()
+                finally:
+                    self.db.close()
+
+    # --- batched writes -------------------------------------------------------------
+    @contextlib.contextmanager
+    def _write(self):
+        """One write operation: its changes are flushed together, never half of
+        them, and only when the outermost operation ends."""
+        with self.lock:
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+            if self._depth == 0:
+                self._maybe_flush()
+
+    def _changed(self):
+        self._pending += 1
+        if self._pending_since is None:
+            self._pending_since = time.monotonic()
+
+    def _maybe_flush(self):
+        if not self._pending:
+            return
+        waited = time.monotonic() - self._pending_since
+        if self._pending >= self.batch_records or waited >= self.batch_seconds:
+            self.flush()
+
+    def _write_lines(self):
+        """Append the waiting normalized lines to their files (no commit)."""
+        for path in list(self._lines):
+            data = "".join(self._lines[path])
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # A line cut off by a crash must not swallow the next record.
+            if os.path.exists(path) and os.path.getsize(path):
+                with open(path, "rb") as f:
+                    f.seek(-1, os.SEEK_END)
+                    if f.read(1) != b"\n":
+                        data = "\n" + data
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(data)
+            del self._lines[path]
+
+    def flush(self):
+        """Write every waiting line, then commit the index. Safe to call any time."""
+        with self.lock:
+            if self.closed or not (
+                self._pending or self._lines or self.db.in_transaction
+            ):
+                return
+            started = time.perf_counter()
+            waited = (
+                time.monotonic() - self._pending_since
+                if self._pending_since is not None
+                else 0.0
+            )
+            try:
+                # The index row commits only after its line is written: a crash in
+                # between leaves a line without its row; the record is then written
+                # again, and readers keep one record per key.
+                self._write_lines()
+                if self.db.in_transaction:
+                    self.db.commit()
+            except Exception as ex:
+                self.write_stats["errors"] += 1
+                self.write_stats["last_error"] = "%s: %s" % (type(ex).__name__, ex)
+                raise
+            st = self.write_stats
+            st["flushes"] += 1
+            st["changes"] += self._pending
+            st["max_batch"] = max(st["max_batch"], self._pending)
+            st["max_flush_ms"] = max(
+                st["max_flush_ms"], (time.perf_counter() - started) * 1000
+            )
+            st["max_wait_seconds"] = max(st["max_wait_seconds"], waited)
+            self._pending = 0
+            self._pending_since = None
 
     # --- raw responses ---------------------------------------------------------------
     def put_raw(self, venue, body, at):
         digest = sha256(body)
-        with self.lock:
+        with self._write():
             if self.db.execute(
                 "select 1 from raw where sha256=? and venue=?", (digest, venue)
             ).fetchone():
@@ -127,7 +248,7 @@ class Store:
                 "insert into raw values(?,?,?,?,?)",
                 (digest, venue, rel.replace(os.sep, "/"), len(body), at),
             )
-            self.db.commit()
+            self._changed()
         return digest
 
     def read_raw(self, digest):
@@ -142,13 +263,13 @@ class Store:
 
     def audit(self, row):
         cols = list(row)
-        with self.lock:
+        with self._write():
             self.db.execute(
                 "insert into audit(%s) values(%s)"
                 % (",".join(cols), ",".join("?" * len(cols))),
                 [row[c] for c in cols],
             )
-            self.db.commit()
+            self._changed()
 
     # --- normalized fixtures --------------------------------------------------------
     def put_record(self, kind, venue, key, record, at):
@@ -156,7 +277,7 @@ class Store:
         rel = os.path.join(
             "normalized", kind, VENUE_DIRS.get(venue, venue.lower()), day(at) + ".jsonl"
         )
-        with self.lock:
+        with self._write():
             cur = self.db.execute(
                 "insert or ignore into records values(?,?,?,?,?,?)",
                 (
@@ -171,20 +292,10 @@ class Store:
             if cur.rowcount == 0:
                 return False
             path = os.path.join(self.root, rel)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
             line = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
-            # A line cut off by a crash must not swallow the next record.
-            if os.path.exists(path) and os.path.getsize(path):
-                with open(path, "rb") as f:
-                    f.seek(-1, os.SEEK_END)
-                    if f.read(1) != b"\n":
-                        line = "\n" + line
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-            # The index row commits only after the line is written: a crash in between
-            # leaves a line without its row; the record is then written again, and
-            # readers keep one record per key.
-            self.db.commit()
+            # Written by `flush`, before the index row is committed.
+            self._lines.setdefault(path, []).append(line)
+            self._changed()
         return True
 
     def has_record(self, kind, venue, key):
@@ -199,11 +310,19 @@ class Store:
     def records(self, kind, venue=None, since=None):
         """Every stored normalized record of a kind (read back from the JSONL files);
         with `since`, only the day files from that UTC day on."""
-        out = []
+        return self._one_per_key(kind, list(self.iter_records(kind, venue, since)))
+
+    def iter_records(self, kind, venue=None, since=None):
+        """The same records as `records`, one at a time and without holding them all:
+        for callers that only count or keep a few. A key written twice (a crash
+        between a line and its index row) is yielded twice; both lines are equal."""
+        with self.lock:
+            if self._lines and not self.closed:
+                self._write_lines()  # readers see every record put so far
         first = day(since) + ".jsonl" if since is not None else None
         base = os.path.join(self.root, "normalized", kind)
         if not os.path.isdir(base):
-            return out
+            return
         dirs = [VENUE_DIRS.get(venue, venue)] if venue else sorted(os.listdir(base))
         for d in dirs:
             folder = os.path.join(base, d)
@@ -216,11 +335,12 @@ class Store:
                             if not line.strip():
                                 continue
                             try:
-                                out.append(json.loads(line))
+                                row = json.loads(line)
                             except ValueError:
                                 # A line cut off by a crash: reported, never guessed.
                                 self.read_problems.add((kind, d, name, i))
-        return self._one_per_key(kind, out)
+                                continue
+                            yield row
 
     @staticmethod
     def _one_per_key(kind, rows):
@@ -252,12 +372,12 @@ class Store:
         return json.loads(r[0]) if r else default
 
     def set_checkpoint(self, name, value, at=None):
-        with self.lock:
+        with self._write():
             self.db.execute(
                 "insert or replace into checkpoints values(?,?,?)",
                 (name, json.dumps(value), at or time.time()),
             )
-            self.db.commit()
+            self._changed()
 
     # --- comparisons ----------------------------------------------------------------
     # A completed comparison is identified by the payment it was matched with: venue,
@@ -384,7 +504,7 @@ class Store:
             self.FINAL + self.EXCLUDED
         ):
             raise ValueError("Yalnız tamamlanmış karşılaştırma kaydedilir")
-        with self.lock:
+        with self._write():
             old = self.db.execute(
                 "select body from comparisons where venue=? and market_id=?"
                 " and settled_at=?",
@@ -403,7 +523,7 @@ class Store:
                 "insert into comparisons values(?,?,?,?,?,?,?,?)",
                 self._comparison_row(c, at),
             )
-            self.db.commit()
+            self._changed()
             return True
 
     # --- settlements: one record per payment, corrections as revisions --------------
@@ -487,7 +607,7 @@ class Store:
         tol = SAME_EVENT if tolerance is None else tolerance
         t = int(round(r["settled_at"]))
         mid = str(r["market_id"])
-        with self.lock:
+        with self._write():
             row = self.db.execute(
                 "select settled_at, revision, settled_values, record_key,"
                 " identity_status from settlement_index"
@@ -581,6 +701,7 @@ class Store:
         return "ambiguous"
 
     def _index_settlement(self, r, insert=False):
+        self._changed()
         row = self._settlement_row(r)
         if insert:
             self.db.execute("insert into settlement_index values(?,?,?,?,?,?,?)", row)
@@ -597,23 +718,23 @@ class Store:
         revision of the comparison is stored as EXCLUDED_AMBIGUOUS (never counted)."""
         from .clients.records import record_key
 
-        with self.lock:
+        with self._write():
             old = self.db.execute(
                 "select body from comparisons where venue=? and market_id=?"
                 " and settled_at=?",
                 (venue, str(mid), int(settled_at)),
             ).fetchone()
-        if old is None:
-            return False
-        c = dict(
-            json.loads(old[0]),
-            comparison_status="EXCLUDED_AMBIGUOUS",
-            settlement_revision=revision,
-            excluded_at=at,
-        )
-        self.put_comparison(c, at)
-        self.put_record("comparison", venue, record_key("comparison", c), c, at)
-        return True
+            if old is None:
+                return False
+            c = dict(
+                json.loads(old[0]),
+                comparison_status="EXCLUDED_AMBIGUOUS",
+                settlement_revision=revision,
+                excluded_at=at,
+            )
+            self.put_comparison(c, at)
+            self.put_record("comparison", venue, record_key("comparison", c), c, at)
+            return True
 
     def observed_interval(self, venue, mid, last=50):
         """Median gap of the market's last recorded (non-ambiguous) payments, or None
@@ -688,11 +809,13 @@ class Store:
     # --- sessions -------------------------------------------------------------------
     def start_session(self, mode, at, source=None):
         with self.lock:
+            self.flush()
             cur = self.db.execute(
                 "insert into sessions(started, mode, source) values(?,?,?)",
                 (at, mode, source or self.checkpoint("data_source")),
             )
-            self.db.commit()
+            self._changed()
+            self.flush()  # a session is visible to other readers at once
             return cur.lastrowid
 
     def end_session(self, sid, at, stopped_by):
@@ -701,4 +824,5 @@ class Store:
                 "update sessions set ended=?, stopped_by=? where id=?",
                 (at, stopped_by, sid),
             )
-            self.db.commit()
+            self._changed()
+            self.flush()  # everything waiting is written when a session ends

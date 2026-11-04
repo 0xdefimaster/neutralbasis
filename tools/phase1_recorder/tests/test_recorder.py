@@ -37,6 +37,10 @@ class Base(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
+        # Registered first, so it runs last: every connection and log file closed
+        # by tearDown and later cleanups is released before the folder is removed
+        # (Windows refuses to delete an open file).
+        self.addCleanup(self.dir.cleanup)
         self.clock = Clock()
         self.fake = FakeVenues(self.clock)
         self.cfg = load(
@@ -49,12 +53,11 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         if self.recorder:
-            self.recorder.store.close()
-        self.dir.cleanup()
+            self.recorder.close()
 
     def make(self):
         if self.recorder:
-            self.recorder.store.close()
+            self.recorder.close()
         self.recorder = Recorder(
             self.cfg, transport=self.fake, clock=self.clock, sleep=self.clock.sleep
         )
@@ -672,7 +675,7 @@ class EngineIsolationTests(unittest.TestCase):
                 cfg, transport=FakeVenues(clock), clock=clock, sleep=clock.sleep
             )
             rec.run("once")
-            rec.store.close()
+            rec.close()
             self.assertEqual(os.stat(db).st_mtime_ns, before)
             self.assertEqual(sorted(os.listdir(engine)), ["paper.sqlite3"])
             self.assertEqual(sorted(os.listdir(d)), ["data-five-rh", "phase1-evidence"])
@@ -704,7 +707,7 @@ class LivePublicApiTests(unittest.TestCase):
             rec = Recorder(cfg)
             rec.run("once")
             cov = coverage(rec.store, cfg)
-            rec.store.close()
+            rec.close()
             for v, x in cov["venues"].items():
                 with self.subTest(venue=v):
                     self.assertEqual(x["connection"], "BAĞLANDI", x["api"])

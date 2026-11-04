@@ -1,4 +1,4 @@
-import json, math, os, tempfile, unittest
+import json, math, os, sqlite3, tempfile, unittest
 from unittest import mock
 import bot
 import wide_paper
@@ -90,6 +90,10 @@ def candles(at, drift=0.0, noise=0.0):
 class WidePaperTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
+        # Registered first, so it runs last: every connection and log file closed
+        # by tearDown and later cleanups is released before the folder is removed
+        # (Windows refuses to delete an open file).
+        self.addCleanup(self.dir.cleanup)
         self.store = bot.Store(os.path.join(self.dir.name, "p.sqlite3"))
         self.clock = T0
         patcher = [
@@ -107,7 +111,6 @@ class WidePaperTests(unittest.TestCase):
 
     def tearDown(self):
         self.store.db.close()
-        self.dir.cleanup()
 
     def fund_history(self, venue, per_payment, interval, days=30):
         self.src.rates[(venue, "BTC")] = [
@@ -2753,6 +2756,73 @@ class RfqSplitTests(unittest.TestCase):
             [(c["long"], c["short"]) for c in normal], [("Aster", "Binance")]
         )
         self.assertEqual(len(rfq), 2)
+
+
+def held_under(path):
+    """Files under `path` this process holds open, or None where the platform does
+    not tell (no /proc). On Windows the folder removal itself is the proof."""
+    fds = "/proc/self/fd"
+    if not os.path.isdir(fds):
+        return None
+    prefix = os.path.realpath(path).rstrip(os.sep) + os.sep
+    out = []
+    for fd in os.listdir(fds):
+        try:
+            target = os.readlink(os.path.join(fds, fd))
+        except OSError:
+            continue
+        target = target.replace(" (deleted)", "")
+        if target.startswith(prefix):
+            out.append(target)
+    return sorted(out)
+
+
+class SqliteCleanupOrderTests(unittest.TestCase):
+    """Resource lifecycle only: a second engine database is closed before its
+    temporary folder is removed (Windows WinError 32 otherwise)."""
+
+    def test_a_second_connection_closes_before_its_folder_is_removed(self):
+        order = []
+
+        class Inner(unittest.TestCase):
+            def runTest(inner):
+                d = tempfile.TemporaryDirectory()
+
+                def remove():
+                    order.append("folder")
+                    d.cleanup()
+
+                inner.addCleanup(remove)  # registered first: runs last
+                store = bot.Store(os.path.join(d.name, "q.sqlite3"))
+
+                def close():
+                    order.append("db")
+                    store.db.close()
+
+                inner.addCleanup(close)
+                store.db.execute("select 1")
+                inner.folder = d.name
+
+        case = Inner()
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(order, ["db", "folder"])
+        self.assertFalse(os.path.exists(case.folder))
+
+    def test_a_closed_connection_leaves_the_folder_removable(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        db = sqlite3.connect(os.path.join(d.name, "q.sqlite3"))
+        db.execute("pragma journal_mode=wal")
+        db.execute("create table t(x)")
+        db.commit()
+        db.close()
+        held = held_under(d.name)
+        if held is not None:
+            self.assertEqual(held, [])
+        d.cleanup()
+        self.assertFalse(os.path.exists(d.name))
 
 
 if __name__ == "__main__":

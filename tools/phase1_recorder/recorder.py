@@ -27,6 +27,9 @@ from .clients.records import (
 from .storage import Store, iso
 
 TASKS = ("metadata", "funding", "settlements", "candles", "orderbook", "reconcile")
+# One-request tasks that must keep their own pace: while a long per-market task
+# (books, history) runs, they are run between its markets when they come due.
+FAST_TASKS = ("funding",)
 LIVE = "LIVE_PUBLIC_API"
 MOCK_PREFIX = "MOCK:"
 LOCK_STALE = 180
@@ -64,6 +67,8 @@ class VenueRecorder:
             orderbook=cfg["orderbook_seconds"],
             reconcile=cfg["reconcile_seconds"],
         )
+        self.looping = False  # fast tasks interleave only in the duration loop
+        self.in_fast = False
 
     # --- bookkeeping ---------------------------------------------------------------
     def put(self, kind, rows, at):
@@ -185,9 +190,11 @@ class VenueRecorder:
     def task_settlements(self, at):
         self.ensure_markets(at)
         new = failed = 0
+        done = []
         for m in self.selected:
             if self.stop.is_set():
                 break
+            self.between_markets()
             mid = m["market_id"]
             name = "settlements:%s:%s" % (self.venue, mid)
             last = self.store.checkpoint(name)
@@ -225,7 +232,10 @@ class VenueRecorder:
             new += outcome.get("new", 0)
             if rows:
                 self.store.set_checkpoint(name, max(r["settled_at"] for r in rows), at)
-            self.match(m, at)
+            done.append(m)
+        # Each market's comparison uses only its own snapshots and payments, so all
+        # markets are matched after the loop from one read of the files.
+        self.match_all(done, at)
         if failed and failed == len(self.selected):
             raise RuntimeError("Hiçbir piyasanın ödeme geçmişi okunamadı")
         return "%d yeni ödeme, %d piyasada hata" % (new, failed)
@@ -241,20 +251,41 @@ class VenueRecorder:
         )
         return same_event_tolerance(conf, interval)
 
-    def match(self, m, at, since=None):
-        mid = m["market_id"]
-        since = at - 3 * 86400 if since is None else min(since, at - 3 * 86400)
-        snaps = [
-            s
-            for s in self.store.records("funding_snapshot", self.venue, since)
-            if s["market_id"] == mid
-        ]
+    @staticmethod
+    def _since(at, since):
+        return at - 3 * 86400 if since is None else min(since, at - 3 * 86400)
+
+    def _by_market(self, at, since):
+        """This venue's (non-ambiguous) payments since `since` by market id, and of
+        its snapshots only those a comparison can use (matching.Candidates): one
+        streaming read of the files for all markets, never days of snapshots held."""
+        paid = {}
         # AMBIGUOUS payments are never compared.
-        paid = [
-            s
-            for s in counted(self.store.latest("settlement", self.venue, since))
-            if s["market_id"] == mid
-        ]
+        for s in counted(self.store.latest("settlement", self.venue, since)):
+            paid.setdefault(s["market_id"], []).append(s)
+        found = {}
+        hint = self.client.declared_interval
+        for s in self.store.iter_records("funding_snapshot", self.venue, since):
+            mid = s["market_id"]
+            c = found.get(mid)
+            if c is None:
+                c = found[mid] = matching.Candidates(paid.get(mid, []), hint)
+            c.add(s)
+        return {mid: c.kept() for mid, c in found.items()}, paid
+
+    def match_all(self, markets, at, since=None):
+        if not markets:
+            return
+        snaps, paid = self._by_market(at, self._since(at, since))
+        for m in markets:
+            mid = m["market_id"]
+            self.match(m, at, since, snaps.get(mid, []), paid.get(mid, []))
+
+    def match(self, m, at, since=None, snaps=None, paid=None):
+        mid = m["market_id"]
+        if snaps is None or paid is None:
+            by_snap, by_paid = self._by_market(at, self._since(at, since))
+            snaps, paid = by_snap.get(mid, []), by_paid.get(mid, [])
         final, pending = matching.compare(
             snaps,
             paid,
@@ -279,9 +310,11 @@ class VenueRecorder:
         hours = min(self.cfg["reconcile_hours"], self.cfg["backfill_days"] * 24)
         start = at - hours * 3600
         total, failed = {}, 0
+        done = []
         for m in self.selected:
             if self.stop.is_set():
                 break
+            self.between_markets()
             mid = m["market_id"]
             try:
                 rows, stats = self.client.settlements(m, start, at, at)
@@ -306,7 +339,12 @@ class VenueRecorder:
                         outcome["withdrawn"] += self.store.put_withdrawn(
                             self.venue, m["asset"], mid, t, rev, at, [start, at]
                         )
-            self.match(m, at, since=start - 2 * 86400)
+            done.append((m, outcome))
+        # The window's comparisons are recomputed from one read of the files; each
+        # market is then marked reconciled, as before, after its comparisons.
+        self.match_all([m for m, _ in done], at, since=start - 2 * 86400)
+        for m, outcome in done:
+            mid = m["market_id"]
             self.bump(mid, {"reconcile_" + k: v for k, v in outcome.items()})
             self.store.set_checkpoint(
                 "reconcile:%s:%s" % (self.venue, mid),
@@ -329,6 +367,7 @@ class VenueRecorder:
         for m in self.selected:
             if self.stop.is_set():
                 break
+            self.between_markets()
             mid = m["market_id"]
             name = "candle_attempts:%s:%s" % (self.venue, mid)
             attempts = self.store.checkpoint(name, {})
@@ -370,6 +409,7 @@ class VenueRecorder:
         for m in self.selected:
             if self.stop.is_set():
                 break
+            self.between_markets()
             if (m.get("extra") or {}).get("isRfq"):
                 continue  # an RFQ market's public book is indicative only
             try:
@@ -385,6 +425,21 @@ class VenueRecorder:
 
     # --- running -------------------------------------------------------------------
     def run_task(self, task):
+        try:
+            return self._run_task(task)
+        finally:
+            self.flush()
+
+    def flush(self):
+        """Write what the task left waiting. A failure is logged, never fatal: the
+        changes stay waiting and the next flush tries again."""
+        try:
+            self.store.flush()
+        except Exception as ex:
+            self.log.warning("%s yazma hatası: %s: %s", self.venue, type(ex).__name__, ex)
+            self.say("%s yazma hatası: %s" % (self.venue, ex))
+
+    def _run_task(self, task):
         at = self.clock()
         down = self.client.http.unreachable()
         if down:
@@ -406,6 +461,27 @@ class VenueRecorder:
         self.say("%s %s: %s" % (self.venue, task, note))
         return True
 
+    def between_markets(self):
+        """Inside a long per-market task (books of 160 markets take minutes at one
+        request a second), run a fast task that has come due, so a one-request
+        funding snapshot keeps its own interval. Duration loop only; never nested."""
+        if not self.looping or self.in_fast:
+            return
+        for task in FAST_TASKS:
+            if task in self.tasks and self.clock() >= self.next_due[task]:
+                self.in_fast = True
+                try:
+                    self.run_due(task)
+                finally:
+                    self.in_fast = False
+
+    def run_due(self, task):
+        """Run a task and schedule the next run one period after this one started
+        (not after it ended): a task longer than its period runs again at once."""
+        started = self.clock()
+        self.run_task(task)
+        self.next_due[task] = started + self.period[task]
+
     def once(self):
         for task in self.tasks:
             if self.stop.is_set():
@@ -413,17 +489,19 @@ class VenueRecorder:
             self.run_task(task)
 
     def loop(self, until):
-        while not self.stop.is_set() and self.clock() < until:
-            now = self.clock()
-            for task in self.tasks:
-                if self.stop.is_set():
-                    break
-                if now >= self.next_due[task]:
-                    self.run_task(task)
-                    self.next_due[task] = self.clock() + self.period[task]
-            wait = min(self.next_due.values()) - self.clock()
-            if wait > 0:
-                self.stop.wait(min(wait, until - self.clock(), 30))
+        self.looping = True
+        try:
+            while not self.stop.is_set() and self.clock() < until:
+                for task in self.tasks:
+                    if self.stop.is_set() or self.clock() >= until:
+                        break
+                    if self.clock() >= self.next_due[task]:
+                        self.run_due(task)
+                wait = min(self.next_due.values()) - self.clock()
+                if wait > 0:
+                    self.stop.wait(min(wait, until - self.clock(), 30))
+        finally:
+            self.looping = False
 
 
 class Lock:
@@ -466,7 +544,20 @@ class Recorder:
         self.clock = clock
         self.console = console
         self.say_lock = threading.Lock()
-        self.store = Store(cfg["root"])
+        self.log = None
+        self.log_handler = None
+        self.store = Store(
+            cfg["root"],
+            batch_records=cfg.get("write_batch_records", 1),
+            batch_seconds=cfg.get("write_batch_seconds", 0.0),
+        )
+        try:
+            self._open(cfg, transport, clock, sleep)
+        except BaseException:
+            self.close()
+            raise
+
+    def _open(self, cfg, transport, clock, sleep):
         # Where the data comes from: the real public APIs, or a test transport. One
         # folder never mixes the two, and every report says which it holds.
         self.source = (
@@ -474,14 +565,13 @@ class Recorder:
         )
         held = self.store.checkpoint("data_source")
         if held and (held == LIVE) != (self.source == LIVE):
-            self.store.close()
             raise ValueError(
                 "Bu klasörde %s verisi var; %s verisi aynı klasöre yazılmaz"
                 % (held, self.source)
             )
         self.store.set_checkpoint("data_source", self.source)
         self.stop = threading.Event()
-        self.log = setup_log(cfg["root"])
+        self.log, self.log_handler = setup_log(cfg["root"])
         self.venues = [
             VenueRecorder(
                 make_client(v, self.store, cfg, transport, sleep, clock),
@@ -556,7 +646,19 @@ class Recorder:
                 t.join(30)
         finally:
             self.stop.set()
+            stats = dict(self.store.write_stats)
+            self.store.set_checkpoint("write_stats:%d" % sid, stats)
             self.store.end_session(sid, self.clock(), stopped_by)
+            self.log.info(
+                "Yazma: %d boşaltma, %d değişiklik, en büyük grup %d, en uzun"
+                " boşaltma %.0f ms, en uzun bekleme %.1f sn, hata %d",
+                stats["flushes"],
+                stats["changes"],
+                stats["max_batch"],
+                stats["max_flush_ms"],
+                stats["max_wait_seconds"],
+                stats["errors"],
+            )
             lock.release()
             self.log.info("Oturum bitti: %s", stopped_by)
             self.say("Kayıt bitti: %s. Rapor hazırlanıyor..." % stopped_by)
@@ -565,13 +667,36 @@ class Recorder:
     def statuses(self):
         return [v.status for v in self.venues]
 
+    def close(self):
+        """Release this recorder's log file and database. Safe to call more than once.
+        Call it only after `run` has returned: the session is ended there."""
+        log, handler = self.log, self.log_handler
+        self.log_handler = None
+        if handler is not None:
+            # Detach first: a closed FileHandler that still receives a record
+            # reopens its file.
+            log.removeHandler(handler)
+            handler.close()
+        self.store.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
 
 def setup_log(root):
-    log = logging.getLogger("phase1")
-    if not log.handlers:
-        log.setLevel(logging.INFO)
-        path = os.path.join(root, "logs", "recorder.log")
-        h = logging.FileHandler(path, encoding="utf-8")
-        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-        log.addHandler(h)
-    return log
+    """A logger owned by one Recorder, writing to <root>/logs/recorder.log.
+
+    It is not registered under a global name, so two recorders (two roots) never
+    share a handler or write to each other's file, and closing one never touches
+    another application logger. Returns (logger, handler); `Recorder.close`
+    detaches and closes the handler."""
+    log = logging.Logger("phase1", logging.INFO)
+    path = os.path.join(root, "logs", "recorder.log")
+    h = logging.FileHandler(path, encoding="utf-8")
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(h)
+    return log, h
