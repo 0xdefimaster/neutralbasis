@@ -359,6 +359,7 @@ EVIDENCE_EXPIRY = 24 * 3600
 HISTORY_EXPIRY = 24 * 3600  # a history keeper record older than this proves nothing
 # Published rate against the payment that settled after it, per market.
 PUBLISHED_MIN = 3  # comparisons needed
+PUBLISHED_VENUE_MIN = 3  # decided markets needed before the venue sign is judged
 PUBLISHED_KEEP = 12  # comparisons kept per market
 PUBLISHED_WINDOW = 3 * 86400
 PREDICTION_KEEP = 2 * 86400  # an observation never matched to a payment is dropped
@@ -755,8 +756,8 @@ class Registry:
         )
         if not model["direction"]:
             why.append("funding işaret kuralı belgelenmedi")
-        if heuristic == "inverted":
-            why.append("funding işareti prim yönünün tersine görünüyor")
+        # The venue's premium heuristic is shown above but blocks nothing: the market's
+        # own published-rate comparison below is the evidence that decides.
         if status == "insufficient":
             why.append(
                 "yayımlanan oran ile gerçekleşen ödeme karşılaştırması yetersiz · %d/%d"
@@ -771,7 +772,8 @@ class Registry:
             why.append(
                 "yayımlanan oran ödemelerle aynı birimde değil · oran x%.2f" % ratio
             )
-        confidence = "yok" if why else "orta" if heuristic == "consistent" else "düşük"
+        # "orta", never higher: the direction is declared, not seen in account cash.
+        confidence = "yok" if why else "orta"
         return dict(
             venue=v,
             asset=a,
@@ -976,50 +978,69 @@ class Registry:
                 )
             else:
                 set_("funding_interval", UNVERIFIED, method, None, when)
-        # Funding sign: the venue status rests on the premium heuristic, which proves
-        # no payment; the per-market published-rate comparison is listed beside it.
+        # Funding sign: the venue status rests on the per-market comparison of each
+        # published rate with the payment that settled after it, the strongest evidence
+        # the desk has without an account. It proves the published rate's sign, not who
+        # pays: the direction stays the venue's declared convention, so the status is
+        # never FULL. The premium heuristic is listed beside it and decides nothing: on
+        # real data it agrees about half the time even where the convention is known.
         markets = [k for k in self.published if k.split("|")[0] == v]
-        consistent = sum(
-            self.published_status(v, k.split("|", 1)[1], at)[0] == "consistent"
-            for k in markets
-        )
+        counts = {}
+        when = None
+        for k in markets:
+            st, _, _, _, latest = self.published_status(v, k.split("|", 1)[1], at)
+            counts[st] = counts.get(st, 0) + 1
+            if st != "insufficient" and latest is not None:
+                when = latest if when is None else max(when, latest)
+        consistent = counts.get("consistent", 0)
+        inverted = counts.get("inverted", 0)
+        decided = len(markets) - counts.get("insufficient", 0)
+        heuristic, n_obs, agree, _ = self.sign_heuristic(v)
         caps["funding_sign"]["evidence"] = dict(
             documented=dict(convention=model["direction"], source=model["source"]),
+            heuristic="Sezgisel, karar vermez: prim yönüyle uyum %d/%d gözlem "
+            "(|mark/endeks-1| ≥ %.0f bp; %s)"
+            % (agree, n_obs, SIGN_PREMIUM * 1e4, heuristic),
             published="%d/%d piyasada yayımlanan oran ödemelerle tutarlı"
             % (consistent, len(markets)),
             settled_cash=NO_ACCOUNT,
             account=NO_ACCOUNT,
         )
-        obs = list((self.signs.get(v) or {}).values())
-        if obs:
-            agree = sum(bool(a) for t, a in obs)
-            method = (
-                "Sezgisel, ödeme kanıtı değil: prim yönüyle uyum %d/%d gözlem "
-                "(|mark/endeks-1| ≥ %.0f bp)" % (agree, len(obs), SIGN_PREMIUM * 1e4)
+        method = (
+            "Yayımlanan oran = sonra gerçekleşen ödeme: %d/%d karar verilen piyasa "
+            "(piyasa bazında; ödeme nakdi değil)" % (consistent, decided)
+        )
+        if not model["direction"]:
+            set_("funding_sign", UNVERIFIED, "Funding işaret kuralı belgelenmedi")
+        elif not markets:
+            pass  # nothing compared yet: the declaration stands
+        elif decided < PUBLISHED_VENUE_MIN:
+            set_(
+                "funding_sign",
+                UNVERIFIED,
+                method + "; karar verilen piyasa yetersiz (en az %d)"
+                % PUBLISHED_VENUE_MIN,
+                None,
+                when or at,
             )
-            when = max(t for t, a in obs)
-            if len(obs) < SIGN_MIN:
-                set_(
-                    "funding_sign", UNVERIFIED, method + "; gözlem yetersiz", None, when
-                )
-            elif agree / len(obs) >= SIGN_AGREE:
-                set_(
-                    "funding_sign",
-                    PARTIAL,
-                    method,
-                    "Hesaptaki gerçek ödemeyle doğrulanmadı",
-                    when,
-                )
-            elif agree / len(obs) <= 1 - SIGN_AGREE:
-                set_(
-                    "funding_sign",
-                    NONE,
-                    method,
-                    "İşaret prim yönünün tersine görünüyor; funding kullanılmaz",
-                    when,
-                )
-            else:
-                set_("funding_sign", UNVERIFIED, method + "; tutarsız", None, when)
+        elif inverted / decided >= round(1 - SIGN_AGREE, 9):
+            set_(
+                "funding_sign",
+                NONE,
+                method,
+                "Yayımlanan oran ödemelerin tersine; funding kullanılmaz",
+                when,
+            )
+        elif consistent / decided >= SIGN_AGREE:
+            set_(
+                "funding_sign",
+                PARTIAL,
+                method,
+                "Yön borsa/bağlayıcı beyanı; hesaptaki gerçek ödemeyle doğrulanmadı",
+                when,
+            )
+        else:
+            set_("funding_sign", UNVERIFIED, method + "; tutarsız", None, when)
 
 
 # Where each runtime check is covered by tests.

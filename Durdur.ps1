@@ -4,7 +4,14 @@ if (-not (Test-Path -LiteralPath $taskPidFile)) { Write-Output 'Kayıtlı motor 
 $taskBot = Join-Path $PSScriptRoot 'risk_main.py'
 $taskPid = [int](Get-Content -LiteralPath $taskPidFile)
 $taskIdentity = Invoke-RestMethod -Uri 'http://127.0.0.1:8765/api/identity' -TimeoutSec 3
-if ($taskIdentity.pid -eq $taskPid -and $taskIdentity.root -eq $PSScriptRoot -and $taskIdentity.mode -eq 'PAPER') {
+# The .venv python.exe is a launcher: paper.pid holds the launcher, the engine that
+# answers /api/identity is its child. Either one is the registered engine.
+$taskOurs = $taskIdentity.pid -eq $taskPid
+if (-not $taskOurs) {
+    $taskChild = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$taskIdentity.pid) -ErrorAction SilentlyContinue
+    $taskOurs = [bool]($taskChild -and $taskChild.ParentProcessId -eq $taskPid -and $taskChild.CommandLine -like '*risk_main.py*')
+}
+if ($taskOurs -and $taskIdentity.root -eq $PSScriptRoot -and $taskIdentity.mode -eq 'PAPER') {
     $taskHtml = (Invoke-WebRequest -Uri 'http://127.0.0.1:8765/' -UseBasicParsing).Content
     $taskToken = [regex]::Match($taskHtml, "window.paperToken='([^']+)'").Groups[1].Value
     Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8765/api/shutdown' -Headers @{'X-Paper-Token'=$taskToken} -ContentType 'application/json' -Body '{}' | Out-Null
