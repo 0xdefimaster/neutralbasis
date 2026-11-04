@@ -78,6 +78,33 @@ class LongHistoryTests(unittest.TestCase):
                 self.assertEqual(len(ts), 90 * 24, v)
                 self.assertTrue(all(start <= t <= END for t in ts))
 
+    def test_a_start_read_moments_before_end_adds_no_empty_window(self):
+        # The history keeper reads its start a few seconds before funding_range reads
+        # END: the old paging then asked Lighter for start == end and got HTTP 400.
+        start = END - 30 * 86400 - 3
+        wins = list(self.feed.windows(start, END))
+        self.assertEqual(len(wins), 2)
+        self.assertEqual(wins[-1][0], start)
+        self.assertTrue(all(int(e) > int(s) for s, e in wins))
+        self.assertTrue(all(e - s <= self.feed.WINDOW + self.feed.MIN_WINDOW for s, e in wins))
+
+        def strict(url, data=None, max_age=None):
+            q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
+            if int(q["start_timestamp"]) >= int(q["end_timestamp"]):
+                raise ValueError("HTTP Error 400: Bad Request")
+            return self.fake(url)
+
+        with patch.object(self.feed, "req", strict):
+            rows = self.feed.funding_range("Lighter", "BTC", start, END)
+        # Every hourly payment from the first hour after start through END.
+        self.assertEqual(
+            [r["ts"] for r in rows], list(range(END - 30 * 86400, END + 1, 3600))
+        )
+
+    def test_short_ranges_are_one_window(self):
+        self.assertEqual(list(self.feed.windows(END - 600, END)), [(END - 600, END)])
+        self.assertEqual(list(self.feed.windows(END, END)), [])
+
     def test_txflow_funding_never_invented(self):
         self.feed.meta["TxFlow"] = {"BTC": dict(id="1")}
         with self.assertRaises(ValueError):

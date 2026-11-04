@@ -430,13 +430,21 @@ class FiveFeed(Feed):
         return out
 
     WINDOW = 15 * 86400
+    # A remainder shorter than this joins the window before it. Callers read start and
+    # end from the clock moments apart, which left a near-empty last window; Lighter
+    # answers an empty range (start == end) with HTTP 400 and the whole read failed.
+    MIN_WINDOW = 3600
 
     def windows(self, start, end):
-        """Back-to-back windows small enough for every venue's per-request row limit."""
+        """Back-to-back windows small enough for every venue's per-request row limit,
+        none shorter than MIN_WINDOW unless the whole range is."""
         t = end
         while t > start:
-            yield max(start, t - self.WINDOW), t
-            t = max(start, t - self.WINDOW)
+            s = t - self.WINDOW
+            if s - start < self.MIN_WINDOW:
+                s = start
+            yield s, t
+            t = s
 
     def candles_range(self, v, asset, start, end):
         """Closed 1h trade/oracle candles over an arbitrary range (backtests up to 90 days)."""
