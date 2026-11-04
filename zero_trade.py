@@ -78,6 +78,7 @@ RULES = (
                                                "kalıcı avantaj yok",
                                                "tek bir güne dayanıyor",
                                                "sonrası kalmıyor", "sonrası negatif",
+                                               "gideri sonrası yetersiz",
                                                "seviyesinin altında")),
     ("EXECUTION_FAILED", "EXECUTION", ("dolmadı", "doldurmadı", "fill")),
     ("STRATEGY_DISABLED", "STRATEGY", ("strateji kapalı",)),
