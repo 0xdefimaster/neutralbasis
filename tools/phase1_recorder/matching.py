@@ -17,6 +17,7 @@ Statuses:
 The unit of the published rate is not decided here: the reports read the ratios.
 """
 
+import bisect
 import statistics
 
 SIGN_EPS = 1e-9
@@ -29,31 +30,81 @@ def observed_interval(times):
     return statistics.median(gaps) if gaps else None
 
 
+def periods(settlements, interval_hint=None):
+    """(payments in time order, interval, each payment's own period as (after,
+    before), or None when it has none). The one definition used by `compare` and
+    by `Candidates`."""
+    paid = sorted(
+        {int(round(s["settled_at"])): s for s in settlements}.values(),
+        key=lambda s: s["settled_at"],
+    )
+    interval = observed_interval([s["settled_at"] for s in paid]) or interval_hint
+    windows = []
+    for i, s in enumerate(paid):
+        t = s["settled_at"]
+        prev = paid[i - 1]["settled_at"] if i else None
+        if prev is None or (interval and t - prev > 1.5 * interval):
+            if not interval:
+                windows.append(None)
+                continue
+            prev = t - interval
+        windows.append((prev, t))
+    return paid, interval, windows
+
+
+def usable(x, window):
+    """Whether snapshot `x` was observed inside `window` and names its settlement."""
+    prev, t = window
+    return prev < x["received_at"] < t and (
+        not x.get("next_funding_at") or abs(x["next_funding_at"] - t) <= SLACK
+    )
+
+
+class Candidates:
+    """The snapshots of one market that `compare` can ever use, kept while the
+    snapshots stream past: for each payment the latest usable one inside its
+    period, and the latest one after the last payment. `compare` over these gives
+    exactly what it gives over all snapshots, without holding days of them."""
+
+    def __init__(self, settlements, interval_hint=None):
+        paid, _, self.windows = periods(settlements, interval_hint)
+        self.ends = [s["settled_at"] for s in paid]
+        self.last_paid = self.ends[-1] if self.ends else None
+        self.best = [None] * len(paid)
+        self.later = None
+
+    def add(self, x):
+        if x.get("published_rate") is None:
+            return
+        r = x["received_at"]
+        # Equal times: the later one seen wins, as after compare's stable sort.
+        if self.last_paid is None or r > self.last_paid:
+            if self.later is None or r >= self.later["received_at"]:
+                self.later = x
+        # Periods follow each other: only the first payment after r can hold it.
+        i = bisect.bisect_right(self.ends, r)
+        if i < len(self.ends) and self.windows[i] and usable(x, self.windows[i]):
+            if self.best[i] is None or r >= self.best[i]["received_at"]:
+                self.best[i] = x
+
+    def kept(self):
+        return [x for x in self.best if x is not None] + (
+            [self.later] if self.later is not None else []
+        )
+
+
 def compare(snapshots, settlements, now, grace, interval_hint=None):
     """(final comparisons, pending-or-missing comparisons) for one market."""
     snaps = sorted(
         (s for s in snapshots if s.get("published_rate") is not None),
         key=lambda s: s["received_at"],
     )
-    paid = sorted(
-        {int(round(s["settled_at"])): s for s in settlements}.values(),
-        key=lambda s: s["settled_at"],
-    )
-    interval = observed_interval([s["settled_at"] for s in paid]) or interval_hint
+    paid, interval, windows = periods(settlements, interval_hint)
     out = []
-    for i, s in enumerate(paid):
-        t = s["settled_at"]
-        prev = paid[i - 1]["settled_at"] if i else None
-        if prev is None or (interval and t - prev > 1.5 * interval):
-            if not interval:
-                continue
-            prev = t - interval
-        inside = [
-            x
-            for x in snaps
-            if prev < x["received_at"] < t
-            and (not x.get("next_funding_at") or abs(x["next_funding_at"] - t) <= SLACK)
-        ]
+    for s, window in zip(paid, windows):
+        if window is None:
+            continue
+        inside = [x for x in snaps if usable(x, window)]
         if not inside:
             continue
         x = inside[-1]

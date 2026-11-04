@@ -105,7 +105,7 @@ class Folder(unittest.TestCase):
             self.cfg, transport=self.fake, clock=self.clock, sleep=self.clock.sleep
         )
         rec.run("once")
-        rec.store.close()
+        rec.close()
         self.root = self.cfg["root"]
 
     def tearDown(self):

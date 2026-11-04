@@ -28,7 +28,7 @@ class VariationalTests(unittest.TestCase):
         )
 
     def tearDown(self):
-        self.rec.store.close()
+        self.rec.close()
         self.dir.cleanup()
 
     def state(self):

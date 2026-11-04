@@ -59,6 +59,13 @@ DEFAULTS = dict(
     # calls for the cooldown, so one unreachable venue cannot hold up a run.
     unreachable_after=3,
     unreachable_cooldown_seconds=600,
+    # Batched writes (storage.Store): index changes and normalized lines are written
+    # together when this many are waiting or the oldest has waited this long, and at
+    # the end of every task. A crash loses at most the waiting ones (history is
+    # fetched again; live observations of that interval are lost). 1 and 0 = the
+    # original commit per write.
+    write_batch_records=500,
+    write_batch_seconds=1.0,
 )
 
 # A single --once check is a quick look, not a backfill under a bad connection.

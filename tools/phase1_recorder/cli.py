@@ -119,7 +119,7 @@ def main(argv=None, transport=None):
         stopped = rec.run("once" if args.once else "duration", args.duration_hours)
         _, _, text = write_reports(rec.store, cfg, with_consistency=False)
     finally:
-        rec.store.close()
+        rec.close()
     print(text)
     print("Oturum sonu: %s" % stopped)
     return 0

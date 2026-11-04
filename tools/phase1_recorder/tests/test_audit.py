@@ -365,7 +365,8 @@ class CrashSafetyTests(Fixture):
     def test_a_line_written_twice_is_read_once(self):
         self.settle(self.hl_rows((T0 * 1000, "0.0001")))
         path = self.path_of("settlement")
-        line = open(path, encoding="utf-8").read()
+        with open(path, encoding="utf-8") as f:
+            line = f.read()
         with open(path, "a", encoding="utf-8") as f:
             f.write(
                 line
@@ -504,7 +505,7 @@ class DataSourceTests(unittest.TestCase):
             src = rec.store.db.execute("select source from sessions").fetchone()[0]
             self.assertEqual(src, "MOCK:FakeVenues")
         finally:
-            rec.store.close()
+            rec.close()
         # Live recording into this mock folder is refused.
         with self.assertRaises(ValueError):
             Recorder(self.cfg)
@@ -533,7 +534,7 @@ class DataSourceTests(unittest.TestCase):
             self.assertEqual(m["funding_interval"], "VERIFIED")
             self.assertNotIn("İÇERMİYOR", text_report(cov))
         finally:
-            rec.store.close()
+            rec.close()
 
     def test_without_payments_no_evidence_status_is_produced(self):
         clock = Clock()
@@ -552,7 +553,7 @@ class DataSourceTests(unittest.TestCase):
             self.assertEqual(m["rate_unit"], "UNKNOWN")
             self.assertNotIn(m["direction"], ("OBSERVED", "VERIFIED"))
         finally:
-            rec.store.close()
+            rec.close()
 
 
 if __name__ == "__main__":
