@@ -23,9 +23,12 @@ def literal_reasons():
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
                 continue
-            target = getattr(node.func.value, "id", "") or getattr(
-                node.func.value, "attr", ""
-            )
+            owner = node.func.value
+            # out["reasons"].append(...) as well as reasons.append / x.reasons.append.
+            if isinstance(owner, ast.Subscript) and isinstance(owner.slice, ast.Constant):
+                target = owner.slice.value
+            else:
+                target = getattr(owner, "id", "") or getattr(owner, "attr", "")
             if node.func.attr != "append" or target not in ("why", "reasons", "stale"):
                 continue
             a = node.args[0] if node.args else None
@@ -57,6 +60,8 @@ class CodeTests(unittest.TestCase):
             "RISEx: Ücret doğrulanmadı": "FEE_UNKNOWN",
             "Funding geliri ücret + kayma + spread riski payını karşılamıyor · x":
                 "NET_EXPECTED_PNL_NEGATIVE",
+            "Yakınsama kazancı 4 emir ücreti, kayma ve funding gideri sonrası "
+            "yetersiz": "NET_EXPECTED_PNL_NEGATIVE",
             "Hyperliquid: girişte defter eski": "STALE_ORDERBOOK",
             "Hyperliquid: girişte defter derinliği yetersiz · 1 / 2":
                 "INSUFFICIENT_LIQUIDITY",
