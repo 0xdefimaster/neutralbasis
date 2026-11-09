@@ -31,8 +31,24 @@ if (Test-Path -LiteralPath $taskPidFile) {
     }
 }
 if (Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue) { throw '8765 portu başka bir işlem tarafından kullanılıyor. Yeni motor başlatılmadı.' }
-$taskProc = Start-Process -FilePath $taskPython -ArgumentList @('-u', ('"' + $taskBot + '"'), '--autostart') -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $taskData 'motor.log') -RedirectStandardError (Join-Path $taskData 'motor-error.log')
+# Her çalıştırma kendi log dosyalarına yazar; önceki çalıştırmaların logları (eski
+# motor.log / motor-error.log dahil) hiçbir zaman üzerine yazılmaz. -X faulthandler
+# native bir çökmede tüm thread yığınlarını stderr loguna düşürür; risk_main ayrıca
+# logs\faulthandler-*.log dosyasına yazar.
+$taskLogs = Join-Path $taskData 'logs'
+New-Item -ItemType Directory -Path $taskLogs -Force | Out-Null
+$taskStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$taskOut = Join-Path $taskLogs ('motor-' + $taskStamp + '.out.log')
+$taskErr = Join-Path $taskLogs ('motor-' + $taskStamp + '.err.log')
+$taskN = 1
+while ((Test-Path -LiteralPath $taskOut) -or (Test-Path -LiteralPath $taskErr)) {
+    $taskOut = Join-Path $taskLogs ('motor-' + $taskStamp + '-' + $taskN + '.out.log')
+    $taskErr = Join-Path $taskLogs ('motor-' + $taskStamp + '-' + $taskN + '.err.log')
+    $taskN++
+}
+$taskProc = Start-Process -FilePath $taskPython -ArgumentList @('-X', 'faulthandler', '-u', ('"' + $taskBot + '"'), '--autostart') -WorkingDirectory $taskRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput $taskOut -RedirectStandardError $taskErr
 Set-Content -LiteralPath $taskPidFile -Value $taskProc.Id
 Write-Output ('Paper motor başlatıldı. PID: ' + $taskProc.Id)
+Write-Output ('Loglar: ' + $taskOut + ' / ' + $taskErr)
 Write-Output 'Panel: http://127.0.0.1:8765'
 Write-Output 'Yeni girişleri panelden durdurabilirsiniz. Açık pozisyonların izlemesi motor çalıştığı sürece devam eder.'

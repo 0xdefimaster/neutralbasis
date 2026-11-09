@@ -89,7 +89,8 @@ RULES = (
 )
 CATEGORY = {code: cat for code, cat, _ in RULES}
 CATEGORY.update(OTHER="OTHER", NO_COMMON_INSTRUMENT="DATA", COST_EXCEEDS_EDGE="ECONOMIC")
-CATEGORY.update(ORDERBOOK_DESYNC="DATA", RFQ_STREAM_UNAVAILABLE="DATA", API_RATE_LIMIT="DATA")
+CATEGORY.update(ORDERBOOK_DESYNC="DATA", RFQ_STREAM_UNAVAILABLE="DATA", API_RATE_LIMIT="DATA",
+                RFQ_STREAM_WARMING="DATA", VENUE_CIRCUIT_OPEN="DATA")
 
 VERDICTS = dict(
     NO_OPPORTUNITY="Şu anda geçerli fırsat yok.",
@@ -120,6 +121,17 @@ def code_of(reason):
         return "ORDERBOOK_DESYNC", "DATA"
     if "429" in t and ("rfq" in t or "websocket" in t):
         return "API_RATE_LIMIT", "DATA"
+    # Venue rate limits (ccxt class names or our backoff message) and an open circuit
+    # were OTHER or a generic book error before.
+    if any(x in t for x in ("istek sınırı", "ratelimitexceeded", "ddosprotection",
+                            "too many requests")):
+        return "API_RATE_LIMIT", "DATA"
+    if "devre açık" in t:
+        return "VENUE_CIRCUIT_OPEN", "DATA"
+    # A stream that is up (or connecting) but has not received its first snapshot yet:
+    # a warming book, not a broken one. It was counted as OTHER before.
+    if "rfq" in t and "snapshot bekl" in t:
+        return "RFQ_STREAM_WARMING", "DATA"
     if "rfq" in t and any(x in t for x in (
         "akışı", "akisi", "başlat", "baslat", "sessiz", "bağlı değil", "bagli degil"
     )):

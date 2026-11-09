@@ -125,7 +125,10 @@ def first_at(db, table, column, cutoff):
 
 class Store:
     def __init__(self, path, migrate=True):
-        self.lock = threading.RLock()
+        import runtime_metrics
+
+        # Same semantics as an RLock; also measures wait/hold per acquisition.
+        self.lock = runtime_metrics.TimedLock()
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.execute("pragma journal_mode=WAL")
         # Every public response and stream message is written here under one lock. In
@@ -634,6 +637,32 @@ def analyze(long, short, horizon, at):
 
 
 class Engine:
+    # Every `self.stage = ...` also marks the stage clock, so cycle stages are timed
+    # from the marks the engine already sets (see runtime_metrics.StageClock).
+    @property
+    def stage(self):
+        return self.__dict__.get("_stage", "Başlatılıyor")
+
+    @stage.setter
+    def stage(self, value):
+        self.__dict__["_stage"] = value
+        clock = self.__dict__.get("stage_clock")
+        if clock is not None:
+            clock.mark(value)
+
+    def runtime_metrics(self):
+        clock = self.__dict__.get("stage_clock")
+        lock = getattr(getattr(self, "store", None), "lock", None)
+        out = dict(
+            mode="PAPER",
+            store_lock=lock.report() if hasattr(lock, "report") else None,
+            cycle_stages=clock.report() if clock is not None else None,
+        )
+        http = getattr(getattr(self, "wide", None), "http_stats", None)
+        if http is not None:
+            out["http"] = http.report()
+        return out
+
     def __init__(self, path, feed=None):
         self.store = Store(path)
         self.lock = threading.RLock()
@@ -1600,9 +1629,15 @@ class Engine:
             self.busy = False
 
     def loop(self):
+        import runtime_metrics
+
+        if self.__dict__.get("stage_clock") is None:
+            self.stage_clock = runtime_metrics.StageClock()
         while not self.stop_event.is_set():
             with self.lock:
                 self.cycle_started = now()
+                self.stage_clock.begin()
+                runtime_metrics.arm_stall_dump()
                 try:
                     self.cycle()
                     if self.stop_event.is_set():
@@ -1614,8 +1649,10 @@ class Engine:
                     self.error = str(ex)
                     self.events("ERROR", "Karar döngüsü: " + str(ex))
                 finally:
+                    runtime_metrics.disarm_stall_dump()
                     self.cycle_finished = now()
                     self.stage = "Bekliyor"
+                    self.stage_clock.end()
             self.stop_event.wait(self.cfg["poll_seconds"])
 
     def runtime_status(self):
@@ -1780,6 +1817,8 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 return self.send(engine.funding_matrix())
             if self.path == "/api/why-no-trade" and hasattr(engine, "why_no_trade"):
                 return self.send(engine.why_no_trade())
+            if self.path == "/api/runtime-metrics" and hasattr(engine, "runtime_metrics"):
+                return self.send(engine.runtime_metrics())
             if self.path == "/api/capabilities" and hasattr(
                 engine, "capability_registry"
             ):

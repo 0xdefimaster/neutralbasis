@@ -93,5 +93,53 @@ class AnalyticsTests(unittest.TestCase):
         self.assertGreater(r["mean"], 0)
 
 
+class RfqBookSelectionTests(unittest.TestCase):
+    """DeskEngine.select_rfq_books on a MOCK engine (no network, no database)."""
+
+    def engine(self, scores, held=()):
+        from types import SimpleNamespace
+        from desk_analytics import DeskEngine
+
+        meta = {a: dict(rfq=True, id=a + "-USD") for a in scores}
+        meta["NORFQ"] = dict(rfq=False, id="NORFQ-USD")
+        wp = SimpleNamespace(
+            workspace=lambda: {},
+            positions=[dict(asset=a, legs=[dict(venue="Extended")]) for a in held],
+            candidates=[dict(asset=a, long="Extended", short="Hyperliquid", score=s)
+                        for a, s in scores.items()]
+            + [dict(asset="OTHER", long="Paradex", short="Hyperliquid", score=99)],
+            conv_candidates=[],
+            rejected={},
+            pair_key=lambda c: (c["asset"], c["long"], c["short"]),
+            blocked=lambda c: False,
+        )
+        e = DeskEngine.__new__(DeskEngine)
+        e.feed = SimpleNamespace(meta={"Extended": meta, "Lighter": {}})
+        e.wide_paper = wp
+        return e
+
+    def test_young_books_survive_re_ranking_until_the_hold_ends(self):
+        scores = {f"A{i}": 100 - i for i in range(14)}
+        e = self.engine(scores)
+        first = set(e.select_rfq_books(at=1000))
+        self.assertEqual(first, {f"A{i}" for i in range(12)})
+        # Next cycle the two lowest fall behind two newcomers.
+        for a in ("A12", "A13"):
+            e.wide_paper.candidates[int(a[1:])]["score"] = 1000
+        second = set(e.select_rfq_books(at=1070))
+        self.assertEqual(second, first)  # no retirement 70 s after start
+        later = set(e.select_rfq_books(at=1000 + 601))
+        self.assertIn("A12", later)
+        self.assertIn("A13", later)
+        self.assertEqual(len(later), 12)
+
+    def test_held_legs_kept_and_only_extended_rfq_markets_streamed(self):
+        e = self.engine({"A0": 1, "A1": 2}, held=("A0",))
+        got = e.select_rfq_books(at=1000)
+        self.assertEqual(set(got), {"A0", "A1"})
+        self.assertNotIn("NORFQ", got)
+        self.assertNotIn("OTHER", got)
+
+
 if __name__ == "__main__":
     unittest.main()

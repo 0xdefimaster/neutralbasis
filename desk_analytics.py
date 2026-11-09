@@ -806,49 +806,60 @@ class DeskEngine(RiskEngine):
         self.wide_paper.latency_ms = self.cfg["latency_ms"]
         self.wide_paper.extra_slippage = self.cfg["extra_slippage_bps"] / 10000
         if self.rfq_live:
-            extended = self.feed.meta.get("Extended", {})
-            lighter = self.feed.meta.get("Lighter", {})
-            workspace = self.wide_paper.workspace() or {}
-            selected = set((workspace.get("venues") or {}).keys())
-            disabled = set(workspace.get("disabled") or [])
-            can_scan_rwa = (
-                not selected
-                or {"Extended", "Lighter"}.issubset(selected - disabled)
-            )
-            rfq_meta = {
-                asset: market
-                for asset, market in extended.items()
-                if market.get("rfq")
-                and (
-                    market.get("category") != "RWA"
-                    or (can_scan_rwa and asset in lighter)
-                )
-            }
-            # One socket per market: subscribing to the whole RFQ catalogue created
-            # hundreds of writers on the same SQLite lock. Keep held legs plus the
-            # best candidate books; all market prices remain in the scanner.
-            held = {p["asset"] for p in self.wide_paper.positions
-                    if any(l["venue"] == "Extended" and not l.get("closed") for l in p["legs"])}
-            candidates = self.wide_paper.candidates + self.wide_paper.conv_candidates
-            at = now()
-            def stream_priority(c):
-                rejected = self.wide_paper.rejected.get(self.wide_paper.pair_key(c), {})
-                waiting = bool(c.get("research") or rejected.get("until", 0) > at
-                               or self.wide_paper.blocked(c))
-                return waiting, -c.get("score", 0)
-            candidates = sorted(candidates, key=stream_priority)
-            chosen = set(held)
-            for c in candidates:
-                if len(chosen) >= max(12, len(held)):
-                    break
-                if "Extended" in (c["long"], c["short"]) and c["asset"] in rfq_meta:
-                    chosen.add(c["asset"])
-            rfq_meta = {a: m for a, m in rfq_meta.items() if a in chosen}
-            self.rfq.sync(rfq_meta)
+            self.rfq.sync(self.select_rfq_books())
         self.stage = "Birleşik ekonomi ve paper yürütme"
         self.wide_paper.cycle(entries=self.running)
         self.last_cycle = self.wide_paper.last_cycle
         self.stage = "Tamamlandı"
+
+    def select_rfq_books(self, at=None):
+        """The Extended RFQ markets whose real book is streamed this cycle."""
+        from extended_rfq import choose_streams
+
+        at = now() if at is None else at
+        extended = self.feed.meta.get("Extended", {})
+        lighter = self.feed.meta.get("Lighter", {})
+        workspace = self.wide_paper.workspace() or {}
+        selected = set((workspace.get("venues") or {}).keys())
+        disabled = set(workspace.get("disabled") or [])
+        can_scan_rwa = (
+            not selected
+            or {"Extended", "Lighter"}.issubset(selected - disabled)
+        )
+        rfq_meta = {
+            asset: market
+            for asset, market in extended.items()
+            if market.get("rfq")
+            and (
+                market.get("category") != "RWA"
+                or (can_scan_rwa and asset in lighter)
+            )
+        }
+        # One socket per market: subscribing to the whole RFQ catalogue created
+        # hundreds of writers on the same SQLite lock. Keep held legs plus the
+        # best candidate books; all market prices remain in the scanner.
+        held = {p["asset"] for p in self.wide_paper.positions
+                if any(l["venue"] == "Extended" and not l.get("closed") for l in p["legs"])}
+        candidates = self.wide_paper.candidates + self.wide_paper.conv_candidates
+
+        def stream_priority(c):
+            rejected = self.wide_paper.rejected.get(self.wide_paper.pair_key(c), {})
+            waiting = bool(c.get("research") or rejected.get("until", 0) > at
+                           or self.wide_paper.blocked(c))
+            return waiting, -c.get("score", 0)
+
+        ranked = []
+        for c in sorted(candidates, key=stream_priority):
+            if ("Extended" in (c["long"], c["short"]) and c["asset"] in rfq_meta
+                    and c["asset"] not in ranked):
+                ranked.append(c["asset"])
+        # Hysteresis: a just-started book keeps its slot until it had time to
+        # receive a snapshot, instead of being retired by the next re-ranking.
+        since = getattr(self, "rfq_since", {})
+        chosen = choose_streams(ranked, held, since, at)
+        rfq_meta = {a: m for a, m in rfq_meta.items() if a in chosen}
+        self.rfq_since = {a: since.get(a, at) for a in rfq_meta}
+        return rfq_meta
 
     def refresh_feed(self):
         """Network discovery runs independently of decisions and position monitoring."""

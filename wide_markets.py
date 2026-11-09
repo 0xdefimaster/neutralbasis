@@ -1,7 +1,8 @@
 """Public-only venue coverage. Scan adapters never place orders or accept credentials."""
 
-import concurrent.futures, datetime, email.utils, itertools, json, math, re, sys, threading, time, urllib.request
+import concurrent.futures, datetime, email.utils, itertools, json, math, re, sys, threading, time, urllib.parse, urllib.request
 from pathlib import Path
+import runtime_metrics
 from bot import now, hour, number
 from risk_scan import VENUES, DISPLAY
 
@@ -288,6 +289,8 @@ class WideMarkets:
         self.universe_status = {}
         self.price_discovery_rows = []
         self.price_discovery_status = {}
+        # Per-venue HTTP outcomes, 429 backoff (Retry-After) and circuit breaker.
+        self.http_stats = runtime_metrics.HttpGuard()
 
     def client(self, v, spot=False, decision=False):
         key = v + ":spot" if spot else v
@@ -317,7 +320,21 @@ class WideMarkets:
         original = ex.fetch
 
         def audited(url, method="GET", headers=None, body=None):
-            result = original(url, method, headers, body)
+            # Rate-limit backoff / open circuit: fail fast without calling the venue.
+            self.http_stats.check(v)
+            try:
+                result = original(url, method, headers, body)
+            except Exception as e:
+                kind = runtime_metrics.classify_http_error(e)
+                retry = None
+                if kind == "429":
+                    h = ex.last_response_headers or {}
+                    retry = runtime_metrics.retry_after_seconds(
+                        h.get("Retry-After") or h.get("retry-after")
+                    )
+                self.http_stats.failure(v, kind, retry)
+                raise
+            self.http_stats.success(v)
             received = now()
             h = ex.last_response_headers or {}
             date = h.get("Date") or h.get("date")
@@ -726,9 +743,20 @@ class WideMarkets:
                 "Cache-Control": "no-cache",
             },
         )
-        with urllib.request.urlopen(request, timeout=12) as response:
-            raw = response.read(20_000_000)
-            headers = {k.lower(): v for k, v in response.headers.items()}
+        guard_key = "price:" + (urllib.parse.urlsplit(url).hostname or "?")
+        self.http_stats.check(guard_key)
+        try:
+            with urllib.request.urlopen(request, timeout=12) as response:
+                raw = response.read(20_000_000)
+                headers = {k.lower(): v for k, v in response.headers.items()}
+        except Exception as e:
+            kind = runtime_metrics.classify_http_error(e)
+            retry = None
+            if kind == "429" and getattr(e, "headers", None) is not None:
+                retry = runtime_metrics.retry_after_seconds(e.headers.get("Retry-After"))
+            self.http_stats.failure(guard_key, kind, retry)
+            raise
+        self.http_stats.success(guard_key)
         received = now()
         age = finite(headers.get("age", 0)) or 0
         if headers.get("date"):

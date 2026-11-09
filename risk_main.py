@@ -1,4 +1,4 @@
-import argparse, json, os
+import argparse, faulthandler, json, os, sys, time
 from pathlib import Path
 import bot, retention
 from desk_analytics import DeskEngine as RiskEngine
@@ -16,6 +16,35 @@ def keep_awake():
     # The return value is the previous state, which may be zero; it is not a result.
     ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
     return True
+
+
+# Kept open for the life of the process: faulthandler writes to this file descriptor
+# from its fatal-error handler, so it must never be closed or garbage-collected.
+CRASH_LOG = None
+
+
+def enable_crash_log(folder, at=None, pid=None):
+    """Send faulthandler's fatal-error stacks (all threads) to a new file per run, so a
+    native crash leaves Python stacks on disk however the engine was started (hidden
+    by Baslat.ps1 or in a terminal). Never overwrites an earlier run's file."""
+    global CRASH_LOG
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(at))
+    path = folder / f"faulthandler-{stamp}-{pid or os.getpid()}.log"
+    f = open(path, "a", encoding="utf8")
+    f.write(
+        f"run started {time.strftime('%Y-%m-%d %H:%M:%S %z', time.localtime(at))}"
+        f" pid={pid or os.getpid()} python={sys.version.split()[0]} mode=PAPER\n"
+    )
+    f.flush()
+    faulthandler.enable(file=f, all_threads=True)
+    CRASH_LOG = f
+    import runtime_metrics
+
+    # Cycle stall dumps go to the same per-run file.
+    runtime_metrics.STALL_LOG = f
+    return path
 
 
 if __name__ == "__main__":
@@ -49,6 +78,7 @@ if __name__ == "__main__":
         )
         print("Risk taraması kaydedildi:", d / "last-scan.json")
     else:
+        print("Çökme yığını kaydı:", enable_crash_log(d / "logs"))
         if keep_awake():
             print("Uyku modu motor çalıştığı sürece engellendi.")
         bot.serve(

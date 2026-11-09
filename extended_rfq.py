@@ -22,6 +22,10 @@ STREAM = (
 SOURCE = "extended_rfq"
 # The server pings regularly; a socket silent this long is treated as lost.
 SILENT_AFTER = 30
+# A blocked read wakes up this often so the worker that owns the socket can notice a
+# retirement or a stop and close the socket itself. No other thread ever touches it:
+# OpenSSL does not allow one TLS connection to be used from two threads at once.
+POLL_SECONDS = 1.0
 RECONNECT_MIN, RECONNECT_MAX = 2, 60
 # Recorded raw messages are kept this long.
 KEEP_SECONDS = 3 * 86400
@@ -34,6 +38,26 @@ PRUNE_ROWS = 5000
 # Book views older than this (since the last frame of a live connection) are refused.
 VIEW_MAX_AGE = 30
 WAITING = "RFQ defteri yeni snapshot bekliyor"
+# At most this many RFQ books are streamed (held legs always are, even beyond it).
+STREAM_LIMIT = 12
+# A stream keeps its slot this long after it starts while its market is still a
+# candidate: re-ranking every cycle used to retire books before their first snapshot.
+MIN_HOLD_SECONDS = 600
+
+
+def choose_streams(ranked, held, since, at, limit=STREAM_LIMIT, hold=MIN_HOLD_SECONDS):
+    """Which RFQ books to stream. `ranked`: candidate assets, best first; `held`: assets
+    with open paper legs, always kept; `since`: start time of the running streams.
+    Young streams of still-ranked assets keep their slot first, then the best ranked
+    fill the rest. Never more than max(limit, len(held)) streams."""
+    cap = max(limit, len(held))
+    chosen = set(held)
+    young = [a for a in ranked if a in since and at - since[a] < hold]
+    for a in young + list(ranked):
+        if len(chosen) >= cap:
+            break
+        chosen.add(a)
+    return chosen
 
 
 class RfqBook:
@@ -117,10 +141,22 @@ class RfqBook:
         return bids, asks
 
 
-class WebSocket:
-    """Minimal blocking RFC 6455 client: text frames, ping/pong, close."""
+class Retired(Exception):
+    """The stream was asked to stop; raised in the worker that owns the socket."""
 
-    def __init__(self, url, timeout=SILENT_AFTER):
+
+class WebSocket:
+    """Minimal blocking RFC 6455 client: text frames, ping/pong, close.
+
+    Single owner: the thread that opens the socket is the only one allowed to read,
+    write or close it. Another thread gets a RuntimeError instead of racing the TLS
+    state. A blocked read wakes up every `poll` seconds to ask `cancelled()`; silence
+    longer than `timeout` is a lost connection."""
+
+    def __init__(self, url, timeout=SILENT_AFTER, poll=None, cancelled=None):
+        self.owner = threading.get_ident()
+        self.silent_after = timeout
+        self.cancelled = cancelled or (lambda: False)
         u = urllib.parse.urlsplit(url)
         host = u.hostname
         port = u.port or (443 if u.scheme == "wss" else 80)
@@ -161,17 +197,37 @@ class WebSocket:
         }
         if headers.get("sec-websocket-accept") != accept:
             raise ConnectionError("WebSocket kabul anahtarı geçersiz")
+        self.last_data = time.monotonic()
+        if poll:
+            self.sock.settimeout(min(poll, timeout))
+
+    def check_owner(self):
+        if threading.get_ident() != self.owner:
+            raise RuntimeError(
+                "WebSocket yalnızca açan thread tarafından kullanılabilir"
+            )
 
     def read(self, n):
+        self.check_owner()
         while len(self.buffer) < n:
-            chunk = self.sock.recv(65536)
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                # A poll wake-up: nothing was consumed, the TLS state is intact.
+                if self.cancelled():
+                    raise Retired("RFQ akışı durduruldu")
+                if time.monotonic() - self.last_data >= self.silent_after:
+                    raise ConnectionError("WebSocket sessiz; bağlantı kopmuş sayıldı")
+                continue
             if not chunk:
                 raise ConnectionError("WebSocket bağlantısı kapandı")
+            self.last_data = time.monotonic()
             self.buffer += chunk
         out, self.buffer = self.buffer[:n], self.buffer[n:]
         return out
 
     def send(self, opcode, payload=b""):
+        self.check_owner()
         mask = os.urandom(4)
         n = len(payload)
         head = bytes([0x80 | opcode])
@@ -211,6 +267,7 @@ class WebSocket:
                 return b"".join(parts).decode("utf8")
 
     def close(self):
+        self.check_owner()
         try:
             self.send(0x8)
         except Exception:
@@ -342,7 +399,9 @@ class RfqStream:
         self.error = None
         self.thread = None
         self.retired = threading.Event()
-        self.socket = None
+
+    def cancelled(self):
+        return self.stop.is_set() or self.retired.is_set()
 
     def handle(self, text, received):
         """One raw message from the socket."""
@@ -361,28 +420,37 @@ class RfqStream:
             self.error = reason
             self.book.invalidate("Bağlantı koptu; yeni snapshot bekleniyor")
 
+    def open(self):
+        url = STREAM + urllib.parse.quote(self.market)
+        if self.connect is WebSocket:
+            return WebSocket(
+                url, timeout=SILENT_AFTER, poll=POLL_SECONDS, cancelled=self.cancelled
+            )
+        return self.connect(url)
+
     def run_once(self):
-        ws = self.connect(STREAM + urllib.parse.quote(self.market))
-        self.socket = ws
+        """Connect, read and close, all in the calling (worker) thread."""
+        ws = self.open()
         try:
             with self.lock:
                 self.connected = True
                 self.last_frame = now()
-            while not self.stop.is_set() and not self.retired.is_set():
+            while not self.cancelled():
                 self.handle(ws.recv(), now())
         finally:
             ws.close()
-            self.socket = None
 
     def run(self):
         delay = RECONNECT_MIN
-        while not self.stop.is_set() and not self.retired.is_set():
+        while not self.cancelled():
             started = now()
             try:
                 self.run_once()
+            except Retired:
+                break
             except Exception as ex:
                 self.lost(str(ex) or ex.__class__.__name__)
-            if self.stop.is_set() or self.retired.is_set():
+            if self.cancelled():
                 break
             self.reconnects += 1
             delay = (
@@ -392,18 +460,24 @@ class RfqStream:
         self.lost("Durduruldu")
 
     def retire(self):
+        """Ask the worker to stop. Only a flag: the worker closes its own socket within
+        POLL_SECONDS (or after the frame it is reading). Never touches the socket."""
         self.retired.set()
-        ws = self.socket
-        if ws is not None:
-            try:
-                ws.close()
-            except OSError:
-                pass
         self.lost("İzleme sırasından çıktı")
 
+    def join(self, timeout=None):
+        t = self.thread
+        if t is not None:
+            t.join(timeout)
+        return t is None or not t.is_alive()
+
     def start(self):
+        if self.retired.is_set():
+            raise RuntimeError("Emekli RFQ akışı yeniden başlatılamaz")
         if self.thread is None or not self.thread.is_alive():
-            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread = threading.Thread(
+                target=self.run, daemon=True, name="rfq-" + self.market
+            )
             self.thread.start()
 
     def view(self, at=None, max_age=VIEW_MAX_AGE):

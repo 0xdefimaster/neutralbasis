@@ -76,6 +76,20 @@ class ReasonCodeTests(unittest.TestCase):
             ("RFQ_STREAM_UNAVAILABLE", "DATA"),
         )
 
+    def test_rfq_book_waiting_for_its_first_snapshot_is_warming_not_other(self):
+        for text in (
+            "Extended INJ: RFQ defteri kullanılamıyor: RFQ defteri yeni snapshot bekliyor",
+            "RFQ akışı bağlı değil; giriş yok (RFQ defteri yeni snapshot bekliyor)",
+            "Bağlantı koptu; yeni snapshot bekleniyor (RFQ)",
+        ):
+            self.assertEqual(zero_trade.code_of(text), ("RFQ_STREAM_WARMING", "DATA"))
+        self.assertEqual(zero_trade.CATEGORY["RFQ_STREAM_WARMING"], "DATA")
+        # A silent or dropped stream is still unavailable, not warming.
+        self.assertEqual(
+            zero_trade.code_of("RFQ akışı sessiz; defter güncel sayılmaz")[0],
+            "RFQ_STREAM_UNAVAILABLE",
+        )
+
     def test_rfq_429_is_rate_limited(self):
         self.assertEqual(
             zero_trade.code_of("RFQ akışı bağlı değil; WebSocket 429 Too Many Requests"),
