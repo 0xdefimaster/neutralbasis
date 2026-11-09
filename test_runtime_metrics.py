@@ -93,6 +93,29 @@ class StageClockTests(unittest.TestCase):
         self.assertIsNone(e.runtime_metrics()["store_lock"])
 
 
+class StageLabelTests(unittest.TestCase):
+    def test_every_cycle_stage_label_is_set_in_exactly_one_place(self):
+        # A label reused in two code regions merges their durations (labels v1 did
+        # this with "Tamamlandı"). Scan the engine sources for stage assignments.
+        import re
+
+        here = os.path.dirname(os.path.abspath(bot.__file__))
+        seen = {}
+        for name in ("bot.py", "risk_scan.py", "desk_analytics.py", "wide_paper.py"):
+            with open(os.path.join(here, name), encoding="utf8") as f:
+                for i, line in enumerate(f, 1):
+                    m = re.search(r'self\.stage\s*=\s*"([^"]+)"', line)
+                    if m:
+                        seen.setdefault(m.group(1), []).append(f"{name}:{i}")
+        dup = {k: v for k, v in seen.items() if len(v) > 1}
+        self.assertEqual(dup, {})
+        self.assertNotIn("Tamamlandı", seen)
+        self.assertIn("RFQ defter seçimi", seen)
+
+    def test_report_carries_the_label_version(self):
+        self.assertEqual(StageClock().report()["stage_labels_version"], 2)
+
+
 class StallDumpTests(unittest.TestCase):
     def tearDown(self):
         runtime_metrics.disarm_stall_dump()

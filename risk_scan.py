@@ -1048,7 +1048,9 @@ class RiskEngine(Engine):
                 if fresh["eligible"] and self.running:
                     self.open({**c, **fresh})
             self.last_cycle = now()
-            self.stage = "Tamamlandı"
+            # Unique label: the time until the next mark is the persist (a kv write
+            # under the store lock), not "done".
+            self.stage = "Risk taraması kaydediliyor"
             self.persist()
         except Exception as ex:
             self.error = str(ex)

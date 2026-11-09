@@ -11,6 +11,11 @@
 import collections, faulthandler, os, sys, threading, time
 
 SAMPLES = 4000
+# Version of the cycle stage labels. 1 (commit 4c8daa4): "Tamamlandı" was set both at
+# the end of the risk scan (then its persist ran under that label) and at the end of the
+# desk cycle, and the RFQ book selection had no label. 2: every label marks one code
+# region. Durations under different versions must not be compared stage by stage.
+STAGE_LABELS_VERSION = 2
 SLOW_SECONDS = 1.0
 STALL_SECONDS = 300
 # The open file faulthandler writes stall dumps to; set by risk_main.enable_crash_log.
@@ -161,6 +166,7 @@ class StageClock:
             for name, d in c["stages"]:
                 per[name].append(d)
         return dict(
+            stage_labels_version=STAGE_LABELS_VERSION,
             cycles=len(cycles),
             cycle_seconds=summary([c["seconds"] for c in cycles]),
             stages={k: summary(v) for k, v in per.items()},

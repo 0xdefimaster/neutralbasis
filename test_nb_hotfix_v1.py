@@ -70,11 +70,25 @@ class ReasonCodeTests(unittest.TestCase):
             ("ORDERBOOK_DESYNC", "DATA"),
         )
 
-    def test_rfq_stream_missing(self):
-        self.assertEqual(
-            zero_trade.code_of("RFQ akışı bu piyasa için başlatılmadı"),
-            ("RFQ_STREAM_UNAVAILABLE", "DATA"),
-        )
+    def test_rfq_stream_not_started_is_not_subscribed(self):
+        # Outside the stream limit: no book subscribed, nothing failed.
+        for text in (
+            "RFQ akışı bu piyasa için başlatılmadı",
+            "Extended ARB: defter okunamadı — RFQ akışı bu piyasa için başlatılmadı",
+        ):
+            self.assertEqual(
+                zero_trade.code_of(text), ("RFQ_STREAM_NOT_SUBSCRIBED", "DATA")
+            )
+
+    def test_failed_rfq_stream_stays_unavailable(self):
+        for text in (
+            "Extended ETHFI: defter okunamadı — RFQ akışı sessiz; defter güncel sayılmaz",
+            "RFQ akışı bağlı değil; giriş yok (Sunucu WebSocket bağlantısını kapattı)",
+            "RFQ akışı bağlı değil; giriş yok (İzleme sırasından çıktı)",
+        ):
+            self.assertEqual(
+                zero_trade.code_of(text), ("RFQ_STREAM_UNAVAILABLE", "DATA")
+            )
 
     def test_rfq_book_waiting_for_its_first_snapshot_is_warming_not_other(self):
         for text in (
@@ -98,7 +112,9 @@ class ReasonCodeTests(unittest.TestCase):
 
     def test_new_codes_aggregate_as_data(self):
         # Verifies that CAT categories also understand the new return codes.
-        for code in ("ORDERBOOK_DESYNC", "RFQ_STREAM_UNAVAILABLE", "API_RATE_LIMIT"):
+        for code in ("ORDERBOOK_DESYNC", "RFQ_STREAM_UNAVAILABLE", "API_RATE_LIMIT",
+                     "RFQ_STREAM_NOT_SUBSCRIBED", "RFQ_STREAM_WARMING",
+                     "VENUE_CIRCUIT_OPEN"):
             self.assertEqual(zero_trade.CATEGORY[code], "DATA")
 
 

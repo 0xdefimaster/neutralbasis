@@ -806,11 +806,12 @@ class DeskEngine(RiskEngine):
         self.wide_paper.latency_ms = self.cfg["latency_ms"]
         self.wide_paper.extra_slippage = self.cfg["extra_slippage_bps"] / 10000
         if self.rfq_live:
+            self.stage = "RFQ defter seçimi"
             self.rfq.sync(self.select_rfq_books())
         self.stage = "Birleşik ekonomi ve paper yürütme"
         self.wide_paper.cycle(entries=self.running)
         self.last_cycle = self.wide_paper.last_cycle
-        self.stage = "Tamamlandı"
+        self.stage = "Masa döngüsü tamamlandı"
 
     def select_rfq_books(self, at=None):
         """The Extended RFQ markets whose real book is streamed this cycle."""

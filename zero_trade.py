@@ -90,7 +90,8 @@ RULES = (
 CATEGORY = {code: cat for code, cat, _ in RULES}
 CATEGORY.update(OTHER="OTHER", NO_COMMON_INSTRUMENT="DATA", COST_EXCEEDS_EDGE="ECONOMIC")
 CATEGORY.update(ORDERBOOK_DESYNC="DATA", RFQ_STREAM_UNAVAILABLE="DATA", API_RATE_LIMIT="DATA",
-                RFQ_STREAM_WARMING="DATA", VENUE_CIRCUIT_OPEN="DATA")
+                RFQ_STREAM_WARMING="DATA", VENUE_CIRCUIT_OPEN="DATA",
+                RFQ_STREAM_NOT_SUBSCRIBED="DATA")
 
 VERDICTS = dict(
     NO_OPPORTUNITY="Şu anda geçerli fırsat yok.",
@@ -132,6 +133,10 @@ def code_of(reason):
     # a warming book, not a broken one. It was counted as OTHER before.
     if "rfq" in t and "snapshot bekl" in t:
         return "RFQ_STREAM_WARMING", "DATA"
+    # No stream was started for this market (outside the stream limit): nothing is
+    # broken, the book is simply not subscribed. Distinct from a failed stream.
+    if "rfq" in t and ("başlatılmadı" in t or "baslatilmadi" in t):
+        return "RFQ_STREAM_NOT_SUBSCRIBED", "DATA"
     if "rfq" in t and any(x in t for x in (
         "akışı", "akisi", "başlat", "baslat", "sessiz", "bağlı değil", "bagli degil"
     )):
