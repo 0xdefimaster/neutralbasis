@@ -53,6 +53,11 @@ class RingBufferTests(unittest.TestCase):
         self.assertEqual(book_state(dict(connected=True, ready=False))["state"], "warming")
         self.assertEqual(book_state(dict(connected=True, ready=True, age=999))["state"],
                          "stale")
+        # Liveness (F5): a quiet book on a pinging link is ready; a dead link is not.
+        quiet = dict(connected=True, ready=True, age=40.0, alive_age=1.0)
+        self.assertEqual(book_state(quiet)["state"], "ready")
+        self.assertEqual(book_state(dict(quiet, alive_age=6.0))["state"], "stale")
+        self.assertEqual(book_state(dict(quiet, age=91.0))["state"], "stale")
 
     def test_paging_and_size_limit(self):
         t = RfqTrace()

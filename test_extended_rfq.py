@@ -128,6 +128,7 @@ class RfqStreamTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             s.view(T0 + extended_rfq.VIEW_MAX_AGE + 1)
 
+
     def test_run_reconnects_and_records(self):
         stop = threading.Event()
         rounds = []
@@ -175,6 +176,86 @@ class RfqStreamTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.book("BTW")
 
+
+class RfqLivenessTests(unittest.TestCase):
+    """F5 (2026-11-10). Public probe of Extended's RFQ stream: pings every ~1.35 s, data
+    frames up to 53.5 s apart on a quiet book. Freshness used to look only at data
+    frames, so a live quiet book was refused as stale or desynced. MOCK frames below;
+    the timings mirror the measured ones."""
+
+    def setUp(self):
+        self.clock = T0
+        p = mock.patch.object(extended_rfq, "now", lambda: self.clock)
+        p.start()
+        self.addCleanup(p.stop)
+        self.s = RfqStream("BTW-USD")
+        self.s.connected = True
+        self.s.handle(json.dumps(msg("SNAPSHOT", 1, [(10, 5)], [(11, 3)])), T0)
+
+    def ping(self, t):
+        self.clock = t
+        self.s.mark_alive()
+
+    def test_quiet_book_on_a_pinging_link_is_current(self):
+        last = T0
+        for k in range(1, 41):  # 54 s of pings, no data frame
+            last = T0 + k * 1.35
+            self.ping(last)
+        v = self.s.view(last + 1)
+        self.assertEqual(v["asks"], [(11, 3)])
+        self.assertEqual(v["received"], last)  # proven current by the last ping
+        self.assertEqual(v["data_received"], T0)
+        self.assertEqual(v["changed"], T0)  # the book itself last changed at T0
+        st = self.s.status(last + 1)
+        self.assertAlmostEqual(st["alive_age"], 1)
+        self.assertAlmostEqual(st["age"], last + 1 - T0)
+
+    def test_no_ping_means_not_current(self):
+        self.s.view(T0 + extended_rfq.ALIVE_MAX_AGE)
+        with self.assertRaises(ValueError) as e:
+            self.s.view(T0 + extended_rfq.ALIVE_MAX_AGE + 0.1)
+        self.assertIn("canlılığı", str(e.exception))
+
+    def test_data_silence_beyond_limit_is_refused_even_with_pings(self):
+        t = T0 + extended_rfq.VIEW_MAX_AGE + 1
+        self.ping(t)
+        with self.assertRaises(ValueError) as e:
+            self.s.view(t)
+        self.assertIn("güncel sayılmaz", str(e.exception))
+
+    def test_sequence_gap_drops_the_book_despite_pings(self):
+        with self.assertRaises(ConnectionError):
+            self.s.handle(json.dumps(msg("DELTA", 3, [(10, 1)])), T0 + 2)
+        self.ping(T0 + 3)
+        with self.assertRaises(ValueError):
+            self.s.view(T0 + 3)
+
+    def test_disconnected_stream_is_refused_despite_recent_ping(self):
+        self.ping(T0 + 1)
+        self.s.lost("koptu")
+        with self.assertRaises(ValueError) as e:
+            self.s.view(T0 + 1)
+        self.assertIn("bağlı değil", str(e.exception))
+
+    def test_a_data_frame_also_proves_liveness(self):
+        self.s.handle(json.dumps(msg("DELTA", 2, [(10, 1)])), T0 + 4)
+        v = self.s.view(T0 + 8)
+        self.assertEqual((v["received"], v["data_received"]), (T0 + 4, T0 + 4))
+
+    def test_two_quiet_legs_pass_the_engine_sync_rule(self):
+        # wide_paper: |received_l - received_s| <= 5 and now - min(...) <= 30.
+        other = RfqStream("ETH-USD")
+        other.connected = True
+        other.handle(json.dumps(msg("SNAPSHOT", 1, [(10, 5)], [(11, 3)], "ETH-USD")), T0 + 20)
+        self.ping(T0 + 40.3)
+        self.clock = T0 + 41.0
+        other.mark_alive()
+        at = T0 + 41.5
+        a, b = self.s.view(at), other.view(at)
+        self.assertLessEqual(abs(a["received"] - b["received"]), 5)
+        self.assertLessEqual(at - min(a["received"], b["received"]), 30)
+        # Before F5 the same books looked 20 s apart and 41.5 s old (data frames only).
+        self.assertGreater(abs(a["data_received"] - b["data_received"]), 5)
 
 class WebSocketTests(unittest.TestCase):
     def test_handshake_ping_and_text_frames(self):
@@ -426,6 +507,34 @@ class RfqLifecycleTests(unittest.TestCase):
         self.assertTrue(s.join(3))
         with self.assertRaises(ValueError):
             s.view()
+
+    def test_server_pings_keep_a_quiet_book_current(self):
+        # F5: the real open() path wires WebSocket pings to RfqStream.mark_alive. The
+        # MOCK server sends one snapshot, then only pings (like a quiet Extended book).
+        pinged = threading.Event()
+
+        def script(c):
+            c.sendall(ws_frame(0x1, json.dumps(msg("SNAPSHOT", 1, [(10, 5)], [(11, 3)])).encode()))
+            for _ in range(8):
+                time.sleep(0.1)
+                c.sendall(ws_frame(0x9, b"hb"))
+            pinged.set()
+
+        server = LocalWsServer(script)
+        self.addCleanup(server.close)
+        with mock.patch.object(extended_rfq, "STREAM", f"ws://127.0.0.1:{server.port}/"):
+            s = RfqStream("BTW-USD")
+            s.start()
+            self.assertTrue(self.wait(lambda: s.book.ready))
+            self.assertTrue(pinged.wait(5))
+            self.assertTrue(self.wait(lambda: s.last_alive - s.last_frame > 0.5))
+            v = s.view()
+            self.assertGreater(v["received"], v["data_received"])
+            s.retire()
+            self.assertTrue(s.join(3))
+        server.thread.join(5)
+        # Every ping was answered with a pong by the worker, then the close frame.
+        self.assertEqual(server.log[0]["opcodes"], [0xA] * 8 + [0x8])
 
     def test_retire_during_connect_never_reads_and_closes_in_worker(self):
         release, opened = threading.Event(), threading.Event()

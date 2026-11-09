@@ -264,7 +264,7 @@ class RfqTrace:
 # Stored book states are compact tuples in this field order (trailing unknowns are
 # dropped); `connected`/`ready` are implied by `state`.
 BOOK_FIELDS = ("state", "seq", "age", "gaps", "reconnects", "snapshots",
-               "subscribed_at", "first_snapshot_at")
+               "subscribed_at", "first_snapshot_at", "alive_age")
 
 
 def _scalar(v):
@@ -293,7 +293,16 @@ def book_state(status):
     else:
         import extended_rfq
 
+        # Same rule as RfqStream.view: a live link (any frame) and a recent data frame.
         age = status.get("age")
-        state = "stale" if age is None or age > extended_rfq.VIEW_MAX_AGE else "ready"
+        alive = status.get("alive_age")
+        alive = age if alive is None else (alive if age is None else min(age, alive))
+        state = (
+            "stale"
+            if age is None
+            or age > extended_rfq.VIEW_MAX_AGE
+            or alive > extended_rfq.ALIVE_MAX_AGE
+            else "ready"
+        )
     extra = ("connected", "ready") + BOOK_FIELDS[1:]
     return dict(state=state, **{k: status.get(k) for k in extra if k in status})

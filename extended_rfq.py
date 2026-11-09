@@ -35,8 +35,13 @@ FLUSH_SECONDS = 1.0
 FLUSH_ROWS = 2000
 # Expired messages are deleted in id windows of this size, one short lock hold each.
 PRUNE_ROWS = 5000
-# Book views older than this (since the last frame of a live connection) are refused.
-VIEW_MAX_AGE = 30
+# A book is current while its connection is proven alive: frames (data or ping) arrive in
+# order on one socket, so after a ping every earlier change has been applied. Measured
+# on Extended (2026-11-10): pings every ~1.35 s, data frames up to 53.5 s apart on a
+# quiet book, periodic SNAPSHOTs. A view needs a frame (any kind) within ALIVE_MAX_AGE
+# and a data frame within VIEW_MAX_AGE (the stream must still be delivering its book).
+ALIVE_MAX_AGE = 5
+VIEW_MAX_AGE = 90
 WAITING = "RFQ defteri yeni snapshot bekliyor"
 # At most this many RFQ books are streamed (held legs always are, even beyond it).
 STREAM_LIMIT = 12
@@ -153,10 +158,12 @@ class WebSocket:
     state. A blocked read wakes up every `poll` seconds to ask `cancelled()`; silence
     longer than `timeout` is a lost connection."""
 
-    def __init__(self, url, timeout=SILENT_AFTER, poll=None, cancelled=None):
+    def __init__(self, url, timeout=SILENT_AFTER, poll=None, cancelled=None, alive=None):
         self.owner = threading.get_ident()
         self.silent_after = timeout
         self.cancelled = cancelled or (lambda: False)
+        # Called (in this owner thread) on every ping/pong: proof the link is alive.
+        self.alive = alive
         u = urllib.parse.urlsplit(url)
         host = u.hostname
         port = u.port or (443 if u.scheme == "wss" else 80)
@@ -257,8 +264,12 @@ class WebSocket:
                 payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
             if opcode == 0x9:
                 self.send(0xA, payload)
+                if self.alive is not None:
+                    self.alive()
                 continue
             if opcode == 0xA:
+                if self.alive is not None:
+                    self.alive()
                 continue
             if opcode == 0x8:
                 raise ConnectionError("Sunucu WebSocket bağlantısını kapattı")
@@ -397,6 +408,8 @@ class RfqStream:
         self.lock = threading.RLock()
         self.connected = False
         self.last_frame = None
+        # Last frame of any kind (data or ping) on the live connection.
+        self.last_alive = None
         self.reconnects = 0
         self.error = None
         self.thread = None
@@ -422,6 +435,7 @@ class RfqStream:
             self.recorder.record(self.market, msg, text, received)
         with self.lock:
             self.last_frame = received
+            self.last_alive = received
             if msg.get("error"):
                 self.error = str(msg["error"])
             was_ready = self.book.ready
@@ -444,11 +458,17 @@ class RfqStream:
             kind = "gap" if "boşluğu" in str(reason) else "lost"
             self.note(kind, error=reason)
 
+    def mark_alive(self):
+        """A ping or pong arrived (called in the worker that owns the socket)."""
+        with self.lock:
+            self.last_alive = now()
+
     def open(self):
         url = STREAM + urllib.parse.quote(self.market)
         if self.connect is WebSocket:
             return WebSocket(
-                url, timeout=SILENT_AFTER, poll=POLL_SECONDS, cancelled=self.cancelled
+                url, timeout=SILENT_AFTER, poll=POLL_SECONDS, cancelled=self.cancelled,
+                alive=self.mark_alive,
             )
         return self.connect(url)
 
@@ -459,6 +479,7 @@ class RfqStream:
             with self.lock:
                 self.connected = True
                 self.last_frame = now()
+                self.last_alive = self.last_frame
             self.note("connected")
             while not self.cancelled():
                 self.handle(ws.recv(), now())
@@ -520,6 +541,9 @@ class RfqStream:
                 )
             if not b.ready:
                 raise ValueError(b.reason or WAITING)
+            alive = max(self.last_alive or 0, self.last_frame or 0) or None
+            if alive is None or at - alive > ALIVE_MAX_AGE:
+                raise ValueError("RFQ akışı sessiz; bağlantı canlılığı doğrulanmadı")
             if self.last_frame is None or at - self.last_frame > max_age:
                 raise ValueError("RFQ akışı sessiz; defter güncel sayılmaz")
             bids, asks = b.levels()
@@ -532,7 +556,10 @@ class RfqStream:
                 ask_levels=[dict(l) for l in asks],
                 seq=b.seq,
                 exchange_ts=b.exchange_ts,
-                received=self.last_frame,
+                # When the book was last proven current (live link, no sequence gap);
+                # the time of its last change stays in `changed`.
+                received=alive,
+                data_received=self.last_frame,
                 changed=b.received,
                 audit_id=None,
             )
@@ -549,6 +576,7 @@ class RfqStream:
                 seq=b.seq,
                 exchange_ts=b.exchange_ts,
                 age=None if self.last_frame is None else at - self.last_frame,
+                alive_age=None if self.last_alive is None else at - self.last_alive,
                 bid_levels=len(bids),
                 ask_levels=len(asks),
                 best_bid=bids[0]["price"] if bids else None,
