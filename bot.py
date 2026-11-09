@@ -70,6 +70,22 @@ def number(v):
     return n
 
 
+def optional_number(v):
+    """An optional numeric field (volume, open interest): missing, empty or unreadable
+    stays None (UNKNOWN), never 0, and never stops the market or the venue."""
+    if v is None or v == "":
+        return None
+    try:
+        return number(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# A market whose required fields cannot be read is skipped on its own; these are the
+# errors that mean "this market's row is malformed", not "the venue is down".
+MARKET_PARSE_ERRORS = (KeyError, TypeError, ValueError, AttributeError, ZeroDivisionError)
+
+
 def stamp(t):
     n = number(t)
     return n / 1000 if n > 1e11 else n
@@ -238,6 +254,74 @@ class Feed:
         self.rwa_funding_attempted = {}
         self.rwa_funding_lock = threading.Lock()
         self.rwa_funding_busy = False
+        # {venue: {market: why it was skipped}} from the last listing.
+        self.market_errors = {}
+
+    @staticmethod
+    def parse_market(v, d, info):
+        """One market of a Lighter RH (orderBookDetails) or Extended (info/markets)
+        listing; None when it is not a tradable perp. Required fields raise; optional
+        ones (volume, open interest) stay None when missing.
+
+        Lighter RH `open_interest_usd` is used only when the venue sends it. Its
+        `open_interest` is in base units and is not converted: the unit and the price
+        to convert with are not verified, so open interest stays UNKNOWN."""
+        if v == "Lighter":
+            if (
+                d.get("status") != "active"
+                or d.get("market_type") != "perp"
+                or d.get("is_frozen")
+                or (d.get("market_config") or {}).get("force_reduce_only")
+            ):
+                return None
+            return dict(
+                venue=v,
+                asset=d["symbol"],
+                id=d["market_id"],
+                mark=number(d["mark_price"]),
+                index=number(d["index_price"]),
+                step=10 ** (-int(d["supported_size_decimals"])),
+                minimum=number(d["min_base_amount"]),
+                min_quote=number(d["min_quote_amount"]),
+                max_leverage=10000 / number(d["default_initial_margin_fraction"]),
+                mm=number(d["maintenance_margin_fraction"]) / 10000,
+                rfq=False,
+                interval=3600,
+                volume=optional_number(d.get("daily_quote_token_volume")),
+                oi=optional_number(d.get("open_interest_usd")),
+                rate=None,
+                rate_ts=None,
+                next=hour(now()) + 3600,
+            )
+        if (
+            not d.get("active")
+            or d.get("status") != "ACTIVE"
+            or d.get("type") != "PERPETUAL"
+        ):
+            return None
+        s = d["marketStats"]
+        c = d["tradingConfig"]
+        return dict(
+            venue=v,
+            asset=d["assetName"],
+            id=d["name"],
+            mark=number(s["markPrice"]),
+            index=number(s["indexPrice"]),
+            step=number(c["minOrderSizeChange"]),
+            minimum=number(c["minOrderSize"]),
+            min_quote=0,
+            max_leverage=number(c["maxLeverage"]),
+            mm=0.025,
+            rfq=d.get("isRfq", False),
+            category=d.get("category"),
+            interval=3600,
+            rate=number(s["fundingRate"]),
+            rate_ts=info["received"],
+            next=stamp(s["nextFundingRate"]),
+            max_order=number(c["maxMarketOrderValue"]),
+            volume=optional_number(s.get("dailyVolume")),
+            oi=optional_number(s.get("openInterest")),
+        )
 
     def get(self, url, max_age=None):
         begin = now()
@@ -273,73 +357,31 @@ class Feed:
             obj, info = self.get(url, 60)
             result = {}
             marks = []
-            for d in obj["order_book_details"] if v == "Lighter" else obj["data"]:
-                if v == "Lighter":
-                    if (
-                        d.get("status") != "active"
-                        or d.get("market_type") != "perp"
-                        or d.get("is_frozen")
-                        or d.get("market_config", {}).get("force_reduce_only")
-                    ):
-                        continue
-                    asset = d["symbol"]
-                    m = dict(
-                        venue=v,
-                        asset=asset,
-                        id=d["market_id"],
-                        mark=number(d["mark_price"]),
-                        index=number(d["index_price"]),
-                        step=10 ** (-int(d["supported_size_decimals"])),
-                        minimum=number(d["min_base_amount"]),
-                        min_quote=number(d["min_quote_amount"]),
-                        max_leverage=10000
-                        / number(d["default_initial_margin_fraction"]),
-                        mm=number(d["maintenance_margin_fraction"]) / 10000,
-                        rfq=False,
-                        interval=3600,
-                        volume=number(d.get("daily_quote_token_volume")),
-                        oi=number(d.get("open_interest_usd")),
-                        rate=None,
-                        rate_ts=None,
-                        next=hour(now()) + 3600,
-                    )
-                else:
-                    if (
-                        not d.get("active")
-                        or d.get("status") != "ACTIVE"
-                        or d.get("type") != "PERPETUAL"
-                    ):
-                        continue
-                    asset = d["assetName"]
-                    s = d["marketStats"]
-                    c = d["tradingConfig"]
-                    m = dict(
-                        venue=v,
-                        asset=asset,
-                        id=d["name"],
-                        mark=number(s["markPrice"]),
-                        index=number(s["indexPrice"]),
-                        step=number(c["minOrderSizeChange"]),
-                        minimum=number(c["minOrderSize"]),
-                        min_quote=0,
-                        max_leverage=number(c["maxLeverage"]),
-                        mm=0.025,
-                        rfq=d.get("isRfq", False),
-                        category=d.get("category"),
-                        interval=3600,
-                        rate=number(s["fundingRate"]),
-                        rate_ts=info["received"],
-                        next=stamp(s["nextFundingRate"]),
-                        max_order=number(c["maxMarketOrderValue"]),
-                        volume=number(s.get("dailyVolume")),
-                        oi=number(s.get("openInterest")),
-                    )
-                if m["mark"] <= 0 or m["index"] <= 0:
+            skipped = {}
+            for i, d in enumerate(
+                obj["order_book_details"] if v == "Lighter" else obj["data"]
+            ):
+                name = (d.get("symbol") if v == "Lighter" else d.get("assetName")) or (
+                    "#%d" % i
+                )
+                try:
+                    m = self.parse_market(v, d, info)
+                except MARKET_PARSE_ERRORS as ex:
+                    # One malformed market never takes the whole venue down.
+                    skipped[name] = "%s: %s" % (type(ex).__name__, str(ex)[:120])
+                    continue
+                if m is None or m["mark"] <= 0 or m["index"] <= 0:
                     continue
                 m.update(info)
-                result[asset] = m
-                marks.append((v, asset, info["received"],
+                result[m["asset"]] = m
+                marks.append((v, m["asset"], info["received"],
                               m["index"] if v == "Lighter" else m["mark"]))
+            self.__dict__.setdefault("market_errors", {})[v] = skipped
+            if not result and skipped:
+                raise ValueError(
+                    "%s: hiçbir piyasa ayrıştırılamadı (%d hatalı piyasa; ilk: %s)"
+                    % (v, len(skipped), next(iter(skipped.values())))
+                )
             if hasattr(self.store, "marks"):
                 self.store.marks(marks)
             else:
@@ -354,10 +396,17 @@ class Feed:
                 try:
                     key, value = f.result()
                     result[key] = value
+                    skipped = self.__dict__.get("market_errors", {}).get(key) or {}
                     self.status[key] = dict(
                         ok=True,
                         ts=now(),
-                        message="Salt okunur piyasa verisi erişilebilir",
+                        message="Salt okunur piyasa verisi erişilebilir"
+                        + (
+                            "; %d piyasa ayrıştırılamadı ve atlandı" % len(skipped)
+                            if skipped
+                            else ""
+                        ),
+                        skipped_markets=len(skipped),
                     )
                 except Exception as ex:
                     self.status[v] = dict(ok=False, ts=now(), message=str(ex))

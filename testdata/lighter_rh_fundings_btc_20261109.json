@@ -1,0 +1,59 @@
+{
+ "_source": "https://api.rh.lighter.xyz/api/v1/fundings?market_id=1&resolution=1h (BTC)",
+ "_recorded_at": "2026-11-09T16:59Z",
+ "_note": "Recorded real public response (Lighter RH BTC fundings), trimmed to the last 8 of 750 hourly records; records unmodified.",
+ "response": {
+  "code": 200,
+  "resolution": "1h",
+  "fundings": [
+   {
+    "timestamp": 1794214800,
+    "value": "0.89473800",
+    "rate": "0.0012",
+    "direction": "long"
+   },
+   {
+    "timestamp": 1794218400,
+    "value": "0.89145240",
+    "rate": "0.0012",
+    "direction": "long"
+   },
+   {
+    "timestamp": 1794222000,
+    "value": "0.88987560",
+    "rate": "0.0012",
+    "direction": "long"
+   },
+   {
+    "timestamp": 1794225600,
+    "value": "0.89245080",
+    "rate": "0.0012",
+    "direction": "long"
+   },
+   {
+    "timestamp": 1794229200,
+    "value": "0.89900280",
+    "rate": "0.0012",
+    "direction": "long"
+   },
+   {
+    "timestamp": 1794232800,
+    "value": "0.89665320",
+    "rate": "0.0012",
+    "direction": "long"
+   },
+   {
+    "timestamp": 1794236400,
+    "value": "0.89875080",
+    "rate": "0.0012",
+    "direction": "long"
+   },
+   {
+    "timestamp": 1794240000,
+    "value": "0.90633120",
+    "rate": "0.0012",
+    "direction": "long"
+   }
+  ]
+ }
+}

@@ -1,0 +1,1189 @@
+{
+ "_source": "https://api.starknet.extended.exchange/api/v1/info/markets",
+ "_recorded_at": "2026-11-09T19:25Z",
+ "_note": "Recorded real public response (Extended), trimmed to 4 of 419 markets; market records unmodified.",
+ "response": {
+  "status": "OK",
+  "data": [
+   {
+    "name": "ENA-USD",
+    "type": "PERPETUAL",
+    "uiName": "ENA-USD",
+    "category": "Crypto",
+    "subCategory": "DeFi",
+    "assetName": "ENA",
+    "assetPrecision": 0,
+    "collateralAssetName": "USD",
+    "collateralAssetPrecision": 6,
+    "description": "Ethena",
+    "active": true,
+    "isRfq": false,
+    "isOffHours": false,
+    "status": "ACTIVE",
+    "tradingHours": "CONTINUOUS",
+    "marketStats": {
+     "dailyVolume": "1369143.383400",
+     "dailyVolumeBase": "9126760",
+     "dailyPriceChange": "0.00116",
+     "dailyPriceChangePercentage": "0.0075",
+     "dailyLow": "0.14425",
+     "dailyHigh": "0.15731",
+     "lastPrice": "0.15512",
+     "askPrice": "0.15508",
+     "bidPrice": "0.15506",
+     "markPrice": "0.154948327737",
+     "indexPrice": "0.155075680474",
+     "fundingRate": "0.000013",
+     "nextFundingRate": 1794254400000,
+     "openInterest": "614217.052478",
+     "openInterestBase": "3960656",
+     "deleverageLevels": {
+      "shortPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "-3173.5722"
+       },
+       {
+        "level": 2,
+        "rankingLowerBound": "-6.7088"
+       },
+       {
+        "level": 3,
+        "rankingLowerBound": "-0.0094"
+       },
+       {
+        "level": 4,
+        "rankingLowerBound": "0.0000"
+       }
+      ],
+      "longPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "-4542.4706"
+       },
+       {
+        "level": 2,
+        "rankingLowerBound": "-14.4136"
+       },
+       {
+        "level": 3,
+        "rankingLowerBound": "-0.0508"
+       },
+       {
+        "level": 4,
+        "rankingLowerBound": "0.0000"
+       }
+      ]
+     }
+    },
+    "tradingConfig": {
+     "minOrderSize": "100",
+     "minOrderSizeChange": "10",
+     "minPriceChange": "0.00001",
+     "maxMarketOrderValue": "500000",
+     "maxLimitOrderValue": "2500000",
+     "maxPositionValue": "7000000",
+     "maxLeverage": "50.00",
+     "hourlyFundingRateCap": "0.5",
+     "openInterestLimit": "0",
+     "maxNumOrders": "200",
+     "limitPriceCap": "0.1",
+     "limitPriceFloor": "0.1",
+     "riskFactorConfig": [
+      {
+       "upperBound": "500000",
+       "riskFactor": "0.02",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "1000000",
+       "riskFactor": "0.04",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "1500000",
+       "riskFactor": "0.06",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "2000000",
+       "riskFactor": "0.08",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "2500000",
+       "riskFactor": "0.1",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "3000000",
+       "riskFactor": "0.12",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "3500000",
+       "riskFactor": "0.14",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "4000000",
+       "riskFactor": "0.16",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "4500000",
+       "riskFactor": "0.18",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "5000000",
+       "riskFactor": "0.2",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "5500000",
+       "riskFactor": "0.22",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "6000000",
+       "riskFactor": "0.24",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "6500000",
+       "riskFactor": "0.26",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "7000000",
+       "riskFactor": "0.28",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "7500000",
+       "riskFactor": "0.3",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "8000000",
+       "riskFactor": "0.32",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "8500000",
+       "riskFactor": "0.34",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "9000000",
+       "riskFactor": "0.36",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "9500000",
+       "riskFactor": "0.38",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "10000000",
+       "riskFactor": "0.4",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "10500000",
+       "riskFactor": "0.42",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "11000000",
+       "riskFactor": "0.44",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "11500000",
+       "riskFactor": "0.46",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "12000000",
+       "riskFactor": "0.48",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "12500000",
+       "riskFactor": "0.5",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "13000000",
+       "riskFactor": "0.52",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "13500000",
+       "riskFactor": "0.54",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "14000000",
+       "riskFactor": "0.56",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "14500000",
+       "riskFactor": "0.58",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "15000000",
+       "riskFactor": "0.6",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "15500000",
+       "riskFactor": "0.62",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "16000000",
+       "riskFactor": "0.64",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "16500000",
+       "riskFactor": "0.66",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "17000000",
+       "riskFactor": "0.68",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "17500000",
+       "riskFactor": "0.7",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "18000000",
+       "riskFactor": "0.72",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "18500000",
+       "riskFactor": "0.74",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "19000000",
+       "riskFactor": "0.76",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "19500000",
+       "riskFactor": "0.78",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "20000000",
+       "riskFactor": "0.8",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "20500000",
+       "riskFactor": "0.82",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "21000000",
+       "riskFactor": "0.84",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "21500000",
+       "riskFactor": "0.86",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "22000000",
+       "riskFactor": "0.88",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "22500000",
+       "riskFactor": "0.9",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "23000000",
+       "riskFactor": "0.92",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "23500000",
+       "riskFactor": "0.94",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "24000000",
+       "riskFactor": "0.96",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "24500000",
+       "riskFactor": "0.98",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "25000000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "1000000000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      }
+     ],
+     "uPnlWithdrawable": false,
+     "postWithdrawalMarginFactor": "0"
+    },
+    "l2Config": {
+     "type": "STARKX",
+     "collateralId": "0x1",
+     "syntheticId": "0x454e412d3000000000000000000000",
+     "syntheticResolution": 1,
+     "collateralResolution": 1000000
+    },
+    "visibleOnUi": true,
+    "referenceMarket": "null",
+    "createdAt": 1752829532673
+   },
+   {
+    "name": "BTC-USD",
+    "type": "PERPETUAL",
+    "uiName": "BTC-USD",
+    "category": "Crypto",
+    "subCategory": "L1",
+    "assetName": "BTC",
+    "assetPrecision": 5,
+    "collateralAssetName": "USD",
+    "collateralAssetPrecision": 6,
+    "description": "Bitcoin",
+    "active": true,
+    "isRfq": false,
+    "isOffHours": false,
+    "status": "ACTIVE",
+    "tradingHours": "CONTINUOUS",
+    "marketStats": {
+     "dailyVolume": "59493814.043780",
+     "dailyVolumeBase": "797.37596",
+     "dailyPriceChange": "-1153",
+     "dailyPriceChangePercentage": "-0.0152",
+     "dailyLow": "73391",
+     "dailyHigh": "75828",
+     "lastPrice": "74622",
+     "askPrice": "74623",
+     "bidPrice": "74622",
+     "markPrice": "74585.404244249992",
+     "indexPrice": "74610.525196000002",
+     "fundingRate": "0.000013",
+     "nextFundingRate": 1794254400000,
+     "openInterest": "34008325.237625",
+     "openInterestBase": "457.45049",
+     "deleverageLevels": {
+      "shortPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "-133.0684"
+       },
+       {
+        "level": 2,
+        "rankingLowerBound": "-0.0002"
+       },
+       {
+        "level": 3,
+        "rankingLowerBound": "0.0004"
+       },
+       {
+        "level": 4,
+        "rankingLowerBound": "0.0033"
+       }
+      ],
+      "longPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "-57534.4213"
+       },
+       {
+        "level": 2,
+        "rankingLowerBound": "-2.1738"
+       },
+       {
+        "level": 3,
+        "rankingLowerBound": "-0.1044"
+       },
+       {
+        "level": 4,
+        "rankingLowerBound": "-0.0006"
+       }
+      ]
+     }
+    },
+    "tradingConfig": {
+     "minOrderSize": "0.0001",
+     "minOrderSizeChange": "0.00001",
+     "minPriceChange": "1",
+     "maxMarketOrderValue": "3000000",
+     "maxLimitOrderValue": "15000000",
+     "maxPositionValue": "60000000",
+     "maxLeverage": "50.00",
+     "hourlyFundingRateCap": "0.25",
+     "openInterestLimit": "0",
+     "maxNumOrders": "200",
+     "limitPriceCap": "0.05",
+     "limitPriceFloor": "0.05",
+     "riskFactorConfig": [
+      {
+       "upperBound": "4000000",
+       "riskFactor": "0.02",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "8000000",
+       "riskFactor": "0.04",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "12000000",
+       "riskFactor": "0.06",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "16000000",
+       "riskFactor": "0.08",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "20000000",
+       "riskFactor": "0.1",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "24000000",
+       "riskFactor": "0.12",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "28000000",
+       "riskFactor": "0.14",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "32000000",
+       "riskFactor": "0.16",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "36000000",
+       "riskFactor": "0.18",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "40000000",
+       "riskFactor": "0.2",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "44000000",
+       "riskFactor": "0.22",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "48000000",
+       "riskFactor": "0.24",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "52000000",
+       "riskFactor": "0.26",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "56000000",
+       "riskFactor": "0.28",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "60000000",
+       "riskFactor": "0.3",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "64000000",
+       "riskFactor": "0.32",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "68000000",
+       "riskFactor": "0.34",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "72000000",
+       "riskFactor": "0.36",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "76000000",
+       "riskFactor": "0.38",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "80000000",
+       "riskFactor": "0.4",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "84000000",
+       "riskFactor": "0.42",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "88000000",
+       "riskFactor": "0.44",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "92000000",
+       "riskFactor": "0.46",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "96000000",
+       "riskFactor": "0.48",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "100000000",
+       "riskFactor": "0.5",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "104000000",
+       "riskFactor": "0.52",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "108000000",
+       "riskFactor": "0.54",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "112000000",
+       "riskFactor": "0.56",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "116000000",
+       "riskFactor": "0.58",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "120000000",
+       "riskFactor": "0.6",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "124000000",
+       "riskFactor": "0.62",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "128000000",
+       "riskFactor": "0.64",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "132000000",
+       "riskFactor": "0.66",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "136000000",
+       "riskFactor": "0.68",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "140000000",
+       "riskFactor": "0.7",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "144000000",
+       "riskFactor": "0.72",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "148000000",
+       "riskFactor": "0.74",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "152000000",
+       "riskFactor": "0.76",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "156000000",
+       "riskFactor": "0.78",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "160000000",
+       "riskFactor": "0.8",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "164000000",
+       "riskFactor": "0.82",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "168000000",
+       "riskFactor": "0.84",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "172000000",
+       "riskFactor": "0.86",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "176000000",
+       "riskFactor": "0.88",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "180000000",
+       "riskFactor": "0.9",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "184000000",
+       "riskFactor": "0.92",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "188000000",
+       "riskFactor": "0.94",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "192000000",
+       "riskFactor": "0.96",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "196000000",
+       "riskFactor": "0.98",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "200000000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "1000000000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      }
+     ],
+     "uPnlWithdrawable": true,
+     "postWithdrawalMarginFactor": "0.1"
+    },
+    "l2Config": {
+     "type": "STARKX",
+     "collateralId": "0x1",
+     "syntheticId": "0x4254432d3600000000000000000000",
+     "syntheticResolution": 1000000,
+     "collateralResolution": 1000000
+    },
+    "visibleOnUi": true,
+    "referenceMarket": "null",
+    "createdAt": 1752829532673
+   },
+   {
+    "name": "ETH-USD",
+    "type": "PERPETUAL",
+    "uiName": "ETH-USD",
+    "category": "Crypto",
+    "subCategory": "L1",
+    "assetName": "ETH",
+    "assetPrecision": 3,
+    "collateralAssetName": "USD",
+    "collateralAssetPrecision": 6,
+    "description": "Ethereum",
+    "active": true,
+    "isRfq": false,
+    "isOffHours": false,
+    "status": "ACTIVE",
+    "tradingHours": "CONTINUOUS",
+    "marketStats": {
+     "dailyVolume": "59626357.848054",
+     "dailyVolumeBase": "28057.350",
+     "dailyPriceChange": "-107.9",
+     "dailyPriceChangePercentage": "-0.0484",
+     "dailyLow": "2061.0",
+     "dailyHigh": "2229.8",
+     "lastPrice": "2121.9",
+     "askPrice": "2121.7",
+     "bidPrice": "2121.6",
+     "markPrice": "2121.17720735",
+     "indexPrice": "2122.0062487",
+     "fundingRate": "0.000013",
+     "nextFundingRate": 1794254400000,
+     "openInterest": "17243104.897886",
+     "openInterestBase": "8131.928",
+     "deleverageLevels": {
+      "shortPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "-298.1793"
+       },
+       {
+        "level": 2,
+        "rankingLowerBound": "-0.0065"
+       },
+       {
+        "level": 3,
+        "rankingLowerBound": "0.0002"
+       },
+       {
+        "level": 4,
+        "rankingLowerBound": "0.0036"
+       }
+      ],
+      "longPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "-194735.8961"
+       },
+       {
+        "level": 2,
+        "rankingLowerBound": "-9.1291"
+       },
+       {
+        "level": 3,
+        "rankingLowerBound": "-0.1742"
+       },
+       {
+        "level": 4,
+        "rankingLowerBound": "-0.0003"
+       }
+      ]
+     }
+    },
+    "tradingConfig": {
+     "minOrderSize": "0.01",
+     "minOrderSizeChange": "0.001",
+     "minPriceChange": "0.1",
+     "maxMarketOrderValue": "3000000",
+     "maxLimitOrderValue": "15000000",
+     "maxPositionValue": "60000000",
+     "maxLeverage": "50.00",
+     "hourlyFundingRateCap": "0.25",
+     "openInterestLimit": "0",
+     "maxNumOrders": "200",
+     "limitPriceCap": "0.05",
+     "limitPriceFloor": "0.05",
+     "riskFactorConfig": [
+      {
+       "upperBound": "4000000",
+       "riskFactor": "0.02",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "8000000",
+       "riskFactor": "0.04",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "12000000",
+       "riskFactor": "0.06",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "16000000",
+       "riskFactor": "0.08",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "20000000",
+       "riskFactor": "0.1",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "24000000",
+       "riskFactor": "0.12",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "28000000",
+       "riskFactor": "0.14",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "32000000",
+       "riskFactor": "0.16",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "36000000",
+       "riskFactor": "0.18",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "40000000",
+       "riskFactor": "0.2",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "44000000",
+       "riskFactor": "0.22",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "48000000",
+       "riskFactor": "0.24",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "52000000",
+       "riskFactor": "0.26",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "56000000",
+       "riskFactor": "0.28",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "60000000",
+       "riskFactor": "0.3",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "64000000",
+       "riskFactor": "0.32",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "68000000",
+       "riskFactor": "0.34",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "72000000",
+       "riskFactor": "0.36",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "76000000",
+       "riskFactor": "0.38",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "80000000",
+       "riskFactor": "0.4",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "84000000",
+       "riskFactor": "0.42",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "88000000",
+       "riskFactor": "0.44",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "92000000",
+       "riskFactor": "0.46",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "96000000",
+       "riskFactor": "0.48",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "100000000",
+       "riskFactor": "0.5",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "104000000",
+       "riskFactor": "0.52",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "108000000",
+       "riskFactor": "0.54",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "112000000",
+       "riskFactor": "0.56",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "116000000",
+       "riskFactor": "0.58",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "120000000",
+       "riskFactor": "0.6",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "124000000",
+       "riskFactor": "0.62",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "128000000",
+       "riskFactor": "0.64",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "132000000",
+       "riskFactor": "0.66",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "136000000",
+       "riskFactor": "0.68",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "140000000",
+       "riskFactor": "0.7",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "144000000",
+       "riskFactor": "0.72",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "148000000",
+       "riskFactor": "0.74",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "152000000",
+       "riskFactor": "0.76",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "156000000",
+       "riskFactor": "0.78",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "160000000",
+       "riskFactor": "0.8",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "164000000",
+       "riskFactor": "0.82",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "168000000",
+       "riskFactor": "0.84",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "172000000",
+       "riskFactor": "0.86",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "176000000",
+       "riskFactor": "0.88",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "180000000",
+       "riskFactor": "0.9",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "184000000",
+       "riskFactor": "0.92",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "188000000",
+       "riskFactor": "0.94",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "192000000",
+       "riskFactor": "0.96",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "196000000",
+       "riskFactor": "0.98",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "200000000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "1000000000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      }
+     ],
+     "uPnlWithdrawable": true,
+     "postWithdrawalMarginFactor": "0.1"
+    },
+    "l2Config": {
+     "type": "STARKX",
+     "collateralId": "0x1",
+     "syntheticId": "0x4554482d3400000000000000000000",
+     "syntheticResolution": 10000,
+     "collateralResolution": 1000000
+    },
+    "visibleOnUi": true,
+    "referenceMarket": "null",
+    "createdAt": 1752829532673
+   },
+   {
+    "name": "AIA-USD",
+    "type": "PERPETUAL",
+    "uiName": "AIA-USD",
+    "category": "Crypto",
+    "subCategory": "AI",
+    "assetName": "AIA",
+    "assetPrecision": 0,
+    "collateralAssetName": "USD",
+    "collateralAssetPrecision": 6,
+    "description": "DeAgentAI",
+    "active": true,
+    "isRfq": true,
+    "isOffHours": false,
+    "status": "ACTIVE",
+    "tradingHours": "CONTINUOUS",
+    "marketStats": {
+     "dailyVolume": "481096.125900",
+     "dailyVolumeBase": "8192780",
+     "dailyPriceChange": "0.005223",
+     "dailyPriceChangePercentage": "0.0947",
+     "dailyLow": "0.055135",
+     "dailyHigh": "0.060764",
+     "lastPrice": "0.060358",
+     "askPrice": "0.060418",
+     "bidPrice": "0.060358",
+     "markPrice": "0.06031199",
+     "indexPrice": "0.06023874",
+     "fundingRate": "0.000013",
+     "nextFundingRate": 1794254400000,
+     "openInterest": "13614.945904",
+     "openInterestBase": "225340",
+     "deleverageLevels": {
+      "shortPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "0.0000"
+       }
+      ],
+      "longPositions": [
+       {
+        "level": 1,
+        "rankingLowerBound": "-2900.3867"
+       },
+       {
+        "level": 2,
+        "rankingLowerBound": "-9.1882"
+       },
+       {
+        "level": 3,
+        "rankingLowerBound": "0.0000"
+       }
+      ]
+     }
+    },
+    "tradingConfig": {
+     "minOrderSize": "100",
+     "minOrderSizeChange": "10",
+     "minPriceChange": "0.000001",
+     "maxMarketOrderValue": "50000",
+     "maxLimitOrderValue": "200000",
+     "maxPositionValue": "250000",
+     "maxLeverage": "5.00",
+     "hourlyFundingRateCap": "1",
+     "openInterestLimit": "500000",
+     "maxNumOrders": "200",
+     "limitPriceCap": "0.1",
+     "limitPriceFloor": "0.1",
+     "riskFactorConfig": [
+      {
+       "upperBound": "250000",
+       "riskFactor": "0.2",
+       "isAvailableForUsers": true
+      },
+      {
+       "upperBound": "500000",
+       "riskFactor": "0.4",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "750000",
+       "riskFactor": "0.6",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "1000000",
+       "riskFactor": "0.8",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "1250000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      },
+      {
+       "upperBound": "1000000000",
+       "riskFactor": "1",
+       "isAvailableForUsers": false
+      }
+     ],
+     "uPnlWithdrawable": false,
+     "postWithdrawalMarginFactor": "0"
+    },
+    "l2Config": {
+     "type": "STARKX",
+     "collateralId": "0x1",
+     "syntheticId": "0x4149412d3000000000000000000000",
+     "syntheticResolution": 1,
+     "collateralResolution": 1000000
+    },
+    "visibleOnUi": true,
+    "referenceMarket": "null",
+    "createdAt": 1784639596147
+   }
+  ]
+ }
+}
