@@ -53,6 +53,10 @@ FUNDING_UNVERIFIED_AFTER = 3600
 FILL_TOLERANCE = 0.001
 L = "https://mainnet.zklighter.elliot.ai/api/v1/"
 E = "https://api.starknet.extended.exchange/api/v1/"
+# Published funding schedule of the native venues: both settle a discrete payment every
+# hour (capabilities.FUNDING_MODELS) and neither market API carries the interval. The
+# capability registry still checks it per market against the settled payments' gaps.
+FUNDING_INTERVAL = dict(Lighter=3600, Extended=3600)
 
 
 def now():
@@ -304,6 +308,7 @@ class Feed:
                     )
                 if m["mark"] <= 0 or m["index"] <= 0:
                     continue
+                m["interval"] = FUNDING_INTERVAL[v]
                 m.update(info)
                 result[asset] = m
                 self.store.mark(

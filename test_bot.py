@@ -408,5 +408,80 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(bot.first_at(db, "t", "ts", 30), 0)
 
 
+class NativeFeedIntervalTests(unittest.TestCase):
+    """The Lighter and Extended market APIs carry no funding interval; the feed must
+    attach the venues' published hourly schedule or every native row is left out of the
+    paper desk as "Funding aralığı yok" and no Lighter/Extended pair is ever ranked."""
+
+    def test_native_rows_reach_the_desk_with_their_hourly_schedule(self):
+        import types, connectors, wide_paper
+
+        lighter = dict(
+            order_book_details=[
+                dict(
+                    status="active",
+                    market_type="perp",
+                    symbol="BTC",
+                    market_id=1,
+                    mark_price="100000",
+                    index_price="99990",
+                    supported_size_decimals=4,
+                    min_base_amount="0.0001",
+                    min_quote_amount="10",
+                    default_initial_margin_fraction=200,
+                    maintenance_margin_fraction=100,
+                )
+            ]
+        )
+        extended = dict(
+            data=[
+                dict(
+                    active=True,
+                    status="ACTIVE",
+                    type="PERPETUAL",
+                    category="Crypto",
+                    assetName="BTC",
+                    name="BTC-USD",
+                    marketStats=dict(
+                        markPrice="100050",
+                        indexPrice="100000",
+                        fundingRate="0.0001",
+                        nextFundingRate=int((bot.now() + 1800) * 1000),
+                    ),
+                    tradingConfig=dict(
+                        minOrderSizeChange="0.0001",
+                        minOrderSize="0.0001",
+                        maxLeverage="50",
+                        maxMarketOrderValue="1000000",
+                    ),
+                )
+            ]
+        )
+        store = types.SimpleNamespace(mark=lambda *a: None)
+        feed = bot.Feed(store)
+
+        def get(url, max_age=None):
+            obj = lighter if url.startswith(bot.L) else extended
+            return obj, dict(audit_id=1, received=bot.now(), http_age=0)
+
+        with patch.object(feed, "get", get):
+            meta = feed.markets()
+        self.assertEqual(meta["Lighter"]["BTC"]["interval"], 3600)
+        self.assertEqual(meta["Extended"]["BTC"]["interval"], 3600)
+        # Lighter's rate comes from its last settled payment.
+        meta["Lighter"]["BTC"]["rate"] = -0.0001
+        engine = types.SimpleNamespace(feed=feed, fee=lambda v: 0.0002)
+        rows = [
+            s.row
+            for v in ("Lighter", "Extended")
+            for s in connectors.NativeConnector(engine, v).markets()
+        ]
+        why = {}
+        groups = wide_paper.usable_rows(rows, bot.now(), why)
+        self.assertEqual(why, {})
+        self.assertEqual(set(groups["BTC"]), {"Lighter", "Extended"})
+        self.assertTrue(all(r["raw_rate"] is not None for r in rows))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

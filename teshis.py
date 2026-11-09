@@ -47,29 +47,58 @@ def main():
 
     print("== Motor ==")
     print("  Otomatik giriş (running):", s.get("running"))
-    print("  wide_enabled:", cfg.get("wide_enabled"),
-          "· funding:", cfg.get("wide_funding_enabled"),
-          "· yakınsama:", cfg.get("wide_conv_enabled"))
-    print("  Son tur:", ago(w.get("last_cycle")), "· tur süresi:", w.get("cycle_seconds"))
+    print(
+        "  wide_enabled:",
+        cfg.get("wide_enabled"),
+        "· funding:",
+        cfg.get("wide_funding_enabled"),
+        "· yakınsama:",
+        cfg.get("wide_conv_enabled"),
+    )
+    print(
+        "  Son tur:", ago(w.get("last_cycle")), "· tur süresi:", w.get("cycle_seconds")
+    )
     if w.get("error"):
         print("  HATA:", w["error"])
-    print("  Açık pozisyon:", len(w.get("positions") or []),
-          "· kapanmış:", len(w.get("closed") or []))
+    print(
+        "  Açık pozisyon:",
+        len(w.get("positions") or []),
+        "· kapanmış:",
+        len(w.get("closed") or []),
+    )
     ws = w.get("workspace") or {}
     if ws:
-        print("  Çalışma alanı borsaları:", ", ".join(ws.get("venues") or []) or "-",
-              "· kapalı:", ", ".join(ws.get("disabled") or []) or "-")
+        print(
+            "  Çalışma alanı borsaları:",
+            ", ".join(ws.get("venues") or []) or "-",
+            "· kapalı:",
+            ", ".join(ws.get("disabled") or []) or "-",
+        )
 
     f = w.get("funnel") or {}
     print("\n== Huni ==")
-    print("  Perp piyasa:", f.get("markets"), "· kullanılabilir:", f.get("usable"),
-          "· çift:", f.get("pairs"))
+    print(
+        "  Perp piyasa:",
+        f.get("markets"),
+        "· kullanılabilir:",
+        f.get("usable"),
+        "· çift:",
+        f.get("pairs"),
+    )
     for reason, k in (f.get("excluded") or {}).items():
         print("    dışarıda %4d  %s" % (k, reason))
     for key, x in (f.get("strategies") or {}).items():
-        print("  [%s] aday %s · pozitif %s · araştırmada (kapı) %s · derin kontrol %s · bekleyen %s"
-              % (key, x.get("candidates"), x.get("positive"), x.get("research"),
-                 x.get("checked"), x.get("waiting")))
+        print(
+            "  [%s] aday %s · pozitif %s · araştırmada (kapı) %s · derin kontrol %s · bekleyen %s"
+            % (
+                key,
+                x.get("candidates"),
+                x.get("positive"),
+                x.get("research"),
+                x.get("checked"),
+                x.get("waiting"),
+            )
+        )
         print("    son tur:", x.get("round"))
 
     # Kapı (capability gate) nedenleri: ilk 40 adayda, bacak bazında.
@@ -90,9 +119,16 @@ def main():
 
     rv = w.get("review") or {}
     print("\n== Derin kontrol ==")
-    print("  tur %s · incelenen %s · uygun %s · atlanan %s · açılan %s"
-          % (rv.get("rounds"), rv.get("examined"), rv.get("eligible"),
-             rv.get("skipped"), rv.get("opened")))
+    print(
+        "  tur %s · incelenen %s · uygun %s · atlanan %s · açılan %s"
+        % (
+            rv.get("rounds"),
+            rv.get("examined"),
+            rv.get("eligible"),
+            rv.get("skipped"),
+            rv.get("opened"),
+        )
+    )
     print("  Red nedenleri (toplam):")
     top(collections.Counter(rv.get("reasons") or {}), 12)
 
@@ -105,13 +141,23 @@ def main():
             continue
         b = x.get("blocked") or {}
         print("  %-12s funding: %s" % (v, ", ".join(b.get("funding") or []) or "OK"))
-        print("  %-12s yakınsama: %s" % ("", ", ".join(b.get("convergence") or []) or "OK"))
+        print(
+            "  %-12s yakınsama: %s"
+            % ("", ", ".join(b.get("convergence") or []) or "OK")
+        )
 
     h = s.get("history_status") or {}
     print("\n== Geçmiş kaydedici ==")
-    print("  öncelikli %s (eksik %s) · piyasa %s · tam %s · hatalı %s"
-          % (h.get("priority"), h.get("priority_missing"), h.get("markets"),
-             h.get("complete"), h.get("failed")))
+    print(
+        "  öncelikli %s (eksik %s) · piyasa %s · tam %s · hatalı %s"
+        % (
+            h.get("priority"),
+            h.get("priority_missing"),
+            h.get("markets"),
+            h.get("complete"),
+            h.get("failed"),
+        )
+    )
 
 
 if __name__ == "__main__":
