@@ -386,8 +386,10 @@ class RfqRecorder:
 class RfqStream:
     """Keeps one market's real RFQ book from its stream, reconnecting on loss."""
 
-    def __init__(self, market, recorder=None, connect=WebSocket, stop=None):
+    def __init__(self, market, recorder=None, connect=WebSocket, stop=None, trace=None,
+                 asset=None):
         self.market = market
+        self.asset = asset or market
         self.book = RfqBook(market)
         self.recorder = recorder
         self.connect = connect
@@ -399,6 +401,16 @@ class RfqStream:
         self.error = None
         self.thread = None
         self.retired = threading.Event()
+        # Observation only (rfq_trace.RfqTrace or None); never touches the socket.
+        self.trace = trace
+        self.subscribed_at = None
+        self.first_snapshot_at = None
+
+    def note(self, kind, **fields):
+        # Observation only; a failure is counted by the trace, never raised here.
+        if self.trace is not None:
+            self.trace.guard(self.trace.event, kind, self.asset, market=self.market,
+                             **fields)
 
     def cancelled(self):
         return self.stop.is_set() or self.retired.is_set()
@@ -412,13 +424,25 @@ class RfqStream:
             self.last_frame = received
             if msg.get("error"):
                 self.error = str(msg["error"])
-            return self.book.apply(msg, received)
+            was_ready = self.book.ready
+            changed = self.book.apply(msg, received)
+            became_ready = not was_ready and self.book.ready
+            if became_ready and self.first_snapshot_at is None:
+                self.first_snapshot_at = received
+            seq, ts = self.book.seq, self.book.exchange_ts
+        if became_ready:
+            # First valid snapshot after (re)connecting: the book is usable from here.
+            self.note("first_snapshot", at=received, seq=seq, exchange_ts=ts)
+        return changed
 
     def lost(self, reason):
         with self.lock:
             self.connected = False
             self.error = reason
             self.book.invalidate("Bağlantı koptu; yeni snapshot bekleniyor")
+        if not self.retired.is_set():
+            kind = "gap" if "boşluğu" in str(reason) else "lost"
+            self.note(kind, error=reason)
 
     def open(self):
         url = STREAM + urllib.parse.quote(self.market)
@@ -435,6 +459,7 @@ class RfqStream:
             with self.lock:
                 self.connected = True
                 self.last_frame = now()
+            self.note("connected")
             while not self.cancelled():
                 self.handle(ws.recv(), now())
         finally:
@@ -475,6 +500,8 @@ class RfqStream:
         if self.retired.is_set():
             raise RuntimeError("Emekli RFQ akışı yeniden başlatılamaz")
         if self.thread is None or not self.thread.is_alive():
+            if self.subscribed_at is None:
+                self.subscribed_at = now()
             self.thread = threading.Thread(
                 target=self.run, daemon=True, name="rfq-" + self.market
             )
@@ -531,18 +558,21 @@ class RfqStream:
                 reconnects=self.reconnects,
                 reason=b.reason,
                 error=self.error,
+                subscribed_at=self.subscribed_at,
+                first_snapshot_at=self.first_snapshot_at,
             )
 
 
 class ExtendedRfq:
     """One stream per Extended RFQ market; started for markets the feed marks RFQ."""
 
-    def __init__(self, store, stop=None, connect=WebSocket):
+    def __init__(self, store, stop=None, connect=WebSocket, trace=None):
         self.recorder = RfqRecorder(store)
         self.stop = stop or threading.Event()
         self.connect = connect
         self.streams = {}
         self.lock = threading.RLock()
+        self.trace = trace
 
     def sync(self, meta):
         """Keep exactly the requested books; retire unused subscriptions."""
@@ -558,7 +588,8 @@ class ExtendedRfq:
         with self.lock:
             s = self.streams.get(asset)
             if s is None:
-                s = RfqStream(market, self.recorder, self.connect, self.stop)
+                s = RfqStream(market, self.recorder, self.connect, self.stop,
+                              trace=getattr(self, "trace", None), asset=asset)
                 self.streams[asset] = s
             s.start()
             return s

@@ -1868,6 +1868,28 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 return self.send(engine.why_no_trade())
             if self.path == "/api/runtime-metrics" and hasattr(engine, "runtime_metrics"):
                 return self.send(engine.runtime_metrics())
+            if (
+                self.path == "/api/rfq-trace" or self.path.startswith("/api/rfq-trace?")
+            ) and getattr(engine, "rfq_trace", None) is not None:
+                # Observation data: loopback clients only, read-only, paged, size-bound.
+                if self.client_address[0] not in ("127.0.0.1", "::1"):
+                    return self.send({"error": "Yalnızca yerel erişim"}, 403)
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+
+                def arg(name, default):
+                    try:
+                        return max(0, int(q.get(name, [default])[0]))
+                    except (TypeError, ValueError):
+                        return default
+
+                return self.send(
+                    engine.rfq_trace.page(
+                        since_cycle=arg("since_cycle", 0),
+                        since_event=arg("since_event", 0),
+                        cycles=arg("cycles", 20) or 1,
+                        events=arg("events", 1000) or 1,
+                    )
+                )
             if self.path == "/api/capabilities" and hasattr(
                 engine, "capability_registry"
             ):

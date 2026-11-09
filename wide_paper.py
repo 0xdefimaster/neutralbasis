@@ -3387,20 +3387,43 @@ class WidePaper:
                 self.review["rounds"] += 1
                 self.round = {}
                 top = self.cfg["wide_deep_top"]
-                for ranked in (self.candidates, self.conv_candidates):
+                trace = self.__dict__.get("rfq_trace")
+                tracing = trace is not None and trace.enabled
+                if tracing:
+                    # Observation only: every call is guarded and cannot raise here.
+                    def tnote(*args):
+                        trace.guard(trace.note_deep, *args)
+
+                    def tbook(c):
+                        return trace.guard(self.trace_book, c)
+
+                    trace.guard(trace.note_deep_ranking, at)
+                for strategy, ranked in (
+                    ("funding", self.candidates),
+                    ("convergence", self.conv_candidates),
+                ):
                     picked, counted = [], 0
-                    for c in ranked:
+                    for order, c in enumerate(ranked):
                         # Pairs still waiting for history fail fast and do not use up a
                         # deep-check slot; the total per round stays bounded.
                         if counted >= top or len(picked) >= top * 4:
+                            if tracing:
+                                tnote(strategy, order, c, "stop_quota", False, tbook(c))
                             break
                         if c.get("research"):
+                            if tracing:
+                                book = tbook(c)
+                                if book is not None:
+                                    tnote(strategy, order, c, "skip_research", False, book)
                             continue
                         down = self.leg_unavailable(c, at)
                         if down:
                             # The same leg failed for another pair: no slot is spent.
                             self.review["skipped"] += 1
                             diag.note(c, at, "skipped", [down], "pre_check")
+                            if tracing:
+                                tnote(strategy, order, c, "skip_leg_down", False,
+                                      tbook(c), [down])
                             continue
                         if (
                             self.blocked(c)
@@ -3410,14 +3433,25 @@ class WidePaper:
                             self.review["skipped"] += 1
                             if self.blocked(c):
                                 diag.note(c, at, "skipped", self.blocked(c), "pre_check")
+                            if tracing:
+                                trace.guard(self.trace_skip, trace, strategy, order, c,
+                                            picked)
                             continue
+                        book = tbook(c) if tracing else None
                         x = self.assess(c)
                         self.checked[self.pair_key(c)] = at
                         picked.append(x)
-                        if not any(
+                        consumed = not any(
                             reason_group(r) == "Geçmiş eksik" for r in x["reasons"]
-                        ):
+                        )
+                        if consumed:
                             counted += 1
+                        if tracing:
+                            tnote(
+                                strategy, order, c, "assessed", consumed, book,
+                                ["ELIGIBLE"] if x["eligible"] else
+                                [zero_trade.code_of(r)[0] for r in x["reasons"]],
+                            )
                     self.assessed += picked
                 for x in self.assessed:
                     self.note_review(x, at)
@@ -3821,6 +3855,32 @@ class WidePaper:
                 "ayrımdan etkilenmez."
             ),
         )
+
+    def trace_skip(self, trace, strategy, order, c, picked):
+        """Observation only: why the deep check skipped this pair without a slot."""
+        blocked = self.blocked(c)
+        if blocked:
+            action, why = "skip_blocked", list(blocked)
+        elif any(x["asset"] == c["asset"] for x in picked):
+            action, why = "skip_same_asset", []
+        else:
+            action = "skip_rejected_waiting"
+            why = [(self.rejected.get(self.pair_key(c)) or {}).get("group") or ""]
+        trace.note_deep(strategy, order, c, action, False, self.trace_book(c), why)
+
+    def trace_book(self, c):
+        """Observation only: the Extended RFQ book state of a pair's RFQ leg right now
+        (None for a pair without an RFQ leg). Reads the stream's status under the
+        stream's own lock; never touches its socket."""
+        if not (c.get("rfq_long") or c.get("rfq_short")):
+            return None
+        from rfq_trace import book_state
+
+        engine = getattr(self.source, "engine", None)
+        rfq = getattr(engine, "rfq", None)
+        streams = getattr(rfq, "streams", None) or {}
+        s = streams.get(c["asset"])
+        return book_state(s.status() if s is not None else None)
 
     @staticmethod
     def pair_key(c):

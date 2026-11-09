@@ -486,9 +486,15 @@ class DeskEngine(RiskEngine):
 
         self.pairs = PairViews(self)
         from extended_rfq import ExtendedRfq
+        import os
+        from rfq_trace import RfqTrace
 
+        # Observation of RFQ stream allocation and deep checks (memory only; off with
+        # NB_RFQ_TRACE=0). It never changes a decision.
+        self.rfq_trace = RfqTrace(enabled=os.environ.get("NB_RFQ_TRACE", "1") != "0")
         # Real RFQ books stream only once the engine loop runs (not in --once or tests).
-        self.rfq = ExtendedRfq(self.store, self.stop_event)
+        self.rfq = ExtendedRfq(self.store, self.stop_event, trace=self.rfq_trace)
+        self.wide_paper.rfq_trace = self.rfq_trace
         self.rfq_live = False
         from retention import Retention
 
@@ -801,17 +807,28 @@ class DeskEngine(RiskEngine):
         return dict(ok=True, message="Public veri analizi sıraya alındı.")
 
     def cycle(self):
-        super().cycle()
-        # Multi-venue desk: open positions are always monitored; entries only while running.
-        self.wide_paper.latency_ms = self.cfg["latency_ms"]
-        self.wide_paper.extra_slippage = self.cfg["extra_slippage_bps"] / 10000
-        if self.rfq_live:
-            self.stage = "RFQ defter seçimi"
-            self.rfq.sync(self.select_rfq_books())
-        self.stage = "Birleşik ekonomi ve paper yürütme"
-        self.wide_paper.cycle(entries=self.running)
-        self.last_cycle = self.wide_paper.last_cycle
-        self.stage = "Masa döngüsü tamamlandı"
+        trace = getattr(self, "rfq_trace", None)
+        if trace is not None:
+            trace.guard(trace.begin_cycle, now())
+        try:
+            super().cycle()
+            # Multi-venue desk: open positions are always monitored; entries only while running.
+            self.wide_paper.latency_ms = self.cfg["latency_ms"]
+            self.wide_paper.extra_slippage = self.cfg["extra_slippage_bps"] / 10000
+            if self.rfq_live:
+                self.stage = "RFQ defter seçimi"
+                self.rfq.sync(self.select_rfq_books())
+            self.stage = "Birleşik ekonomi ve paper yürütme"
+            self.wide_paper.cycle(entries=self.running)
+            self.last_cycle = self.wide_paper.last_cycle
+            self.stage = "Masa döngüsü tamamlandı"
+        finally:
+            if trace is not None and trace.enabled:
+                from rfq_trace import book_state
+
+                trace.guard(lambda: trace.end_cycle(
+                    {a: book_state(s) for a, s in self.rfq.status().items()}
+                ))
 
     def select_rfq_books(self, at=None):
         """The Extended RFQ markets whose real book is streamed this cycle."""
@@ -849,18 +866,53 @@ class DeskEngine(RiskEngine):
                            or self.wide_paper.blocked(c))
             return waiting, -c.get("score", 0)
 
-        ranked = []
-        for c in sorted(candidates, key=stream_priority):
+        # Each priority key is computed once and kept for the trace (sorted() is
+        # stable, so the order is the same as sorting by the key function).
+        keyed = sorted(((stream_priority(c), c) for c in candidates), key=lambda kc: kc[0])
+        ranked, ranked_keys = [], []
+        for key, c in keyed:
             if ("Extended" in (c["long"], c["short"]) and c["asset"] in rfq_meta
                     and c["asset"] not in ranked):
                 ranked.append(c["asset"])
+                ranked_keys.append((c["asset"], key))
         # Hysteresis: a just-started book keeps its slot until it had time to
         # receive a snapshot, instead of being retired by the next re-ranking.
         since = getattr(self, "rfq_since", {})
         chosen = choose_streams(ranked, held, since, at)
         rfq_meta = {a: m for a, m in rfq_meta.items() if a in chosen}
         self.rfq_since = {a: since.get(a, at) for a in rfq_meta}
+        trace = getattr(self, "rfq_trace", None)
+        if trace is not None and trace.enabled:
+            trace.guard(self.trace_allocation, trace, rfq_meta, ranked_keys, held, since,
+                        chosen, at)
         return rfq_meta
+
+    def trace_allocation(self, trace, rfq_meta, ranked_keys, held, since, chosen, at):
+        """Observation only: the candidate list the allocation used and its decision."""
+        from extended_rfq import STREAM_LIMIT
+        import zero_trade
+
+        wp = self.wide_paper
+        rows = []
+        for strategy, ranked in (("funding", wp.candidates), ("convergence", wp.conv_candidates)):
+            for i, c in enumerate(ranked):
+                if "Extended" not in (c["long"], c["short"]) or not (
+                    c.get("rfq_long") or c.get("rfq_short")
+                ):
+                    continue
+                waiting = wp.rejected.get(wp.pair_key(c))
+                blocked = wp.blocked(c)
+                rows.append((
+                    strategy, i, c, waiting,
+                    list(blocked) if isinstance(blocked, (list, tuple)) else
+                    ([str(blocked)] if blocked else []),
+                    [zero_trade.code_of(r)[0] for r in (c.get("research") or [])],
+                ))
+        trace.note_allocation(
+            ranking_at=getattr(wp, "last_cycle", None), candidates=rows,
+            ranked=ranked_keys, held=held, since=since, chosen=chosen, at=at,
+            cap=STREAM_LIMIT,
+        )
 
     def refresh_feed(self):
         """Network discovery runs independently of decisions and position monitoring."""
