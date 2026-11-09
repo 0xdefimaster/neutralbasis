@@ -5,7 +5,8 @@ Funding kesintisi sonrası tahmini değerleme kurtarması, yayımlanmayan fundin
 1. ZIP dosyasını bir klasöre çıkarın.
 2. Python 3.11 veya üzeri kurulu olmalı. İlk kullanımda Kurulum.cmd dosyasına çift tıklayın. İnternet üzerinden requirements.txt bağımlılıkları yüklenir.
 3. Baslat.cmd dosyasına çift tıklayın. Tarayıcıda http://127.0.0.1:8765/#price adresini açın.
-4. Durdur.cmd motoru kapatır. Paneldeki durdur düğmesi yalnızca yeni paper girişlerini durdurur; açık pozisyonlar izlenir.
+4. İşlem açılmıyorsa motor çalışırken Teshis.cmd dosyasına çift tıklayın: girişi engelleyen nedenleri (yetenek kapısı, red nedenleri, geçmiş durumu) özetler. Railway için: `python teshis.py https://<adres> <şifre>`.
+5. Durdur.cmd motoru kapatır. Paneldeki durdur düğmesi yalnızca yeni paper girişlerini durdurur; açık pozisyonlar izlenir.
 
 İlk geçmiş taraması birkaç dakika sürebilir. Klasörü motor çalışırken taşımayın. Aynı portta ikinci kopya başlatmayın.
 
