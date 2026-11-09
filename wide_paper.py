@@ -3397,7 +3397,7 @@ class WidePaper:
                     def tbook(c):
                         return trace.guard(self.trace_book, c)
 
-                    trace.guard(trace.note_deep_ranking, at)
+                    trace.guard(trace.note_deep_ranking, at, top)
                 for strategy, ranked in (
                     ("funding", self.candidates),
                     ("convergence", self.conv_candidates),

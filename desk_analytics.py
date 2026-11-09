@@ -879,17 +879,19 @@ class DeskEngine(RiskEngine):
         # receive a snapshot, instead of being retired by the next re-ranking.
         since = getattr(self, "rfq_since", {})
         chosen = choose_streams(ranked, held, since, at)
+        eligible = sorted(rfq_meta)
         rfq_meta = {a: m for a, m in rfq_meta.items() if a in chosen}
         self.rfq_since = {a: since.get(a, at) for a in rfq_meta}
         trace = getattr(self, "rfq_trace", None)
         if trace is not None and trace.enabled:
-            trace.guard(self.trace_allocation, trace, rfq_meta, ranked_keys, held, since,
+            trace.guard(self.trace_allocation, trace, eligible, ranked_keys, held, since,
                         chosen, at)
         return rfq_meta
 
-    def trace_allocation(self, trace, rfq_meta, ranked_keys, held, since, chosen, at):
-        """Observation only: the candidate list the allocation used and its decision."""
-        from extended_rfq import STREAM_LIMIT
+    def trace_allocation(self, trace, eligible, ranked_keys, held, since, chosen, at):
+        """Observation only: the candidate list the allocation used and its decision.
+        `eligible`: the RFQ markets the allocation could stream (before choosing)."""
+        from extended_rfq import STREAM_LIMIT, MIN_HOLD_SECONDS
         import zero_trade
 
         wp = self.wide_paper
@@ -911,7 +913,7 @@ class DeskEngine(RiskEngine):
         trace.note_allocation(
             ranking_at=getattr(wp, "last_cycle", None), candidates=rows,
             ranked=ranked_keys, held=held, since=since, chosen=chosen, at=at,
-            cap=STREAM_LIMIT,
+            cap=STREAM_LIMIT, eligible=eligible, hold=MIN_HOLD_SECONDS,
         )
 
     def refresh_feed(self):

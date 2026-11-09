@@ -66,7 +66,8 @@ class RingBufferTests(unittest.TestCase):
         self.assertEqual([c["cycle_id"] for c in p2["cycles"]], list(range(21, 31)))
         small = t.page(max_bytes=20_000)
         self.assertTrue(small["truncated"])
-        self.assertLessEqual(len(json.dumps(small)), 20_000)
+        sent = json.dumps(small, ensure_ascii=False, allow_nan=False).encode("utf8")
+        self.assertLessEqual(len(sent), 20_000)  # exactly what the endpoint sends
         self.assertEqual(small["mode"], "PAPER")
 
     def test_disabled_trace_records_nothing(self):

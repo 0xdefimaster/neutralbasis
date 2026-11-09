@@ -86,7 +86,7 @@ class RfqTrace:
             self.current = dict(
                 cycle_id=next(self._cycle_ids),
                 started_at=started_at if started_at is not None else self.clock(),
-                ranking_at=None, deep_ranking_at=None, rfq_candidates=[],
+                ranking_at=None, deep_ranking_at=None, deep_top=None, rfq_candidates=[],
                 allocation=None, deep_checks=[], streams=None, ended_at=None,
             )
             self._spent = time.perf_counter() - t0
@@ -96,7 +96,7 @@ class RfqTrace:
         return c["cycle_id"] if c else None
 
     def note_allocation(self, ranking_at, candidates, ranked, held, since, chosen, at,
-                        cap):
+                        cap, eligible=None, hold=None):
         """`candidates`: [(strategy, rank, candidate dict, waiting dict or None,
         blocked reasons, research codes)] for Extended-RFQ pairs, in ranking order.
         `ranked`: the assets in the priority order the allocation used, with the
@@ -134,7 +134,8 @@ class RfqTrace:
         dropped = {a: ("not_ranked" if a not in rank_order else "cap")
                    for a in prev - chosen}
         alloc = dict(
-            at=at, cap=cap,
+            at=at, cap=cap, hold=_num(hold),
+            eligible=None if eligible is None else sorted(_text(a) for a in eligible),
             ranked=[(_text(a), [bool(k[0]), _num(k[1])]) for a, k in ranked],
             held=sorted(_text(a) for a in held),
             since={_text(a): _num(t) for a, t in since.items()},
@@ -154,12 +155,13 @@ class RfqTrace:
         for a, r in dropped.items():
             self.event("retire", a, reason=r)
 
-    def note_deep_ranking(self, at):
+    def note_deep_ranking(self, at, top=None):
         if not self.enabled or self.current is None:
             return
         with self.lock:
             if self.current is not None:
                 self.current["deep_ranking_at"] = _num(at)
+                self.current["deep_top"] = _num(top)
 
     def note_deep(self, strategy, order, c, action, slot_consumed, rfq_book,
                   outcome=()):
@@ -235,16 +237,20 @@ class RfqTrace:
                        deep_checks=("strategy", "order", "asset", "long", "short",
                                     "action", "slot_consumed", "book", "outcome"),
                    ))
-        size = len(json.dumps(out, ensure_ascii=False, allow_nan=False))
+        def finish():
+            out["next_cycle"] = out["cycles"][-1]["cycle_id"] if out["cycles"] else since_cycle
+            out["next_event"] = out["events"][-1]["id"] if out["events"] else since_event
+            # The response is sent as UTF-8 bytes; measure exactly that.
+            return len(json.dumps(out, ensure_ascii=False, allow_nan=False).encode("utf8"))
+
+        size = finish()
         while size > max_bytes and (out["cycles"] or out["events"]):
             out["truncated"] = True
             if len(out["cycles"]) >= 1 and (len(out["cycles"]) > 1 or not out["events"]):
                 out["cycles"] = out["cycles"][:-1]
             else:
                 out["events"] = out["events"][: len(out["events"]) // 2]
-            size = len(json.dumps(out, ensure_ascii=False, allow_nan=False))
-        out["next_cycle"] = out["cycles"][-1]["cycle_id"] if out["cycles"] else since_cycle
-        out["next_event"] = out["events"][-1]["id"] if out["events"] else since_event
+            size = finish()
         return out
 
     def cost(self):
