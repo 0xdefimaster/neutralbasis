@@ -293,16 +293,15 @@ def book_state(status):
     else:
         import extended_rfq
 
-        # Same rule as RfqStream.view: a live link (any frame) and a recent data frame.
+        # Usable only with a recent DATA frame (RfqStream.view). A stale book on a link
+        # that still pings is told apart as "quiet" (diagnosis only; still unusable).
         age = status.get("age")
         alive = status.get("alive_age")
-        alive = age if alive is None else (alive if age is None else min(age, alive))
-        state = (
-            "stale"
-            if age is None
-            or age > extended_rfq.VIEW_MAX_AGE
-            or alive > extended_rfq.ALIVE_MAX_AGE
-            else "ready"
-        )
+        if age is not None and age <= extended_rfq.VIEW_MAX_AGE:
+            state = "ready"
+        elif alive is not None and alive <= extended_rfq.ALIVE_MAX_AGE:
+            state = "quiet"
+        else:
+            state = "stale"
     extra = ("connected", "ready") + BOOK_FIELDS[1:]
     return dict(state=state, **{k: status.get(k) for k in extra if k in status})

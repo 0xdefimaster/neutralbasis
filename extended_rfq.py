@@ -35,13 +35,14 @@ FLUSH_SECONDS = 1.0
 FLUSH_ROWS = 2000
 # Expired messages are deleted in id windows of this size, one short lock hold each.
 PRUNE_ROWS = 5000
-# A book is current while its connection is proven alive: frames (data or ping) arrive in
-# order on one socket, so after a ping every earlier change has been applied. Measured
-# on Extended (2026-11-10): pings every ~1.35 s, data frames up to 53.5 s apart on a
-# quiet book, periodic SNAPSHOTs. A view needs a frame (any kind) within ALIVE_MAX_AGE
-# and a data frame within VIEW_MAX_AGE (the stream must still be delivering its book).
+# Book views whose last DATA frame is older than this are refused. A ping proves only
+# that the connection is alive, never that the book is a current, executable price
+# (owner ruling 2026-11-10), so liveness is recorded for diagnosis (`alive_age`, trace
+# state "quiet") and does not make a book usable. Measured on Extended (2026-11-10):
+# pings every ~1.35 s, data frames up to 60 s apart on quiet books.
+VIEW_MAX_AGE = 30
+# A connection with a frame of any kind within this age counts as alive (diagnosis only).
 ALIVE_MAX_AGE = 5
-VIEW_MAX_AGE = 90
 WAITING = "RFQ defteri yeni snapshot bekliyor"
 # At most this many RFQ books are streamed (held legs always are, even beyond it).
 STREAM_LIMIT = 12
@@ -162,7 +163,8 @@ class WebSocket:
         self.owner = threading.get_ident()
         self.silent_after = timeout
         self.cancelled = cancelled or (lambda: False)
-        # Called (in this owner thread) on every ping/pong: proof the link is alive.
+        # Called (in this owner thread) on every ping/pong: the link is alive. Diagnosis
+        # only; never evidence that a book is current.
         self.alive = alive
         u = urllib.parse.urlsplit(url)
         host = u.hostname
@@ -541,9 +543,6 @@ class RfqStream:
                 )
             if not b.ready:
                 raise ValueError(b.reason or WAITING)
-            alive = max(self.last_alive or 0, self.last_frame or 0) or None
-            if alive is None or at - alive > ALIVE_MAX_AGE:
-                raise ValueError("RFQ akışı sessiz; bağlantı canlılığı doğrulanmadı")
             if self.last_frame is None or at - self.last_frame > max_age:
                 raise ValueError("RFQ akışı sessiz; defter güncel sayılmaz")
             bids, asks = b.levels()
@@ -556,10 +555,7 @@ class RfqStream:
                 ask_levels=[dict(l) for l in asks],
                 seq=b.seq,
                 exchange_ts=b.exchange_ts,
-                # When the book was last proven current (live link, no sequence gap);
-                # the time of its last change stays in `changed`.
-                received=alive,
-                data_received=self.last_frame,
+                received=self.last_frame,
                 changed=b.received,
                 audit_id=None,
             )
