@@ -3437,6 +3437,18 @@ class WidePaper:
                                 trace.guard(self.trace_skip, trace, strategy, order, c,
                                             picked)
                             continue
+                        unsubscribed = self.rfq_not_subscribed(c)
+                        if unsubscribed:
+                            # No stream was started for this RFQ market (outside the
+                            # stream limit): its book cannot be read, nothing about the
+                            # pair is measured, so it is set aside without a slot and
+                            # without a rejection wait.
+                            self.review["skipped"] += 1
+                            diag.note(c, at, "skipped", [unsubscribed], "pre_check")
+                            if tracing:
+                                tnote(strategy, order, c, "skip_not_subscribed", False,
+                                      tbook(c), ["RFQ_STREAM_NOT_SUBSCRIBED"])
+                            continue
                         book = tbook(c) if tracing else None
                         x = self.assess(c)
                         self.checked[self.pair_key(c)] = at
@@ -3855,6 +3867,19 @@ class WidePaper:
                 "ayrımdan etkilenmez."
             ),
         )
+
+    def rfq_not_subscribed(self, c):
+        """Why a pair with an Extended RFQ leg cannot be deep-checked now: the engine has
+        no stream for its market. None when the pair has no RFQ leg, when its stream
+        exists (a started but failing stream is still checked and rejected as before),
+        or when there is no stream registry to ask."""
+        if not (c.get("rfq_long") or c.get("rfq_short")):
+            return None
+        rfq = getattr(getattr(self.source, "engine", None), "rfq", None)
+        streams = getattr(rfq, "streams", None)
+        if not isinstance(streams, dict) or c["asset"] in streams:
+            return None
+        return "Extended %s: RFQ akışı bu piyasa için başlatılmadı" % c["asset"]
 
     def trace_skip(self, trace, strategy, order, c, picked):
         """Observation only: why the deep check skipped this pair without a slot."""
