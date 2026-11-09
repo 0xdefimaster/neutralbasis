@@ -282,6 +282,11 @@ EXECUTABLE_MODELS = (PERIODIC,)
 # applies to them.
 DOCS_UNREAD = "Bağlayıcı beyanı; borsa belgesi bu ortamdan okunamadı"
 LONG_PAYS = "Pozitif oran: long öder, short alır"
+RISEX_DOCS = (
+    "RISEx resmî API belgesi (developer.rise.trade): funding-channel \"longs pay "
+    "shorts\"; getfundingratehistory (SettleFundingRate, saatlik); general-information "
+    "(zaman damgaları nanosaniye)"
+)
 
 
 def _model(model, **kw):
@@ -329,7 +334,18 @@ FUNDING_MODELS = dict(
         cashflow="Masanın dönemsel ödeme modeliyle hesaplanamaz",
         note="Sürekli model uygulanana kadar yalnız araştırma",
     ),
-    RISEx=_model(UNKNOWN, note="Funding modeli bu masada belgelenmedi"),
+    # Read from the official API docs on 2026-11-09 and checked on public mainnet data
+    # (BTC, 29 consecutive settlements): one settlement an hour, and the market's
+    # accumulated funding grows by exactly funding_rate x index price each hour.
+    RISEx=_model(
+        PERIODIC,
+        price="Endeks fiyatı",
+        source=RISEX_DOCS,
+        note="Oran her saat SettleFundingRate ile uzlaşır; hesaptaki ödeme pozisyon "
+        "işlem gördüğünde yansır. Aralık ve yayımlanan/gerçekleşen oran her piyasada "
+        "ayrıca doğrulanır",
+        **HOURLY,
+    ),
     TxFlow=_model(UNKNOWN, note="Funding / tahakkuk modeli doğrulanmadı"),
     Arcus=_model(UNKNOWN, note="Funding modeli bu masada belgelenmedi"),
     Variational=_model(UNKNOWN, note="Bağlayıcı yok"),
@@ -404,6 +420,8 @@ class Registry:
         self.predictions = state.get("predictions", {})
         # {market: [keeper record time, complete]}
         self.market_history = state.get("market_history", {})
+        self.market_history_days = state.get("market_history_days", {})
+        self.required_history_days = 30
         self.rows = {}
         self.fee_sources = {}
         self.cursor = state.get("cursor", 0)
@@ -419,6 +437,7 @@ class Registry:
             published=self.published,
             predictions=self.predictions,
             market_history=self.market_history,
+            market_history_days=self.market_history_days,
             cursor=self.cursor,
         )
 
@@ -503,14 +522,19 @@ class Registry:
             error_at=None if ok else at,
         )
 
-    def observe_history(self, states, at=None):
+    def observe_history(self, states, at=None, minimum_days=30):
         """`states`: {(venue, asset, kind): keeper market state}. Each market keeps the
         time of its keeper record and whether its 30-day history is complete; a record
         survives restarts until it expires."""
+        self.required_history_days = minimum_days
         for (v, a, *_), s in states.items():
             when = s.get("ts") or at
             if when is not None:
-                self.market_history[market_key(v, a)] = [when, bool(s.get("complete"))]
+                key = market_key(v, a)
+                windows = (s.get("coverage") or {}).get("windows", {})
+                satisfied = bool(s.get("complete")) or windows.get(str(minimum_days), False)
+                self.market_history[key] = [when, bool(satisfied)]
+                self.market_history_days[key] = 30 if s.get("complete") else minimum_days
 
     def history_counts(self, at):
         """{venue: dict(markets, complete)} over the unexpired market records."""
@@ -520,7 +544,7 @@ class Registry:
                 continue
             x = by.setdefault(k.split("|")[0], dict(markets=0, complete=0))
             x["markets"] += 1
-            x["complete"] += bool(done)
+            x["complete"] += bool(done) and self.market_history_days.get(k, 30) >= self.required_history_days
         return by
 
     def check_market(self, v, a, interval, stored, at, start):
@@ -720,15 +744,16 @@ class Registry:
             iv["status"] = "verified"
         # The market's own 30-day candles and funding in the history keeper.
         h = self.market_history.get(key)
-        hist = dict(status="missing", at=h[0] if h else None)
+        required = self.required_history_days
+        hist = dict(status="missing", at=h[0] if h else None, required_days=required)
         if not h:
-            why.append("30 günlük geçmiş kaydı yok")
+            why.append("%d günlük geçmiş kaydı yok" % required)
         elif at - h[0] > HISTORY_EXPIRY:
             hist["status"] = "expired"
             why.append("geçmiş kaydının süresi doldu")
-        elif not h[1]:
+        elif not h[1] or self.market_history_days.get(key, 30) < required:
             hist["status"] = "incomplete"
-            why.append("30 günlük geçmiş tamamlanmadı")
+            why.append("%d günlük geçmiş tamamlanmadı" % required)
         else:
             hist["status"] = "complete"
         # Funding sign, by evidence level.

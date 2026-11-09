@@ -228,6 +228,8 @@ class HistoryTests(unittest.TestCase):
             stop.set()
             for t in [keeper.thread, *keeper.workers.values()]:
                 t.join(5)
+            if keeper.hydration_thread:
+                keeper.hydration_thread.join(5)
 
     def test_a_worker_survives_an_error_and_carries_on(self):
         listed = self.src.markets
@@ -259,6 +261,40 @@ class HistoryTests(unittest.TestCase):
                 stop.set()
                 for t in [keeper.thread, *keeper.workers.values()]:
                     t.join(5)
+                if keeper.hydration_thread:
+                    keeper.hydration_thread.join(5)
+
+    def test_restart_does_not_read_history_that_will_be_discarded(self):
+        self.keeper.run_once()
+        self.src.wants_published = lambda v, a, k: v == "Lighter"
+        self.src.published.clear()
+        original = self.keeper.db.candles
+        with mock.patch.object(self.keeper.db, "candles", wraps=original) as reads:
+            self.keeper.publish_stored()
+        self.assertEqual([c.args[0] for c in reads.call_args_list], ["Lighter"])
+        self.assertEqual(self.keeper.hydration, dict(status="ready", published=1))
+
+    def test_slow_cache_restore_does_not_delay_fresh_history_workers(self):
+        entered, release = threading.Event(), threading.Event()
+        def slow_restore():
+            entered.set()
+            release.wait(5)
+        self.keeper.publish_stored = slow_restore
+        self.keeper.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            for _ in range(100):
+                if self.keeper.market_state("Lighter", "BTC").get("ok"):
+                    break
+                threading.Event().wait(0.02)
+            self.assertTrue(self.keeper.market_state("Lighter", "BTC").get("ok"))
+        finally:
+            release.set()
+            self.keeper.stop.set()
+            self.keeper.thread.join(5)
+            for t in self.keeper.workers.values():
+                t.join(5)
+            self.keeper.hydration_thread.join(5)
 
     def test_old_rows_are_pruned(self):
         db = HistoryStore(self.store)
@@ -362,7 +398,7 @@ class DeskSourceTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            {src.group(v) for v in ("Lighter", "Extended", "Arcus")}, {"feed"}
+            {src.group(v) for v in ("Lighter", "Extended", "Arcus")}, {"Lighter", "Extended", "Arcus"}
         )
         self.assertEqual(src.group("Bybit"), "Bybit")
 

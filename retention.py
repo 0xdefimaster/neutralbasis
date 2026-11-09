@@ -225,7 +225,7 @@ class Retention:
         )
         return self.status
 
-    def start(self):
+    def start(self, monitor_only=False):
         if self.thread:
             return
 
@@ -233,7 +233,10 @@ class Retention:
             while not self.stop.is_set():
                 wait = EVERY_SECONDS
                 try:
-                    if not self.run_once()["done"]:
+                    if monitor_only:
+                        self.status = dict(status="monitoring", ts=now(), bytes=size(self.store),
+                                           maintenance="PAPER sırasında silme/sıkıştırma çalışmaz; çevrimdışı bakım kullanın.")
+                    elif not self.run_once()["done"]:
                         wait = 60
                 except Exception as ex:
                     self.status = dict(status="error", ts=now(), error=str(ex)[:200])

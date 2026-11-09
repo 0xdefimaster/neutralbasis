@@ -326,8 +326,11 @@ class DeskHistorySource:
 
     @staticmethod
     def group(v):
-        """The desk's own feed venues share one worker; every scanned venue has its own."""
-        return "feed" if v in VENUES else v
+        """Independent endpoints must not wait behind another venue's backfill."""
+        return v
+
+    def wants_published(self, v, a, kind):
+        return a in self.engine.cfg["symbols"]
 
     def markets(self):
         e = self.engine
@@ -349,7 +352,11 @@ class DeskHistorySource:
         from funding_matrix import top_pairs
 
         try:
-            extra = top_pairs(e.matrix.get())
+            # Building the dashboard matrix aggregates the entire history database.
+            # A history worker must not trigger that aggregation (or wait behind
+            # every other venue doing so) merely to decide its next market.
+            cached_matrix = getattr(e.matrix, "value", None)
+            extra = top_pairs(cached_matrix) if cached_matrix else []
         except Exception:
             extra = []
         for v, a, interval in extra:
@@ -488,6 +495,8 @@ class DeskEngine(RiskEngine):
         self.retention = Retention(self.store, self.stop_event)
         self.read_lock = threading.RLock()
         self.read_jobs = {}
+        self.feed_background = False
+        self.feed_status = dict(status="idle")
 
     def start_workspace(self, body):
         """Start a perp DEX paper workspace; the old two-venue desk stops taking new
@@ -506,8 +515,44 @@ class DeskEngine(RiskEngine):
         return ws
 
     def why_no_trade(self):
-        """Zero-trade diagnostics of the multi-venue paper desk (zero_trade.py)."""
-        return self.wide_paper.diag.report(now())
+        """Zero-trade diagnostics plus the engine/worker state for stale scans."""
+        at = now()
+        report = self.wide_paper.diag.report(at)
+        # The verdict contains last_cycle_at only in some STOPPED cases. Reading
+        # it from the verdict made every healthy scan look stale (age=None).
+        cycles = self.wide_paper.diag.cycles
+        last_cycle = cycles[-1] if cycles else None
+        last = (last_cycle.get("ended") or last_cycle.get("at")) if last_cycle else None
+        age = max(0.0, at - last) if last is not None else None
+        acquired = self.lock.acquire(blocking=False)
+        if acquired:
+            self.lock.release()
+        worker_busy = not acquired
+        report["engine_state"] = dict(
+            running=bool(self.running),
+            worker_busy=worker_busy,
+            last_cycle_at=last,
+            last_cycle_age_seconds=age,
+        )
+        if age is None or age > 900:
+            if not self.running:
+                report["verdict"] = dict(
+                    key="STOPPED", text="Paper motoru duraklatılmış.",
+                    evidence={"last_cycle_at": last, "age_seconds": age},
+                )
+            elif worker_busy:
+                report["verdict"] = dict(
+                    key="SCAN_BUSY",
+                    text="Paper motoru açık; tarama 15 dakikadan uzun süredir tamamlanmadı.",
+                    evidence={"last_cycle_at": last, "age_seconds": age},
+                )
+            else:
+                report["verdict"] = dict(
+                    key="SCAN_STALE",
+                    text="Paper motoru açık; son tarama eski ve worker şu an boşta.",
+                    evidence={"last_cycle_at": last, "age_seconds": age},
+                )
+        return report
 
     def capability_registry(self):
         """The full capability registry: every venue, capability, status and evidence."""
@@ -760,15 +805,75 @@ class DeskEngine(RiskEngine):
         # Multi-venue desk: open positions are always monitored; entries only while running.
         self.wide_paper.latency_ms = self.cfg["latency_ms"]
         self.wide_paper.extra_slippage = self.cfg["extra_slippage_bps"] / 10000
-        self.wide_paper.cycle(entries=self.running)
         if self.rfq_live:
-            self.rfq.sync(self.feed.meta.get("Extended"))
+            extended = self.feed.meta.get("Extended", {})
+            lighter = self.feed.meta.get("Lighter", {})
+            workspace = self.wide_paper.workspace() or {}
+            selected = set((workspace.get("venues") or {}).keys())
+            disabled = set(workspace.get("disabled") or [])
+            can_scan_rwa = (
+                not selected
+                or {"Extended", "Lighter"}.issubset(selected - disabled)
+            )
+            rfq_meta = {
+                asset: market
+                for asset, market in extended.items()
+                if market.get("rfq")
+                and (
+                    market.get("category") != "RWA"
+                    or (can_scan_rwa and asset in lighter)
+                )
+            }
+            # One socket per market: subscribing to the whole RFQ catalogue created
+            # hundreds of writers on the same SQLite lock. Keep held legs plus the
+            # best candidate books; all market prices remain in the scanner.
+            held = {p["asset"] for p in self.wide_paper.positions
+                    if any(l["venue"] == "Extended" and not l.get("closed") for l in p["legs"])}
+            candidates = self.wide_paper.candidates + self.wide_paper.conv_candidates
+            at = now()
+            def stream_priority(c):
+                rejected = self.wide_paper.rejected.get(self.wide_paper.pair_key(c), {})
+                waiting = bool(c.get("research") or rejected.get("until", 0) > at
+                               or self.wide_paper.blocked(c))
+                return waiting, -c.get("score", 0)
+            candidates = sorted(candidates, key=stream_priority)
+            chosen = set(held)
+            for c in candidates:
+                if len(chosen) >= max(12, len(held)):
+                    break
+                if "Extended" in (c["long"], c["short"]) and c["asset"] in rfq_meta:
+                    chosen.add(c["asset"])
+            rfq_meta = {a: m for a, m in rfq_meta.items() if a in chosen}
+            self.rfq.sync(rfq_meta)
+        self.stage = "Birleşik ekonomi ve paper yürütme"
+        self.wide_paper.cycle(entries=self.running)
+        self.last_cycle = self.wide_paper.last_cycle
+        self.stage = "Tamamlandı"
+
+    def refresh_feed(self):
+        """Network discovery runs independently of decisions and position monitoring."""
+        while not self.stop_event.is_set():
+            started = now()
+            self.feed_status = dict(status="running", started=started)
+            try:
+                self.feed.symbols = list(self.cfg["symbols"])
+                self.feed.markets()
+                self.feed_status = dict(status="ok", started=started, finished=now(),
+                                        seconds=now()-started)
+            except Exception as ex:
+                self.feed_status = dict(status="error", started=started, finished=now(),
+                                        error=str(ex)[:200])
+            self.stop_event.wait(self.cfg["poll_seconds"])
 
     def loop(self):
         self.rfq_live = True
-        self.wide.start()
+        self.feed_background = True
+        threading.Thread(target=self.refresh_feed, daemon=True, name="native-markets").start()
+        self.wide.start(priority=list((self.wide_paper.workspace() or {}).get("venues", {})))
         self.history.start()
-        self.retention.start()
+        # Pruning old multi-GB audit blobs contends with every feed/decision write.
+        # During PAPER operation monitor size only; maintenance is an offline action.
+        self.retention.start(monitor_only=True)
         return super().loop()
 
     def update_config(self, changes):
@@ -793,6 +898,7 @@ class DeskEngine(RiskEngine):
         o["venue_labels"] = LABELS
         o["wide_paper"] = self.wide_paper.snapshot()
         o["history_status"] = self.history.status()
+        o["feed_status"] = dict(self.feed_status)
         o["rfq_streams"] = self.rfq.status()
         o["retention"] = self.retention.status
         o["deployment"] = (

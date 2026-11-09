@@ -178,7 +178,13 @@ class FacadeTests(unittest.TestCase):
         self.c = Connectors(self.e)
 
     def test_rows_match_the_pre_facade_algorithm(self):
-        self.assertEqual(self.c.market_rows(), legacy_rows(self.e))
+        actual, expected = self.c.market_rows(), legacy_rows(self.e)
+        # Existing normalized fields remain unchanged; new provenance/liquidity
+        # fields are asserted separately rather than deleted from production rows.
+        self.assertEqual([{k: r[k] for k in old} for r, old in zip(actual, expected)], expected)
+        self.assertEqual(len(actual), len(expected))
+        native = next(r for r in actual if r["venue"] == "Lighter")
+        self.assertEqual(native["funding_received"], native["received"])
         # A feed venue without a fee is listed and says why it cannot rank.
         self.assertIn("ücret", self.c.excluded["RISEx"])
         self.assertNotIn("Lighter", self.c.excluded)
@@ -263,6 +269,43 @@ class TypedViewTests(unittest.TestCase):
 
 
 class StoredFallbackTests(unittest.TestCase):
+    def test_lighter_refresh_keeps_payment_time_separate_from_observation_time(self):
+        from unittest.mock import Mock
+        e = FakeEngine()
+        m=e.feed.meta["Lighter"]["BTC"]
+        m.update(rate=0.0001, interval=3600, rate_ts=T0-3000, funding_observed_at=T0)
+        e.feed.funding_history=Mock(return_value=[dict(ts=T0-3000,rate=0.0001)])
+        connector=NativeConnector(e,"Lighter")
+        quote=connector.current_funding("BTC")
+        self.assertEqual(quote["funding_received"], T0)
+        self.assertEqual(quote["funding_kind"], "last_settled_projection")
+        self.assertEqual(m["rate_ts"], T0-3000)
+        row=next(x.row for x in connector.markets() if x.asset=="BTC")
+        self.assertEqual(row["funding_received"], T0)
+
+    def test_decision_history_never_fetches_a_missing_window_from_the_network(self):
+        from unittest.mock import Mock
+        import wide_paper
+        e = FakeEngine()
+        e.feed.candles = Mock(side_effect=AssertionError("network in decision loop"))
+        e.history = type("H", (), {"db": type("D", (), {"candles": lambda *a: {}})()})()
+        with self.assertRaisesRegex(ValueError, "arka plan"):
+            wide_paper.EngineSource(e).prices("Lighter", "BTC")
+        e.feed.candles.assert_not_called()
+
+    def test_analysis_funding_uses_keeper_but_settlement_refreshes_public_feed(self):
+        import wide_paper
+        from unittest.mock import Mock
+        e = FakeEngine()
+        rows = [dict(ts=T0, rate=0.0001)]
+        e.history = type("H", (), {"db": type("D", (), {"funding": lambda *a: rows})()})()
+        e.feed.funding_history = Mock(return_value=rows)
+        src = wide_paper.EngineSource(e)
+        self.assertEqual(src.analysis_funding("Lighter", "BTC", T0-10), rows)
+        e.feed.funding_history.assert_not_called()
+        src.funding("Lighter", "BTC", T0-10)
+        e.feed.funding_history.assert_called_once()
+
     def test_kept_closes_keep_the_oracle_label_when_the_live_read_fails(self):
         import wide_paper
 

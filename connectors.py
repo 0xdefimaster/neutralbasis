@@ -253,10 +253,15 @@ class NativeConnector(Connector):
                         index=m.get("index"),
                         next=m.get("next"),
                         received=m["received"],
+                        funding_received=m.get("funding_observed_at") or m.get("rate_ts") or m["received"],
                         fee=fee,
                         leverage=m.get("max_leverage"),
                         price_type="mark",
                         rfq=bool(m.get("rfq")),
+                        category=m.get("category"),
+                        volume=m.get("volume"),
+                        oi=m.get("oi"),
+                        max_order=m.get("max_order"),
                         step=m.get("step"),
                         minimum=m.get("minimum"),
                         min_quote=m.get("min_quote"),
@@ -273,6 +278,16 @@ class NativeConnector(Connector):
         return self.engine.feed.funding_history(self.venue, asset, start)
 
     def current_funding(self, asset):
+        if self.venue == "Lighter":
+            import time
+            self.engine.feed.funding_history(self.venue, asset, time.time() - 4 * 3600)
+            m = self.engine.feed.meta[self.venue][asset]
+            observed = m.get("funding_observed_at")
+            if observed and m.get("rate") is not None and m.get("interval"):
+                return dict(raw_rate=m["rate"] * m["interval"] / 3600,
+                            rate=m["rate"], interval=m["interval"], next=m.get("next"),
+                            funding_received=observed, funding_kind="last_settled_projection")
+            raise ValueError("Lighter: gerçekleşen oran okumasının zamanı doğrulanamadı")
         raise ValueError(self.venue + ": yerel besleme kendi tazeliğini tutar")
 
     def candles(self, asset):

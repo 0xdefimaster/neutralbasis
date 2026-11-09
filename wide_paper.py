@@ -199,12 +199,51 @@ def payments_within(row, start, end):
     return 0 if first > end else int((end - first) // iv) + 1
 
 
-def rank(rows, cfg, at):
-    """Every cross-venue perp pair with positive funding carry, best first.
+def joint_net(price_capture, funding, entry_fee, exit_fee, execution_drag, risk_reserve=0.0):
+    """Net in USD for a matched two-leg position over one holding horizon."""
+    return (
+        price_capture
+        + funding
+        - entry_fee
+        - exit_fee
+        - execution_drag
+        - risk_reserve
+    )
 
-    Score per $1 notional over the horizon: funding each venue actually pays in that
-    window (its own interval and next payment time) minus four taker fees. Price
-    spread is shown but not credited here; the deep check charges an adverse one.
+
+def expected_price_capture(size, entry_gap, target_gap, baseline, widest, tiers):
+    """Price-to-baseline value in USD, credited only when past returns support it.
+
+    Losses toward the baseline are charged in full. Positive capture is probability-
+    weighted by the qualified historical tier at the current deviation. The small
+    Laplace adjustment avoids treating a handful of successful episodes as certainty.
+    """
+    gross = size * (entry_gap - target_gap)
+    if gross < 0:
+        return gross, 1.0
+    if gross <= 0 or widest <= 0:
+        return 0.0, 0.0
+    move = entry_gap - baseline
+    if move > widest:
+        return 0.0, 0.0
+    qualified = [
+        t for t in tiers
+        if t.get("qualified") and move >= t.get("level", 1.0) * widest
+    ]
+    if not qualified:
+        return 0.0, 0.0
+    tier = max(qualified, key=lambda t: t.get("level", 0.0))
+    returns = max(0, int(tier.get("returns") or 0))
+    missed = max(0, int(tier.get("missed") or 0))
+    probability = (returns + 1.0) / (returns + missed + 2.0)
+    return gross * probability, probability
+
+
+def rank(rows, cfg, at):
+    """Funding-direction pairs ranked by a rough signed funding + gap screen.
+
+    The score is only a shortlist estimate per $1 notional. Price capture is not
+    established until the history-based deep check.
     """
     end = at + cfg["wide_horizon"] * 3600
     out = []
@@ -216,6 +255,13 @@ def rank(rows, cfg, at):
             nl, ns = payments_within(l, at, end), payments_within(s, at, end)
             funding = s["raw_rate"] * ns - l["raw_rate"] * nl
             fees = 2 * (l["fee"] + s["fee"])
+            gap = math.log(s["mark"] / l["mark"])
+            # Temporary market comparability guard (also used by rank_spreads).
+            # A ticker collision / unit mismatch must not become a paper candidate.
+            # Proper instrument identity proof is a separate required next step.
+            if not math.isfinite(gap) or abs(gap) > 0.15:
+                continue
+            screen_score = funding + gap - fees
             out.append(
                 dict(
                     pair_fields(a, l, s),
@@ -223,8 +269,12 @@ def rank(rows, cfg, at):
                     funding_gap=s["rate"] - l["rate"],
                     funding_horizon=funding,
                     fee_roundtrip=fees,
-                    spread=math.log(s["mark"] / l["mark"]),
-                    score=funding - fees,
+                    spread=gap,
+                    screen_price_gap=gap,
+                    screen_funding=funding,
+                    screen_fees=fees,
+                    screen_score=screen_score,
+                    score=screen_score,
                     payment_counts={l["venue"]: nl, s["venue"]: ns},
                 )
             )
@@ -584,25 +634,42 @@ def split_rfq(ranked):
     return normal, rfq
 
 
-def rank_spreads(rows, at):
-    """Every cross-venue pair: long the cheaper mark, short the dearer, widest net gap first.
+def rank_spreads(rows, at, cfg=None):
+    """Cheap-long/rich-short pairs ranked by a rough joint screen score.
 
-    Score: current log price gap minus four taker fees. History decides eligibility.
+    Current gap is a screening signal, not expected profit; only the historical
+    deep check may credit convergence to a baseline.
     """
+    cfg = cfg or WIDE_DEFAULTS
+    end = at + cfg["wide_horizon"] * 3600
     out = []
     for a, by_venue in usable_rows(rows, at).items():
         for x, y in itertools.combinations(by_venue.values(), 2):
             l, s = sorted((x, y), key=lambda r: (r["mark"], r["venue"]))
             gap = math.log(s["mark"] / l["mark"])
+            # A same-ticker collision or contract-unit mismatch is not an arb signal.
+            # Keep the discovery page's 15% comparability bound in the execution queue
+            # too, so these rows cannot crowd real opportunities out of deep checks.
+            if abs(gap) > 0.15:
+                continue
+            nl, ns = payments_within(l, at, end), payments_within(s, at, end)
+            funding = s["raw_rate"] * ns - l["raw_rate"] * nl
             fees = 2 * (l["fee"] + s["fee"])
+            screen_score = gap + funding - fees
             out.append(
                 dict(
                     pair_fields(a, l, s),
                     strategy="convergence",
                     spread=gap,
-                    fee_roundtrip=fees,
                     funding_gap=s["rate"] - l["rate"],
-                    score=gap - fees,
+                    funding_horizon=funding,
+                    fee_roundtrip=fees,
+                    screen_price_gap=gap,
+                    screen_funding=funding,
+                    screen_fees=fees,
+                    screen_score=screen_score,
+                    score=screen_score,
+                    payment_counts={l["venue"]: nl, s["venue"]: ns},
                 )
             )
     out.sort(key=lambda c: (-c["score"], c["asset"], c["long"], c["short"]))
@@ -881,6 +948,13 @@ class EngineSource:
         return rows
 
     def book(self, v, a):
+        # Extended RFQ's normal REST book is indicative. Paper fills on these markets
+        # must use the separate, sequenced real-book stream or fail closed.
+        market = getattr(self.engine, "feed", None)
+        meta = (getattr(market, "meta", {}) or {}).get(v, {})
+        row = meta.get(a) if isinstance(meta, dict) else None
+        if v == "Extended" and row and row.get("rfq"):
+            return self.engine.rfq.book(a)
         return self.connectors.get(v).book(a)
 
     def history_states(self):
@@ -895,10 +969,15 @@ class EngineSource:
         keeper = getattr(self.engine, "history", None)
         if keeper is not None:
             from desk_analytics import DeskHistorySource
-
-            stored = DeskHistorySource(self.engine).stored_prices(v, a)
-            if stored:
-                return stored
+            # The running desk never downloads a 30-day window while holding the
+            # decision lock. The keeper owns backfill; partial/stale windows remain
+            # partial and are rejected by matched()/history_days(), not fabricated.
+            prices = keeper.db.candles(v, a, "perp", hour(now()) - 720 * 3600)
+            if not prices:
+                raise ValueError("İşlem mumu yok; arka plan geçmiş kuyruğu bekleniyor")
+            return dict(prices=prices,
+                        price_type=DeskHistorySource(self.engine).price_type(v, a),
+                        audit_ids=[], end=hour(now()))
         try:
             live = self.connectors.get(v).candles(a)
         except Exception as ex:
@@ -936,12 +1015,23 @@ class EngineSource:
         keeper = getattr(self.engine, "history", None)
         return keeper.db.funding(v, a, start) if keeper is not None else []
 
+    def analysis_funding(self, v, a, start):
+        """Decision history is read locally; settlement still refreshes the venue."""
+        if getattr(self.engine, "history", None) is not None:
+            return self.stored_funding(v, a, start)
+        return self.funding(v, a, start)
+
 
 # A rejected pair waits this long before it is deep-checked again, so the next ranked
 # pairs get their turn; missing history is retried sooner since the keeper fills it.
 REJECT_COOLDOWN = 1800
 HISTORY_RETRY = 900
 HISTORY_MARKERS = ("mum eksik", "işlem mumu yok", "geçmişi eksik")
+# A leg whose data could not be read is set aside this long, so the other pairs that
+# use it do not spend deep-check slots on the same failure; a book read is retried
+# sooner than a missing price history.
+LEG_HISTORY_RETRY = HISTORY_RETRY
+LEG_BOOK_RETRY = 120
 # Reasons measured over days change slowly: such a pair waits longer, so its deep-check
 # slot goes to pairs further down the list. A pair waits for its slowest reason, since
 # it cannot qualify before every reason clears.
@@ -962,6 +1052,8 @@ SLOW_REASONS = {
 def reason_wait(group):
     """How long a pair rejected for this kind of reason waits (keys match as prefixes,
     since some reasons name their window)."""
+    if "RFQ akışı" in group or "RFQ defteri" in group:
+        return 60
     return next(
         (t for k, t in SLOW_REASONS.items() if group.startswith(k)), REJECT_COOLDOWN
     )
@@ -973,7 +1065,8 @@ CHECKED_WINDOW = 3600
 
 def reason_group(reason):
     """A rejection's kind; measured values follow " · " and stay out of the group."""
-    if any(m in reason for m in HISTORY_MARKERS):
+    low = reason.replace("İ", "i").replace("I", "ı").lower()
+    if any(m in low for m in HISTORY_MARKERS):
         return "Geçmiş eksik"
     return reason.split(" · ")[0]
 
@@ -1020,6 +1113,8 @@ class WidePaper:
         self.cycle_seconds = None
         self.error = None
         self.cache = {}
+        # {(venue, asset): {"until", "reason"}}: legs whose data could not be read.
+        self.legs_down = {}
         self.latency_ms = 750
         self.extra_slippage = 0.0001
         # Measured round trips of each venue's public book request, in seconds.
@@ -1040,7 +1135,7 @@ class WidePaper:
         states = getattr(self.source, "history_states", None)
         if states:
             try:
-                reg.observe_history(states(), at)
+                reg.observe_history(states(), at, self.cfg["wide_min_history_days"])
             except Exception:
                 pass
         stored = getattr(self.source, "stored_funding", None)
@@ -1493,6 +1588,10 @@ class WidePaper:
         """Published payments in the last `days` days: the venue's own history for the
         last week, completed by the keeper's stored record; one payment counts once."""
         start = at - days * 86400
+        analysis = getattr(self.source, "analysis_funding", None)
+        if analysis:
+            return sorted((r for r in analysis(v, a, start) if start < r["ts"] <= at),
+                          key=lambda r: r["ts"])
         merged = {}
         stored = getattr(self.source, "stored_funding", None)
         if stored:
@@ -1515,9 +1614,29 @@ class WidePaper:
         )
 
     def price_history(self, v, a):
-        return self.cached(
-            ("prices", v, a), HISTORY_TTL, lambda: self.source.prices(v, a)
-        )
+        try:
+            return self.cached(
+                ("prices", v, a), HISTORY_TTL, lambda: self.source.prices(v, a)
+            )
+        except KeyError as ex:
+            # The source holds no record for this leg at all.
+            reason = "%s %s: fiyat geçmişi okunamadı" % (v, a)
+            self.leg_down(v, a, reason, LEG_HISTORY_RETRY)
+            raise ValueError(reason) from ex
+        except Exception as ex:
+            self.leg_down(v, a, "%s %s: %s" % (v, a, ex), LEG_HISTORY_RETRY)
+            raise
+
+    def leg_down(self, v, a, reason, wait):
+        self.legs_down[(v, a)] = dict(until=now() + wait, reason=str(reason)[:200])
+
+    def leg_unavailable(self, c, at):
+        """Why a pair's leg is set aside right now (None when both legs are usable)."""
+        for v in (c["long"], c["short"]):
+            x = self.legs_down.get((v, c["asset"]))
+            if x and x["until"] > at:
+                return x["reason"]
+        return None
 
     def price_research(self, at):
         """History-only price statistics for the best research-only convergence pairs,
@@ -1551,7 +1670,7 @@ class WidePaper:
 
         shown = 0
         for c in self.conv_candidates:
-            if shown >= PRICE_RESEARCH_TOP or c["score"] <= 0:
+            if shown >= PRICE_RESEARCH_TOP:
                 break
             if not c.get("research"):
                 continue
@@ -1812,13 +1931,15 @@ class WidePaper:
         out = dict(c, reasons=list(self.blocked(c)), eligible=False, net=None)
         try:
             at = now()
+            left, right = self.price_history(lv, a), self.price_history(sv, a)
             stats = pair_stats(
-                self.price_history(lv, a),
-                self.price_history(sv, a),
+                left,
+                right,
                 at,
                 cfg["wide_horizon"],
                 cfg["wide_min_history_days"],
             )
+            gap_history = convergence_stats(left, right, at, cfg)
             out["stats"] = stats
             # 1 day: each leg at the worse of its current quote and its last 24h payments.
             raw = self.conservative_raw(c, at)
@@ -1840,17 +1961,28 @@ class WidePaper:
             # today is not projected at today's level.
             day3 = q["size"] * sum(days[:3]) / 3 * cfg["wide_horizon"] / 24
             funding = min(day1, day3)
-            # Short the rich leg: reverting to the 7d mean only costs when we enter below it.
-            reversion = q["size"] * min(0.0, q["live_spread"] - stats["mean"])
+            # Price-to-baseline is signed. Adverse movement is charged in full; favorable
+            # capture is credited only at the observed success rate of a qualified tier.
+            target_gap = max(gap_history["baseline7"], gap_history["baseline"])
+            gross_price_capture = q["size"] * (q["live_spread"] - target_gap)
+            price_capture, price_probability = expected_price_capture(
+                q["size"],
+                q["live_spread"],
+                target_gap,
+                gap_history["baseline"],
+                gap_history["widest"],
+                gap_history["tiers"],
+            )
+            reversion = min(0.0, gross_price_capture)
             # Risk reserve: one 7d standard deviation of the price gap widening.
             risk_reserve = q["size"] * stats["sd"]
-            net = (
-                funding
-                - q["entry_fee"]
-                - q["exit_fee"]
-                - q["execution_drag"]
-                + reversion
-                - risk_reserve
+            net = joint_net(
+                price_capture,
+                funding,
+                q["entry_fee"],
+                q["exit_fee"],
+                q["execution_drag"],
+                risk_reserve,
             )
             week, three = sum(days), sum(days[:3])
             out.update(
@@ -1859,6 +1991,12 @@ class WidePaper:
                 funding_day1=day1,
                 funding_day3=day3,
                 conservative_raw=raw,
+                price_capture=price_capture,
+                gross_price_capture=gross_price_capture,
+                price_capture_probability=price_probability,
+                entry_gap=q["live_spread"],
+                target_gap=target_gap,
+                convergence_history=gap_history,
                 reversion_cost=reversion,
                 risk_reserve=risk_reserve,
                 net=net,
@@ -1927,7 +2065,7 @@ class WidePaper:
                 )
             if net < cfg["wide_min_net"]:
                 out["reasons"].append(
-                    "Funding geliri ücret + kayma + spread riski payını karşılamıyor · "
+                    "Birleşik getiri ücret, kayma ve risk payını karşılamıyor · "
                     "net %s < $%.2f" % (usd(net), cfg["wide_min_net"])
                 )
             worst = self.worst_loss(q)
@@ -2049,12 +2187,17 @@ class WidePaper:
             window = at + max_hold * 3600
             rl = dict(interval=c["interval_long"], next=c["next_long"])
             rs = dict(interval=c["interval_short"], next=c["next_short"])
-            funding = q["size"] * (
+            funding_max = q["size"] * (
                 raw["short"] * payments_within(rs, at, window)
                 - raw["long"] * payments_within(rl, at, window)
             )
-            # Funding is not the thesis: a cost is charged, income is not credited.
-            funding_cost = min(0.0, funding)
+            funding_expected = q["size"] * (
+                raw["short"] * payments_within(rs, at, at + expected * 3600)
+                - raw["long"] * payments_within(rl, at, at + expected * 3600)
+            )
+            # Do not book income for hours after the expected close; reserve costs
+            # through the longest allowed hold. Both use actual payment schedules.
+            funding = min(funding_expected, funding_max)
             # Target: the pair's normal gap, the less favourable of the 7d and long-window
             # medians. It may be below zero when the short venue is usually the cheaper one.
             target = max(hist["baseline7"], base)
@@ -2064,15 +2207,27 @@ class WidePaper:
             )
             # The exit crosses half of today's round-trip book spread.
             exit_drag = q["execution_drag"] / 2
-            # The risk is the stop, sized into the budget above; no reserve on top.
-            net = capture - exit_drag - q["entry_fee"] - q["exit_fee"] + funding_cost
+            # Both income and cost from signed funding belong in the same hold-period net.
+            funding_cost = min(0.0, funding)
+            # The hard-stop loss is already sized into the budget above.
+            net = joint_net(
+                capture,
+                funding,
+                q["entry_fee"],
+                q["exit_fee"],
+                exit_drag,
+            )
             gap = math.log(q["entry_short"] / q["entry_long"])
             tiers = [dict(t, filled=t in taken) for t in hist["tiers"]]
             out.update(
                 q,
                 entry_capture=capture,
+                price_capture=capture,
+                gross_price_capture=capture,
                 exit_drag_proxy=exit_drag,
                 conservative_funding=funding,
+                funding_expected_hold=funding_expected,
+                funding_max_hold=funding_max,
                 funding_cost_reserve=funding_cost,
                 conservative_raw=raw,
                 expected_hours=expected,
@@ -2112,7 +2267,7 @@ class WidePaper:
                 out["reasons"].append("7g / 30g getiri korelasyonu sınır altında")
             if net < cfg["wide_min_net"]:
                 out["reasons"].append(
-                    "Yakınsama kazancı 4 emir ücreti, kayma ve funding gideri sonrası "
+                    "Yakınsama fiyat getirisi + funding 4 emir ücreti ve kayma sonrası "
                     "yetersiz"
                 )
             if (
@@ -2240,7 +2395,14 @@ class WidePaper:
             - l["raw_rate"] * payments_within(l, at, end)
         )
         if c.get("strategy") == "convergence":
-            net = c["net"] - c["funding_cost_reserve"] + min(0.0, cash)
+            max_end = at + c.get("max_hold_hours", hours) * 3600
+            max_cash = c["size"] * (
+                s["raw_rate"] * payments_within(s, at, max_end)
+                - l["raw_rate"] * payments_within(l, at, max_end)
+            )
+            cash = min(cash, max_cash)
+            planned = c.get("conservative_funding", c["funding_cost_reserve"])
+            net = c["net"] - planned + min(planned, cash)
         else:
             if cash <= 0:
                 return "Girişte funding yenilendi: avantaj kalmadı"
@@ -2260,6 +2422,8 @@ class WidePaper:
             b = self.source.book(v, a)
         except Exception as ex:
             self.capabilities.observe_book(v, False, now(), ex)
+            text = "%s %s: defter okunamadı · %s" % (v, a, ex)
+            self.leg_down(v, a, text, min(LEG_BOOK_RETRY, reason_wait(str(ex))))
             raise
         self.rtt[v].append(time.monotonic() - started)
         self.capabilities.observe_book(v, True, now())
@@ -3152,14 +3316,13 @@ class WidePaper:
                 else []
             )
             self.conv_candidates = (
-                rank_spreads(ranked_rows, at)
+                rank_spreads(ranked_rows, at, self.cfg)
                 if rows is not None and self.cfg["wide_conv_enabled"]
                 else []
             )
-            # RFQ pairs leave before selection so they cannot use up deep-check slots.
-            self.candidates, rfq_funding = split_rfq(self.candidates)
-            self.conv_candidates, rfq_conv = split_rfq(self.conv_candidates)
-            self.rfq_review = rfq_funding + rfq_conv
+            # RFQ pairs stay in ranking. EngineSource routes them to Extended's
+            # dedicated real-book stream; a missing/stale stream fails the deep check.
+            self.rfq_review = []
             if rows is not None:
                 self.update_registry(rows, at)
             # A pair whose leg lacks a verified capability, or whose market lacks its
@@ -3193,17 +3356,22 @@ class WidePaper:
                         c["research"] = why
             diag.set("funding_candidates", len(self.candidates))
             diag.set("price_gap_candidates", len(self.conv_candidates))
+            joint_scores = {}
             for ranked in (self.candidates, self.conv_candidates):
                 for c in ranked:
-                    if c["score"] <= 0:
-                        diag.current["codes"]["COST_EXCEEDS_EDGE"] = (
-                            diag.current["codes"].get("COST_EXCEEDS_EDGE", 0) + 1
-                        )
-                        continue
-                    diag.add("economic_candidates")
-                    if c.get("research"):
+                    key = (c["asset"], c["long"], c["short"])
+                    joint_scores[key] = max(
+                        c.get("screen_score", c["score"]),
+                        joint_scores.get(key, float("-inf")),
+                    )
+                    if c.get("research") and c.get("score", 0) > 0:
                         diag.add("evidence_blocked")
                         diag.note(c, at, "research", c["research"], "evidence")
+            diag.set("combined_candidates", len(joint_scores))
+            diag.set(
+                "economic_candidates",
+                sum(score > 0 for score in joint_scores.values()),
+            )
             self.price_research(at)
             self.assessed = []
             if (
@@ -3224,9 +3392,15 @@ class WidePaper:
                     for c in ranked:
                         # Pairs still waiting for history fail fast and do not use up a
                         # deep-check slot; the total per round stays bounded.
-                        if counted >= top or len(picked) >= top * 4 or c["score"] <= 0:
+                        if counted >= top or len(picked) >= top * 4:
                             break
                         if c.get("research"):
+                            continue
+                        down = self.leg_unavailable(c, at)
+                        if down:
+                            # The same leg failed for another pair: no slot is spent.
+                            self.review["skipped"] += 1
+                            diag.note(c, at, "skipped", [down], "pre_check")
                             continue
                         if (
                             self.blocked(c)
@@ -3706,7 +3880,11 @@ class WidePaper:
             elif at - r["received"] > ROW_MAX_AGE:
                 legs[v] = "veri eski"
             elif r.get("rfq"):
-                legs[v] = "RFQ piyasası"
+                try:
+                    self.book(v, asset)
+                    legs[v] = None
+                except Exception as ex:
+                    legs[v] = "RFQ defteri kullanılamıyor: " + str(ex)[:100]
             else:
                 legs[v] = None
         out = dict(
@@ -3859,15 +4037,14 @@ class WidePaper:
         )
 
     def history_needs(self, limit=40):
-        """(venue, asset) legs of tradeable candidates, rejected-for-history first."""
+        """(venue, asset) legs of shortlisted candidates, rejected-for-history first."""
         out = []
         for x in sorted(self.rejected.values(), key=lambda x: -x["at"]):
             if x["group"] == "Geçmiş eksik":
                 out += [(x["long"], x["asset"]), (x["short"], x["asset"])]
         for ranked in (self.candidates, self.conv_candidates):
             for c in ranked[:limit]:
-                if c["score"] > 0:
-                    out += [(c["long"], c["asset"]), (c["short"], c["asset"])]
+                out += [(c["long"], c["asset"]), (c["short"], c["asset"])]
         return list(dict.fromkeys(out))
 
     def snapshot(self):

@@ -208,7 +208,9 @@ class FiveFeed(Feed):
         def rh_rates():
             def one(a):
                 try:
-                    self.funding_history("Lighter", a)
+                    # Current rate hydration needs the latest settlement, not a
+                    # seven-day backfill on every market refresh.
+                    self.funding_history("Lighter", a, now() - 4 * 3600)
                 except Exception:
                     meta["Lighter"][a]["rate"] = None
 
@@ -359,6 +361,8 @@ class FiveFeed(Feed):
         self.status.pop("Variational", None)
         self.meta = meta
         for v in meta:
+            if v in ("Lighter", "Extended"):
+                continue  # the base feed already recorded this same snapshot
             for a, m in meta[v].items():
                 self.store.mark(
                     v, a, m["received"], m["index"] if v == "Lighter" else m["mark"]
@@ -862,22 +866,30 @@ class RiskEngine(Engine):
             self.error = None
             self.stage = "5 DEX piyasa ve funding taraması"
             self.feed.symbols = self.cfg["symbols"]
-            self.feed.markets()
-            self.selected, self.universe_count = shortlist(
-                self.feed.meta, self.cfg["symbols"]
-            )
-            self.candidates = []
-            self.stage = "İlk 5 çiftin eşlenmiş fiyat geçmişi ve risk analizi"
-            for c in self.selected:
-                self.candidates.append(self.assess(c))
-            if hasattr(self, "extra_candidates"):
-                extra = self.extra_candidates()
-                keys = {(c["asset"], c["long"], c["short"]) for c in extra}
-                self.candidates = [
-                    c
-                    for c in self.candidates
-                    if (c["asset"], c["long"], c["short"]) not in keys
-                ] + extra
+            if not getattr(self, "feed_background", False):
+                self.feed.markets()
+            # The multi-venue desk owns new entries once a workspace is active.
+            # Keep the legacy risk engine for any existing positions, but do not
+            # repeatedly run its separate 15-symbol deep scan in the same cycle.
+            if self.cfg.get("legacy_entries", True):
+                self.selected, self.universe_count = shortlist(
+                    self.feed.meta, self.cfg["symbols"]
+                )
+                self.candidates = []
+                self.stage = "İlk 5 çiftin eşlenmiş fiyat geçmişi ve risk analizi"
+                for c in self.selected:
+                    self.candidates.append(self.assess(c))
+                if hasattr(self, "extra_candidates"):
+                    extra = self.extra_candidates()
+                    keys = {(c["asset"], c["long"], c["short"]) for c in extra}
+                    self.candidates = [
+                        c
+                        for c in self.candidates
+                        if (c["asset"], c["long"], c["short"]) not in keys
+                    ] + extra
+            else:
+                self.selected = []
+                self.candidates = []
             # Existing paper trades are always monitored, even if no longer among top five.
             for p in list(self.positions):
                 a = p["asset"]

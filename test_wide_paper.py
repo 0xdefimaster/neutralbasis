@@ -156,6 +156,46 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual(len(out), 3)  # ETH has a single venue; no pair.
         self.assertTrue(all(c["funding_gap"] > 0 for c in out))
 
+    def test_screen_score_can_join_two_edges_that_each_miss_round_trip_fees(self):
+        rows = [
+            row("A", rate=0.0, interval=3600, fee=0.001, mark=100.0),
+            row("B", rate=0.0001, interval=3600, fee=0.001,
+                mark=100.0 * math.exp(0.002)),
+        ]
+        funding = rank(rows, wide_paper.WIDE_DEFAULTS, T0)[0]
+        price = rank_spreads(rows, T0, wide_paper.WIDE_DEFAULTS)[0]
+        # Price alone: 20bp - 40bp; funding alone: 24bp - 40bp.
+        self.assertLess(funding["screen_price_gap"] - funding["screen_fees"], 0)
+        self.assertLess(funding["screen_funding"] - funding["screen_fees"], 0)
+        self.assertGreater(funding["screen_score"], 0)
+        self.assertAlmostEqual(funding["screen_score"], 0.0004)
+        self.assertAlmostEqual(price["screen_score"], funding["screen_score"])
+
+    def test_expected_price_capture_uses_qualified_historical_probability(self):
+        tiers = [dict(level=0.5, qualified=True, returns=3, missed=0)]
+        capture, probability = wide_paper.expected_price_capture(
+            1000.0, 0.006, 0.001, 0.0, 0.01, tiers
+        )
+        self.assertAlmostEqual(probability, 0.8)
+        self.assertAlmostEqual(capture, 4.0)
+        no_evidence, no_probability = wide_paper.expected_price_capture(
+            1000.0, 0.006, 0.001, 0.0, 0.01,
+            [dict(level=0.5, qualified=False, returns=3, missed=0)],
+        )
+        self.assertEqual((no_evidence, no_probability), (0.0, 0.0))
+        adverse, adverse_probability = wide_paper.expected_price_capture(
+            1000.0, -0.002, 0.0, 0.0, 0.01, []
+        )
+        self.assertEqual(adverse, -2.0)
+        self.assertEqual(adverse_probability, 1.0)
+
+    def test_negative_preliminary_score_still_reaches_deep_check(self):
+        self.setup_pair()
+        self.src.rows = [dict(r, fee=0.02) for r in self.src.rows]
+        self.desk.cycle()
+        self.assertTrue(self.desk.assessed)
+        self.assertTrue(any(not x["eligible"] for x in self.desk.assessed))
+
     def test_rank_excludes_unknown_fee_interval_and_last_trade(self):
         rows = [
             row("A", rate=0.0),
@@ -213,7 +253,7 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual((f["strategy"], f["rank"]), ("funding", 1))
         self.assertEqual(f["decision"]["outcome"], "rejected")
         self.assertIn(
-            "Funding geliri ücret + kayma + spread riski payını karşılamıyor",
+            "Birleşik getiri ücret, kayma ve risk payını karşılamıyor",
             [wide_paper.reason_group(r) for r in f["decision"]["reasons"]],
         )
         # The measured net and the threshold follow the reason.
@@ -271,10 +311,17 @@ class WidePaperTests(unittest.TestCase):
         self.setup_pair(long_rate=0.0, short_rate=0.00005)
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
-        # Negative score after four fees never reaches the deep check.
+        # Negative screen scores still reach the exact economic check.
         self.assertTrue(self.desk.candidates)
         self.assertLessEqual(self.desk.candidates[0]["score"], 0)
-        self.assertEqual(self.desk.assessed, [])
+        self.assertTrue(self.desk.assessed)
+        self.assertTrue(all(not x["eligible"] for x in self.desk.assessed))
+        self.assertTrue(
+            any(
+                any("Birleşik getiri" in r for r in x["reasons"])
+                for x in self.desk.assessed
+            )
+        )
 
     def test_realized_funding_caps_a_spiking_rate(self):
         self.setup_pair(short_rate=0.002)
@@ -544,6 +591,27 @@ class WidePaperTests(unittest.TestCase):
         )
         self.assertGreater(self.desk.closed[-1]["net"], 0)
 
+    def test_entry_recheck_removes_income_when_positive_funding_disappears(self):
+        self.setup_convergence()
+        self.desk.cycle()
+        c = dict(self.desk.positions[0]["decision"], net=0.6,
+                 conservative_funding=0.5, funding_cost_reserve=0.0)
+        fresh = {(r["venue"], r["asset"]): dict(r, raw_rate=0.0)
+                 for r in self.src.rows}
+        self.assertIsNotNone(self.desk.entry_funding_check(c, fresh))
+        self.assertAlmostEqual(c["entry_funding_refresh"]["net"], 0.1)
+
+    def test_positive_funding_is_not_credited_until_the_maximum_hold(self):
+        self.setup_convergence()
+        self.src.rows[1].update(rate=0.0008/8, raw_rate=0.0008)
+        self.fund_history("Binance", 0.0008, 28800)
+        self.fund_history("Hyperliquid", 0.0, 3600)
+        candidate = wide_paper.rank_spreads(self.src.rows, T0, self.desk.cfg)[0]
+        result = self.desk.assess_convergence(candidate)
+        self.assertIn("funding_expected_hold", result, result)
+        self.assertEqual(result["conservative_funding"], result["funding_expected_hold"])
+        self.assertLessEqual(result["conservative_funding"], result["funding_max_hold"])
+
     def test_convergence_waits_for_the_normal_gap_not_the_entry_estimate(self):
         self.setup_convergence()
         self.desk.cycle()
@@ -734,6 +802,25 @@ class WidePaperTests(unittest.TestCase):
         c = self.desk.assessed[0]
         self.assertLess(c["conservative_funding"], 0)
         self.assertEqual(self.desk.positions, [])
+
+    def test_convergence_credits_positive_funding_in_joint_net(self):
+        self.setup_convergence()
+        # Negative funding on the long leg means that leg receives the payment.
+        self.src.rows[0] = row(
+            "Hyperliquid", rate=-0.0001, fee=0.0002, mark=100.0
+        )
+        self.desk.cycle()
+        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
+        d = self.desk.positions[0]["decision"]
+        self.assertGreater(d["conservative_funding"], 0)
+        self.assertAlmostEqual(
+            d["net"],
+            d["entry_capture"]
+            + d["conservative_funding"]
+            - d["entry_fee"]
+            - d["exit_fee"]
+            - d["exit_drag_proxy"],
+        )
 
     def test_convergence_charges_funding_over_the_longest_hold(self):
         self.setup_convergence()
@@ -931,7 +1018,7 @@ class WidePaperTests(unittest.TestCase):
                 self.src.stored[(v, "BTC")] = rows
 
     def reasons(self):
-        (x,) = self.desk.assessed
+        x = next(x for x in self.desk.assessed if x["strategy"] == "funding")
         return [wide_paper.reason_group(r) for r in x["reasons"]]
 
     def test_advantage_resting_on_one_day_is_refused(self):
@@ -946,7 +1033,7 @@ class WidePaperTests(unittest.TestCase):
             )
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
-        (x,) = self.desk.assessed
+        x = next(x for x in self.desk.assessed if x["strategy"] == "funding")
         self.assertGreater(sum(x["realized_days"]), 0)
         self.assertIn("Avantaj tek bir güne dayanıyor", self.reasons())
 
@@ -982,7 +1069,7 @@ class WidePaperTests(unittest.TestCase):
                 v, iv, lambda d: rate if d == 0 else rate / 2
             )
         self.desk.cycle()
-        (x,) = self.desk.assessed
+        x = next(x for x in self.desk.assessed if x["strategy"] == "funding")
         self.assertLess(x["funding_day3"], x["funding_day1"])
         self.assertAlmostEqual(x["conservative_funding"], x["funding_day3"])
         self.assertAlmostEqual(
@@ -1049,10 +1136,10 @@ class WidePaperTests(unittest.TestCase):
         self.fund_history("Binance", 0.0008, 28800, days=3)
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
-        (x,) = self.desk.assessed
+        x = next(x for x in self.desk.assessed if x["strategy"] == "funding")
         self.assertTrue(any("7 günlük" in r for r in x["reasons"]), x["reasons"])
         self.assertEqual(self.reasons(), ["Geçmiş eksik"])
-        (r,) = self.desk.rejected.values()
+        r = next(iter(self.desk.rejected.values()))
         self.assertEqual(r["until"], T0 + wide_paper.HISTORY_RETRY)
 
     def test_stored_payments_complete_a_short_venue_history(self):
@@ -1089,7 +1176,7 @@ class WidePaperTests(unittest.TestCase):
         ]
         self.desk.cycle()
         self.assertEqual(self.desk.positions, [])
-        (x,) = self.desk.assessed
+        x = next(x for x in self.desk.assessed if x["strategy"] == "funding")
         self.assertEqual(self.reasons(), ["Geçmiş eksik"])
         self.assertIn("42/168 ödeme", x["reasons"][0])
 
@@ -1215,7 +1302,11 @@ class WidePaperTests(unittest.TestCase):
         self.assertEqual((self.desk.positions, self.desk.closed), ([], []))
         self.assertEqual(self.desk.report()["funding"]["trades"], 0)
         self.assertEqual(self.desk.wallet["cash"], self.desk.cfg["wide_capital"])
-        (r,) = self.desk.rejected.values()
+        r = next(
+            r
+            for r in self.desk.rejected.values()
+            if r.get("reason", "").startswith("Giri")
+        )
         self.assertIn("Giriş yapılmadı: Dolum olmadı", r["reason"])
         # The pair page and the funnel say it was not entered, never "opened".
         d = self.desk.verdict("BTC", "Hyperliquid", "Binance")["strategies"][0]
@@ -2418,7 +2509,11 @@ class CapabilityGateTests(unittest.TestCase):
 
     def assert_refused_at_entry(self, reason):
         self.assertEqual(self.desk.positions, [])
-        (x,) = self.desk.assessed
+        x = next(
+            x
+            for x in self.desk.assessed
+            if {x["long"], x["short"]} == {"Hyperliquid", "LighterCore"}
+        )
         self.assertFalse(x["eligible"])
         self.assertTrue(any(reason in r for r in x["reasons"]), x["reasons"])
         d = self.desk.verdict("BTC", "Hyperliquid", "LighterCore")["strategies"][0]
@@ -2691,7 +2786,7 @@ class UniverseRowsTests(unittest.TestCase):
 
 
 class RfqSplitTests(unittest.TestCase):
-    """RFQ markets leave candidate selection before any deep check."""
+    """RFQ candidates remain ranked, but cannot fill from an indicative book."""
 
     setUp = WidePaperTests.setUp
     tearDown = WidePaperTests.tearDown
@@ -2721,34 +2816,30 @@ class RfqSplitTests(unittest.TestCase):
         self.src.book = tracked
         return seen
 
-    def test_rfq_pair_goes_to_review_and_other_combination_opens(self):
+    def test_joint_score_orders_rfq_pair_ahead_of_other_combination(self):
         seen = self.setup_btw()
         self.desk.cfg["wide_deep_top"] = 1
         self.desk.cycle()
         self.assertNotIn("Extended", seen)
         self.assertTrue(
-            all("Extended" not in (c["long"], c["short"]) for c in self.desk.candidates)
+            any("Extended" in (c["long"], c["short"]) for c in self.desk.candidates)
         )
-        self.assertTrue(self.desk.rfq_review)
-        for c in self.desk.rfq_review:
-            self.assertIn("Extended", (c["long"], c["short"]))
-            self.assertEqual(c["reasons"], [wide_paper.RFQ_UNSUPPORTED])
-            self.assertFalse(c["eligible"])
-        # The single deep-check slot went to the executable pair, which opened.
+        self.assertEqual(self.desk.rfq_review, [])
+        # The single deep-check slot follows the joint screening score.
         self.assertEqual(
             [
                 (x["long"], x["short"])
                 for x in self.desk.assessed
                 if x["strategy"] == "funding"
             ],
-            [("Aster", "Binance")],
-        )
-        self.assertEqual(len(self.desk.positions), 1, self.desk.assessed)
-        self.assertFalse(
-            any(k[2] == "Extended" or k[3] == "Extended" for k in self.desk.rejected)
+            [("Extended", "Binance")],
         )
         snap = json.loads(json.dumps(self.desk.snapshot()))
         self.assertEqual(snap["rfq_review_count"], len(self.desk.rfq_review))
+        # An unavailable top candidate must not starve the valid pair forever.
+        self.desk.cycle()
+        self.assertTrue(any(p["decision"]["long"] == "Aster" for p in self.desk.positions),
+                        self.desk.assessed)
 
     def test_split_keeps_normal_order(self):
         rows = [
@@ -2761,6 +2852,35 @@ class RfqSplitTests(unittest.TestCase):
             [(c["long"], c["short"]) for c in normal], [("Aster", "Binance")]
         )
         self.assertEqual(len(rfq), 2)
+
+
+class LegDownTests(unittest.TestCase):
+    """A leg whose data cannot be read is set aside briefly (MOCK fixtures)."""
+
+    setUp = WidePaperTests.setUp
+    tearDown = WidePaperTests.tearDown
+
+    def test_capitalised_history_message_counts_as_missing_history(self):
+        self.assertEqual(
+            wide_paper.reason_group("İşlem mumu yok; arka plan geçmiş kuyruğu bekleniyor"),
+            "Geçmiş eksik",
+        )
+
+    def test_a_failed_book_read_sets_the_leg_aside_then_expires(self):
+        def broken(v, a):
+            raise ValueError("RFQ akışı sessiz; defter güncel sayılmaz")
+
+        self.src.book = broken
+        with self.assertRaises(ValueError):
+            self.desk.book("Extended", "BTC")
+        pair = dict(asset="BTC", long="Extended", short="Aster")
+        at = wide_paper.now()
+        why = self.desk.leg_unavailable(pair, at)
+        self.assertIn("Extended BTC: defter okunamadı", why)
+        other = dict(asset="ETH", long="Extended", short="Aster")
+        self.assertIsNone(self.desk.leg_unavailable(other, at))
+        # RFQ failures retry within a minute; others within LEG_BOOK_RETRY.
+        self.assertIsNone(self.desk.leg_unavailable(pair, at + 61))
 
 
 def held_under(path):

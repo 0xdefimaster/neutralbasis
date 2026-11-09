@@ -341,6 +341,8 @@ class RfqStream:
         self.reconnects = 0
         self.error = None
         self.thread = None
+        self.retired = threading.Event()
+        self.socket = None
 
     def handle(self, text, received):
         """One raw message from the socket."""
@@ -361,31 +363,43 @@ class RfqStream:
 
     def run_once(self):
         ws = self.connect(STREAM + urllib.parse.quote(self.market))
+        self.socket = ws
         try:
             with self.lock:
                 self.connected = True
                 self.last_frame = now()
-            while not self.stop.is_set():
+            while not self.stop.is_set() and not self.retired.is_set():
                 self.handle(ws.recv(), now())
         finally:
             ws.close()
+            self.socket = None
 
     def run(self):
         delay = RECONNECT_MIN
-        while not self.stop.is_set():
+        while not self.stop.is_set() and not self.retired.is_set():
             started = now()
             try:
                 self.run_once()
             except Exception as ex:
                 self.lost(str(ex) or ex.__class__.__name__)
-            if self.stop.is_set():
+            if self.stop.is_set() or self.retired.is_set():
                 break
             self.reconnects += 1
             delay = (
                 RECONNECT_MIN if now() - started > 60 else min(RECONNECT_MAX, delay * 2)
             )
-            self.stop.wait(delay)
+            self.retired.wait(delay)
         self.lost("Durduruldu")
+
+    def retire(self):
+        self.retired.set()
+        ws = self.socket
+        if ws is not None:
+            try:
+                ws.close()
+            except OSError:
+                pass
+        self.lost("İzleme sırasından çıktı")
 
     def start(self):
         if self.thread is None or not self.thread.is_alive():
@@ -457,7 +471,11 @@ class ExtendedRfq:
         self.lock = threading.RLock()
 
     def sync(self, meta):
-        """Start streams for every RFQ market in the Extended meta (asset -> market)."""
+        """Keep exactly the requested books; retire unused subscriptions."""
+        wanted = {a for a, m in (meta or {}).items() if m and m.get("rfq")}
+        with self.lock:
+            for a in set(self.streams) - wanted:
+                self.streams.pop(a).retire()
         for asset, m in (meta or {}).items():
             if m and m.get("rfq"):
                 self.ensure(asset, m["id"])

@@ -21,7 +21,7 @@ class RotationTests(unittest.TestCase):
             mock.patch.object(bot, "now", lambda: self.clock),
             mock.patch.object(wide_paper, "now", lambda: self.clock),
             mock.patch.object(wide_paper, "rank", lambda rows, cfg, at: self.cands),
-            mock.patch.object(wide_paper, "rank_spreads", lambda rows, at: []),
+            mock.patch.object(wide_paper, "rank_spreads", lambda rows, at, cfg=None: []),
             mock.patch.object(wide_paper.capabilities, "pair_blockers", lambda *a: []),
         ):
             p.start()
@@ -140,7 +140,7 @@ class EntryLoopTests(unittest.TestCase):
             mock.patch.object(bot, "now", lambda: T0),
             mock.patch.object(wide_paper, "now", lambda: T0),
             mock.patch.object(wide_paper, "rank", lambda rows, cfg, at: self.cands),
-            mock.patch.object(wide_paper, "rank_spreads", lambda rows, at: []),
+            mock.patch.object(wide_paper, "rank_spreads", lambda rows, at, cfg=None: []),
             mock.patch.object(wide_paper.capabilities, "pair_blockers", lambda *a: []),
         ):
             p.start()

@@ -194,13 +194,30 @@ class HistoryKeeper:
         self.state = {}
         self.backfilled = {}
         self.thread = None
+        self.hydration_thread = None
         self.workers = {}
         self.lock = threading.RLock()
+        self.active = {}
+        self.worker_errors = {}
+        self.hydration = dict(status="pending", published=0)
+        self.stored_count = None
 
     def publish_stored(self):
         """Make stored history visible right after a restart, before any request."""
-        for v, a, kind in self.db.markets():
-            self.publish(v, a, kind, None, None)
+        self.hydration = dict(status="loading", published=0)
+        markets = self.db.markets()
+        self.stored_count = len(markets)
+        wants = getattr(self.source, "wants_published", lambda *key: True)
+        for v, a, kind in markets:
+            if self.stop.is_set():
+                return
+            # Non-selected markets are read on demand from SQLite. Reading all
+            # their candles here, only for publish() to discard them, delayed all
+            # venue workers by minutes on an existing database.
+            if wants(v, a, kind):
+                self.publish(v, a, kind, None, None)
+                self.hydration["published"] += 1
+        self.hydration["status"] = "ready"
 
     def publish(self, v, a, kind, interval, price_type):
         prices = self.db.candles(v, a, kind, hour(now()) - FIRST_DAYS * 86400 - 3600)
@@ -302,6 +319,7 @@ class HistoryKeeper:
             candle_hours=FIRST_DAYS * 24,
             candles_from=min(candles) if candles else None,
         )
+        rates = []
         if kind == "perp":
             rates = self.db.funding(v, a, now() - FIRST_DAYS * 86400)
             out.update(
@@ -311,6 +329,16 @@ class HistoryKeeper:
                 ),
                 funding_from=rates[0]["ts"] if rates else None,
             )
+        # Keep the 30-day completeness metric, but also prove each supported
+        # decision window. A configured 7-day strategy must not secretly require 30.
+        out["windows"] = {}
+        for days in range(7, FIRST_DAYS + 1):
+            recent = sum(end - days * 86400 <= t < end for t in candles)
+            enough = recent >= days * 24 * 0.95
+            if kind == "perp":
+                paid = sum(now() - days * 86400 < r["ts"] <= now() for r in rates)
+                enough = enough and bool(interval) and paid >= int(days * 86400 / interval) * 0.95
+            out["windows"][str(days)] = bool(enough)
         return out
 
     def due(self, key):
@@ -335,6 +363,10 @@ class HistoryKeeper:
             key = (v, a, kind)
             if not self.due(key):
                 continue
+            worker = group or self.group(v)
+            started = now()
+            with self.lock:
+                self.active[worker] = dict(venue=v, asset=a, kind=kind, started=started)
             try:
                 added = self.sync(v, a, kind, interval, price_type)
                 state = dict(ok=True, ts=now(), added=added)
@@ -346,7 +378,9 @@ class HistoryKeeper:
             except Exception:
                 pass
             with self.lock:
+                state["seconds"] = now() - started
                 self.state[key] = state
+                self.active.pop(worker, None)
             done += 1
             self.sleep(PAUSE_SECONDS)
         return done
@@ -362,20 +396,29 @@ class HistoryKeeper:
             while not self.stop.is_set():
                 try:
                     done = self.run_once(BATCH, group)
-                except Exception:
+                except Exception as ex:
+                    with self.lock:
+                        self.worker_errors[group] = dict(ts=now(), error=str(ex)[:200])
                     done = 0
                 if not done:
                     self.stop.wait(IDLE_SECONDS)
 
         def supervise():
-            try:
-                self.publish_stored()
-            except Exception:
-                pass
+            # Fresh data is useful before warm-cache restoration finishes.
+            def hydrate():
+                try:
+                    self.publish_stored()
+                except Exception as ex:
+                    self.hydration = dict(status="error", error=str(ex)[:200])
+
+            self.hydration_thread = threading.Thread(target=hydrate, daemon=True, name="history-cache")
+            self.hydration_thread.start()
             while not self.stop.is_set():
                 try:
                     groups = {self.group(m[0]) for m in self.source.markets()}
-                except Exception:
+                except Exception as ex:
+                    with self.lock:
+                        self.worker_errors["supervisor"] = dict(ts=now(), error=str(ex)[:200])
                     groups = set()
                 for g in sorted(groups - set(self.workers), key=str):
                     t = threading.Thread(
@@ -395,6 +438,8 @@ class HistoryKeeper:
     def status(self):
         with self.lock:
             states = list(self.state.values())
+            active = [dict(s, seconds=max(0, now()-s["started"])) for s in self.active.values()]
+            errors = dict(self.worker_errors)
         try:
             listed = len(self.source.markets())
         except Exception:
@@ -412,6 +457,9 @@ class HistoryKeeper:
             synced=sum(s["ok"] for s in states),
             complete=sum(bool(s.get("complete")) for s in states),
             failed=sum(not s["ok"] for s in states),
-            stored=len(self.db.markets()),
+            stored=self.stored_count,
+            active=active,
+            worker_errors=errors,
+            hydration=dict(self.hydration),
             refresh_seconds=REFRESH_SECONDS,
         )

@@ -36,8 +36,8 @@ if __name__ == "__main__":
     a = p.parse_args()
     d = Path(a.data)
     d.mkdir(parents=True, exist_ok=True)
-    retention.maintain(d / "paper.sqlite3")
     if a.maintain:
+        retention.maintain(d / "paper.sqlite3")
         raise SystemExit(0)
     engine = RiskEngine(d / "paper.sqlite3")
     engine.running = a.autostart

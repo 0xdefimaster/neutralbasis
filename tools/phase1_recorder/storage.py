@@ -146,12 +146,18 @@ class Store:
                 return
             try:
                 self.flush()
-            finally:
-                self.closed = True
+            except BaseException:
+                # A failed JSONL flush MUST NOT commit the pending SQLite index:
+                # otherwise an index row claims a normalized line was persisted.
                 try:
-                    self.db.commit()
+                    self.db.rollback()
                 finally:
+                    self.closed = True
                     self.db.close()
+                raise
+            else:
+                self.closed = True
+                self.db.close()
 
     # --- batched writes -------------------------------------------------------------
     @contextlib.contextmanager

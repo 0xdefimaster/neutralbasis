@@ -1,6 +1,6 @@
 """Public-only venue coverage. Scan adapters never place orders or accept credentials."""
 
-import concurrent.futures, datetime, email.utils, itertools, json, math, re, sys, threading, time
+import concurrent.futures, datetime, email.utils, itertools, json, math, re, sys, threading, time, urllib.request
 from pathlib import Path
 from bot import now, hour, number
 from risk_scan import VENUES, DISPLAY
@@ -116,6 +116,10 @@ CATALOG = {
 }
 SCAN_PARALLEL = 12
 SPOT_ADAPTERS = {"Binance": "binance", "KuCoin": "kucoin", "KrakenFutures": "kraken"}
+PRICE_DISCOVERY_INTERVAL = 60
+PRICE_DISCOVERY_MAX_AGE = 90
+EXTENDED_MARKETS_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
+LIGHTER_CORE_MARKETS_URL = "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails"
 
 
 def finite(x):
@@ -274,6 +278,7 @@ class WideMarkets:
         self.lock = threading.RLock()
         self.clients = {}
         self.client_locks = {v: threading.RLock() for v in CATALOG}
+        self.decision_locks = {v: threading.RLock() for v in CATALOG}
         self.rows = {}
         self.status = {}
         self.last_scan = None
@@ -281,9 +286,16 @@ class WideMarkets:
         self.histories = {}
         self.universe = {}
         self.universe_status = {}
+        self.price_discovery_rows = []
+        self.price_discovery_status = {}
 
-    def client(self, v, spot=False):
+    def client(self, v, spot=False, decision=False):
         key = v + ":spot" if spot else v
+        source = self.clients.get(key) if decision else None
+        if decision:
+            if source is None:
+                raise ValueError(v + ": piyasa kimlikleri henüz taranmadı")
+            key += ":decision"
         if key in self.clients:
             return self.clients[key]
         spec = CATALOG[v]
@@ -297,6 +309,11 @@ class WideMarkets:
                 "options": {"defaultType": "spot" if spot else "swap"},
             }
         )
+        if v == "Hyperliquid":
+            # HIP-3 deployments are distinct venues, not native Hyperliquid perps.
+            # Their unnormalized tickers cannot match this venue's candidates, and
+            # reloading all deployments on each ticker scan delayed native quotes.
+            ex.options["fetchMarkets"] = {"types": ["swap", "spot"]}
         original = ex.fetch
 
         def audited(url, method="GET", headers=None, body=None):
@@ -325,7 +342,13 @@ class WideMarkets:
 
         ex.fetch = audited
         ex.neutralbasis_audit = None
-        ex.load_markets()
+        if decision:
+            # Public book reads must not queue behind a 30-day backfill or a scan
+            # of every instrument. Reuse discovered metadata, never credentials.
+            import copy
+            ex.set_markets(copy.deepcopy(source.markets), copy.deepcopy(source.currencies))
+        else:
+            ex.load_markets()
         self.clients[key] = ex
         return ex
 
@@ -693,7 +716,190 @@ class WideMarkets:
                     ok=False, status="unavailable", ts=now(), message=public_error(ex)
                 )
 
-    def start(self):
+    def _price_discovery_json(self, url):
+        begin = now()
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "NeutralBasisPriceDiscovery/1.0",
+                "Accept": "application/json",
+                "Cache-Control": "no-cache",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            raw = response.read(20_000_000)
+            headers = {k.lower(): v for k, v in response.headers.items()}
+        received = now()
+        age = finite(headers.get("age", 0)) or 0
+        if headers.get("date"):
+            try:
+                age = max(
+                    age,
+                    received
+                    - email.utils.parsedate_to_datetime(headers["date"]).timestamp(),
+                )
+            except (TypeError, ValueError):
+                pass
+        if age > 60 or received - begin > 15:
+            raise ValueError("Piyasa listesi eski veya yavaş; spread taramasına alınmadı")
+        obj = json.loads(raw)
+        if obj.get("code", 200) != 200 or obj.get("status", "OK") != "OK":
+            raise ValueError("Piyasa API'si başarılı yanıt vermedi")
+        audit_id = self.store.audit(url, raw, received, headers)
+        return obj, dict(received=received, audit_id=audit_id, http_age=max(0, age))
+
+    def scan_price_discovery(self):
+        """Read-only full-market marks for Extended and Lighter Core.
+
+        This universe is separate from selected paper symbols and execution eligibility.
+        One public market-list request per venue replaces per-symbol polling; stale rows
+        never form a displayed spread.
+        """
+        requests = {
+            "Extended": EXTENDED_MARKETS_URL,
+            "LighterCore": LIGHTER_CORE_MARKETS_URL,
+        }
+        rows, status = [], {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {
+                pool.submit(self._price_discovery_json, url): venue
+                for venue, url in requests.items()
+            }
+            for future, venue in futures.items():
+                try:
+                    obj, info = future.result()
+                    venue_rows = []
+                    if venue == "Extended":
+                        markets = obj.get("data")
+                        if not isinstance(markets, list):
+                            raise ValueError("Extended market listesi eksik")
+                        for market in markets:
+                            if (
+                                market.get("active") is not True
+                                or market.get("status") != "ACTIVE"
+                                or market.get("type") != "PERPETUAL"
+                            ):
+                                continue
+                            stats = market.get("marketStats") or {}
+                            mark = finite(stats.get("markPrice"))
+                            asset = str(market.get("assetName") or "").strip().upper()
+                            if not asset or mark is None or mark <= 0:
+                                continue
+                            rfq = bool(market.get("isRfq"))
+                            venue_rows.append(
+                                dict(
+                                    asset=asset,
+                                    venue=venue,
+                                    kind="perp",
+                                    symbol=market.get("name"),
+                                    mark=mark,
+                                    index=finite(stats.get("indexPrice")),
+                                    rate=None,
+                                    interval=None,
+                                    next=None,
+                                    received=info["received"],
+                                    fee=None,
+                                    leverage=None,
+                                    volume=finite(stats.get("dailyVolume")),
+                                    oi=finite(stats.get("openInterest")),
+                                    price_type="mark",
+                                    quote=market.get("collateralAssetName"),
+                                    category=str(
+                                        market.get("category") or "UNKNOWN"
+                                    ).upper(),
+                                    rfq=rfq,
+                                    execution=False,
+                                    discovery_only=True,
+                                    paper_reason=(
+                                        "Extended RFQ piyasası; bu tarama yalnızca public fiyat gösterir."
+                                        if rfq
+                                        else "Tam piyasa keşfi; bu satır paper yürütmesine bağlı değil."
+                                    ),
+                                    basis="Extended public market-list mark; read-only",
+                                    audit_id=info["audit_id"],
+                                )
+                            )
+                    else:
+                        markets = obj.get("order_book_details")
+                        if not isinstance(markets, list):
+                            raise ValueError("Lighter Core market listesi eksik")
+                        for market in markets:
+                            if (
+                                market.get("status") != "active"
+                                or market.get("market_type") != "perp"
+                                or market.get("is_frozen")
+                                or (market.get("market_config") or {}).get(
+                                    "force_reduce_only"
+                                )
+                            ):
+                                continue
+                            mark = finite(market.get("mark_price"))
+                            asset = str(market.get("symbol") or "").strip().upper()
+                            if not asset or mark is None or mark <= 0:
+                                continue
+                            venue_rows.append(
+                                dict(
+                                    asset=asset,
+                                    venue=venue,
+                                    kind="perp",
+                                    symbol=market.get("market_id"),
+                                    mark=mark,
+                                    index=finite(market.get("index_price")),
+                                    rate=None,
+                                    interval=None,
+                                    next=None,
+                                    received=info["received"],
+                                    fee=None,
+                                    leverage=None,
+                                    volume=finite(market.get("daily_quote_token_volume")),
+                                    oi=finite(market.get("open_interest_usd")),
+                                    price_type="mark",
+                                    quote="USD",
+                                    category="UNKNOWN",
+                                    rfq=False,
+                                    execution=False,
+                                    discovery_only=True,
+                                    paper_reason="Lighter Core public fiyat taraması; paper yürütmesi onaylı değil.",
+                                    basis="Lighter Core orderBookDetails mark; read-only",
+                                    audit_id=info["audit_id"],
+                                )
+                            )
+                    rows.extend(venue_rows)
+                    status[venue] = dict(
+                        ok=bool(venue_rows),
+                        ts=info["received"],
+                        markets=len(venue_rows),
+                        message="Public salt-okunur tam piyasa fiyat taraması",
+                    )
+                    if not venue_rows:
+                        status[venue]["error"] = "Güncel mark fiyatı bulunan perp yok"
+                except Exception as exc:
+                    status[venue] = dict(
+                        ok=False,
+                        ts=now(),
+                        markets=0,
+                        error=public_error(exc),
+                    )
+        with self.lock:
+            self.price_discovery_rows = rows
+            self.price_discovery_status = status
+
+    def price_discovery_snapshot(self):
+        with self.lock:
+            at = now()
+            return (
+                [
+                    dict(row)
+                    for row in self.price_discovery_rows
+                    if at - row["received"] <= PRICE_DISCOVERY_MAX_AGE
+                ],
+                {
+                    venue: dict(value)
+                    for venue, value in self.price_discovery_status.items()
+                },
+            )
+
+    def start(self, priority=()):
         if self.thread:
             return
         # Each venue has its own host and rate limiter; five at a time left a full
@@ -711,13 +917,26 @@ class WideMarkets:
                     self.last_scan = now()
                 self.stop.wait(60)
 
-        for v, s in CATALOG.items():
+        first = set(priority)
+        for v, s in sorted(CATALOG.items(), key=lambda item: (item[0] not in first, item[0])):
             if s["adapter"]:
                 thread = threading.Thread(
                     target=loop, args=(v,), daemon=True, name="public-" + v
                 )
                 self.threads.append(thread)
                 thread.start()
+
+        def price_discovery_loop():
+            while not self.stop.is_set():
+                self.scan_price_discovery()
+                self.stop.wait(PRICE_DISCOVERY_INTERVAL)
+
+        self.price_discovery_thread = threading.Thread(
+            target=price_discovery_loop,
+            daemon=True,
+            name="public-price-discovery",
+        )
+        self.price_discovery_thread.start()
 
     def snapshot(self, max_age=180):
         with self.lock:
@@ -852,8 +1071,8 @@ class WideMarkets:
     def current_funding(self, v, a):
         """One market's funding read now (for the paper desk's entry check on assets
         that only the bulk scan covers)."""
-        with self.client_locks[v]:
-            ex = self.client(v)
+        with self.decision_locks[v]:
+            ex = self.client(v, decision=True)
             ex.neutralbasis_live = True
             with self.lock:
                 row = next(
@@ -925,8 +1144,8 @@ class WideMarkets:
             return sorted(rates.values(), key=lambda r: r["ts"])
 
     def book(self, v, a, kind="perp"):
-        with self.client_locks[v]:
-            ex = self.client(v, kind == "spot" and v in SPOT_ADAPTERS)
+        with self.decision_locks[v]:
+            ex = self.client(v, kind == "spot" and v in SPOT_ADAPTERS, decision=True)
             ex.neutralbasis_live = True
             with self.lock:
                 row = next(
@@ -996,6 +1215,13 @@ def expanded_view(engine, base):
             )
     extra, status = engine.wide.snapshot()
     rows += extra
+    discovered, discovery_status = engine.wide.price_discovery_snapshot()
+    known = {(r["venue"], r["asset"], r["kind"]) for r in rows}
+    rows.extend(
+        r
+        for r in discovered
+        if (r["venue"], r["asset"], r["kind"]) not in known
+    )
     pairs = []
     with engine.wide.lock:
         histories = dict(engine.wide.histories)
@@ -1018,7 +1244,7 @@ def expanded_view(engine, base):
                 if interval and len(samples) >= int(days * 86400 / interval)
                 else None
             )
-    for a in engine.cfg["symbols"]:
+    for a in sorted({r["asset"] for r in rows if r["kind"] == "perp"}):
         ps = [r for r in rows if r["asset"] == a and r["kind"] == "perp"]
         spots = [r for r in rows if r["asset"] == a and r["kind"] == "spot"]
         for first, second in list(itertools.combinations(ps, 2)) + [
@@ -1046,6 +1272,10 @@ def expanded_view(engine, base):
                 else None
             )
             spread = math.log(s["mark"] / l["mark"])
+            # Reject likely ticker collisions and malformed venue mappings. The arb.sh
+            # OPENAI example is ~6%, safely inside this sanity bound.
+            if not math.isfinite(spread) or abs(spread) > 0.15:
+                continue
             fee = (
                 2 * (l["fee"] + s["fee"])
                 if l.get("fee") is not None and s.get("fee") is not None
@@ -1056,6 +1286,17 @@ def expanded_view(engine, base):
             sh = histories.get((s["venue"], a, s["kind"]))
             if lh and sh:
                 history = history_summary(lh["prices"], sh["prices"], now())
+            discovery_only = bool(
+                l.get("discovery_only") or s.get("discovery_only")
+            )
+            rfq = bool(l.get("rfq") or s.get("rfq"))
+            paper_reason = (
+                "Extended RFQ bacağı sadece public fiyat göstergesidir; paper dolumu desteklenmiyor."
+                if rfq
+                else "Bu çift salt okunur tam-piyasa keşfinden geldi; paper yürütme desteği yok."
+                if discovery_only
+                else None
+            )
             pairs.append(
                 dict(
                     asset=a,
@@ -1064,6 +1305,17 @@ def expanded_view(engine, base):
                     long_kind=l["kind"],
                     short_kind=s["kind"],
                     pair_type=pair_type,
+                    category=next(
+                        (
+                            x["category"]
+                            for x in (l, s)
+                            if x.get("category") and x["category"] != "UNKNOWN"
+                        ),
+                        "UNKNOWN",
+                    ),
+                    rfq=rfq,
+                    discovery_only=discovery_only,
+                    paper_reason=paper_reason,
                     long_price=l["mark"],
                     short_price=s["mark"],
                     long_price_type=l["price_type"],
@@ -1089,9 +1341,10 @@ def expanded_view(engine, base):
                     deep=bool(native and native.get("deep")),
                     eligible=bool(native and native.get("eligible")),
                     reason=(
-                        native["reason"]
+                        paper_reason
+                        or native["reason"]
                         if native
-                        else "Geniş tarama; paper yürütme onayı yok"
+                        else paper_reason or "Geniş tarama; paper yürütme onayı yok"
                     ),
                     min_volume=(
                         min(l["volume"], s["volume"])
@@ -1111,7 +1364,11 @@ def expanded_view(engine, base):
                     long_interval=l["interval"],
                     short_interval=s["interval"],
                     received=min(l["received"], s["received"]),
-                    source="native" if native else "CCXT public APIs",
+                    source=(
+                        "public price discovery"
+                        if discovery_only
+                        else "native" if native else "CCXT public APIs"
+                    ),
                 )
             )
     registry = []
@@ -1143,5 +1400,6 @@ def expanded_view(engine, base):
             cex=sum(x["fresh"] and x["kind"] == "CEX" for x in registry),
             dex=sum(x["fresh"] and x["kind"] == "DEX" for x in registry),
             version=getattr(ccxt, "__version__", None) if ccxt else None,
+            price_discovery=discovery_status,
         ),
     )

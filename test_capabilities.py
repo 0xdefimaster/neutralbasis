@@ -387,10 +387,10 @@ class FundingModelTests(unittest.TestCase):
         self.assertIn("Sürekli tahakkuk", x["method"])
 
     def test_continuous_and_unknown_models_stay_research_only(self):
-        markets = [("Hyperliquid", "BTC"), ("Paradex", "BTC"), ("RISEx", "BTC")]
+        markets = [("Hyperliquid", "BTC"), ("Paradex", "BTC"), ("Arcus", "BTC")]
         reg = full_registry(markets)
         rows = rows_for(*markets)
-        for other in ("Paradex", "RISEx"):
+        for other in ("Paradex", "Arcus"):
             why = gate(reg, pair("BTC", "Hyperliquid", other), rows)
             self.assertTrue(why)
             self.assertTrue(any("Funding modeli" in w for w in why), why)
@@ -398,6 +398,28 @@ class FundingModelTests(unittest.TestCase):
         out = reg.evaluate(AT)
         self.assertIn("funding_model", out["Paradex"]["strategies"]["convergence"])
         self.assertNotIn("funding_model", out["Hyperliquid"]["strategies"]["funding"])
+
+
+class RisexModelTests(unittest.TestCase):
+    """RISEx funding as its official docs state it (MOCK registry data)."""
+
+    def test_risex_is_hourly_periodic_and_long_pays_from_its_docs(self):
+        m = cap.funding_model("RISEx")
+        self.assertEqual(m["model"], cap.PERIODIC)
+        self.assertIn(m["model"], cap.EXECUTABLE_MODELS)
+        self.assertEqual(m["direction"], cap.LONG_PAYS)
+        self.assertEqual(m["price"], "Endeks fiyatı")
+        self.assertIn("developer.rise.trade", m["source"])
+        self.assertNotEqual(m["source"], cap.DOCS_UNREAD)
+
+    def test_a_risex_pair_still_needs_its_own_market_evidence(self):
+        markets = [("Hyperliquid", "BTC"), ("RISEx", "BTC")]
+        reg = full_registry([("Hyperliquid", "BTC")])
+        rows = rows_for(*markets)
+        why = gate(reg, pair("BTC", "Hyperliquid", "RISEx"), rows)
+        self.assertFalse(any("funding modeli" in w.lower() for w in why), why)
+        self.assertTrue(any(w.startswith("RISEx: ") for w in why), why)
+        self.assertNotIn("funding_model", reg.evaluate(AT)["RISEx"]["strategies"]["funding"])
 
 
 class PublishedSignTests(unittest.TestCase):

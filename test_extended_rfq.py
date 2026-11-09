@@ -235,6 +235,22 @@ class WebSocketTests(unittest.TestCase):
 
 
 class RfqRecorderTests(unittest.TestCase):
+    def test_subscription_rotation_retires_unused_socket_without_stopping_engine(self):
+        # MOCK streams; no network connection is made by this test.
+        owner = extended_rfq.ExtendedRfq.__new__(extended_rfq.ExtendedRfq)
+        owner.stop = threading.Event()
+        owner.lock = threading.RLock()
+        dropped, held = mock.Mock(), mock.Mock()
+        owner.streams = {"OLD": dropped, "HELD": held}
+        owner.ensure = mock.Mock()
+        owner.sync({"HELD": {"rfq": True, "id": "HELD-USD"},
+                    "NEW": {"rfq": True, "id": "NEW-USD"}})
+        dropped.retire.assert_called_once()
+        held.retire.assert_not_called()
+        self.assertFalse(owner.stop.is_set())
+        self.assertNotIn("OLD", owner.streams)
+        self.assertEqual(owner.ensure.call_count, 2)
+
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.store = bot.Store(os.path.join(self.dir.name, "r.sqlite3"))

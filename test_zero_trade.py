@@ -70,6 +70,18 @@ class CodeTests(unittest.TestCase):
         }
         for text, code in cases.items():
             self.assertEqual(zero_trade.code_of(text)[0], code, text)
+        self.assertEqual(
+            zero_trade.code_of(
+                "Birleşik getiri ücret, kayma ve risk payını karşılamıyor"
+            )[0],
+            "NET_EXPECTED_PNL_NEGATIVE",
+        )
+        self.assertEqual(
+            zero_trade.code_of(
+                "Yakınsama fiyat getirisi + funding 4 emir ücreti ve kayma sonrası yetersiz"
+            )[0],
+            "NET_EXPECTED_PNL_NEGATIVE",
+        )
 
     def test_a_cycle_record_round_trips_and_ages_out(self):
         d = zero_trade.Diagnostics()
@@ -104,6 +116,7 @@ class CodeTests(unittest.TestCase):
         c = d.cycles[0]["counts"]
         self.assertIsNone(c["combined_candidates"])
         self.assertIsNone(c["markets_discovered"])
+        self.assertNotIn("combined_candidates", d.report(1000)["not_implemented"])
 
 
 def fixture(cls, *sources):
@@ -126,6 +139,7 @@ class OpenedCycleTests(unittest.TestCase):
         c = self.desk.diag.cycles[-1]["counts"]
         self.assertGreater(c["markets_discovered"], 0)
         self.assertGreater(c["instruments_matched"], 0)
+        self.assertGreater(c["combined_candidates"], 0)
         self.assertGreater(c["economic_candidates"], 0)
         self.assertGreaterEqual(c["simulation_passed"], 1)
         self.assertEqual(c["risk_approved"], 1)

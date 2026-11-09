@@ -91,7 +91,8 @@ class WideTests(unittest.TestCase):
         left = dict(common, venue="Lighter", received=at)
         right = dict(common, venue="Extended", received=at - 40)
         wide = SimpleNamespace(
-            snapshot=lambda: ([], {}), lock=threading.RLock(), histories={}
+            snapshot=lambda: ([], {}), price_discovery_snapshot=lambda: ([], {}),
+            lock=threading.RLock(), histories={}
         )
         engine = SimpleNamespace(
             wide=wide,

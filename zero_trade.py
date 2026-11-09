@@ -19,8 +19,8 @@ STAGES = (
     "data_quality_passed",  # usable markets (fresh price, funding, fee, interval)
     "funding_candidates",  # ranked funding pairs
     "price_gap_candidates",  # ranked convergence pairs
-    "combined_candidates",  # combined funding + price gap: not implemented yet
-    "economic_candidates",  # positive score after fees (both strategies)
+    "combined_candidates",  # unique pairs ranked with signed gap + funding + fees
+    "economic_candidates",  # unique pairs with a positive preliminary joint score
     "evidence_blocked",  # positive, but a leg lacks verified evidence (research)
     "simulation_passed",  # deep check (history, book, scenarios) eligible
     "risk_approved",  # passed the entry checks (budget, margin, halts, fresh data)
@@ -44,6 +44,7 @@ RULES = (
     ("FUNDING_MODEL_UNVERIFIED", "DATA", ("funding modeli",)),
     ("FUNDING_UNKNOWN", "DATA", ("funding oranı yok", "funding oranı doğrulanmadı")),
     ("CONTRACT_SPEC_UNKNOWN", "DATA", ("kontrat büyüklüğü", "kontrat bilgisi")),
+    ("COST_EXCEEDS_EDGE", "ECONOMIC", ("maliyet sonrası skor negatif",)),
     ("FEE_INCREASED", "ECONOMIC", ("ücret yükseldi",)),
     ("FEE_UNKNOWN", "DATA", ("ücret bilinmiyor", "ücret doğrulanmadı", "ücret yok")),
     ("STALE_ORDERBOOK", "DATA", ("defter eski",)),
@@ -73,10 +74,13 @@ RULES = (
                                             "istikrarlı değil", "kesişim yok",
                                             "fiyat farkı kayıyor",
                                             "sınır ileri dönemde",
-                                            "en büyük açılmanın üstünde")),
+                                            "en büyük açılmanın üstünde",
+                                            "fark kademe")),
     ("NET_EXPECTED_PNL_NEGATIVE", "ECONOMIC", ("karşılamıyor", "avantaj göstermiyor",
                                                "kalıcı avantaj yok",
                                                "tek bir güne dayanıyor",
+                                               "birleşik getiri ücret, kayma ve risk payını",
+                                               "yakınsama fiyat getirisi + funding",
                                                "sonrası kalmıyor", "sonrası negatif",
                                                "gideri sonrası yetersiz",
                                                "seviyesinin altında")),
@@ -85,6 +89,7 @@ RULES = (
 )
 CATEGORY = {code: cat for code, cat, _ in RULES}
 CATEGORY.update(OTHER="OTHER", NO_COMMON_INSTRUMENT="DATA", COST_EXCEEDS_EDGE="ECONOMIC")
+CATEGORY.update(ORDERBOOK_DESYNC="DATA", RFQ_STREAM_UNAVAILABLE="DATA", API_RATE_LIMIT="DATA")
 
 VERDICTS = dict(
     NO_OPPORTUNITY="Şu anda geçerli fırsat yok.",
@@ -109,6 +114,16 @@ def code_of(reason):
     t = re.sub(r"^[A-Za-z0-9_.-]{1,30}: ", "", str(reason))
     # Turkish dotted/dotless capitals lower-case to i / ı (str.lower gives "i̇").
     t = t.replace("İ", "i").replace("I", "ı").lower()
+    # Book synchronization and RFQ stream failures were previously classified as
+    # OTHER, hiding actionable causes behind a generic counter.
+    if "defter" in t and "senkron" in t:
+        return "ORDERBOOK_DESYNC", "DATA"
+    if "429" in t and ("rfq" in t or "websocket" in t):
+        return "API_RATE_LIMIT", "DATA"
+    if "rfq" in t and any(x in t for x in (
+        "akışı", "akisi", "başlat", "baslat", "sessiz", "bağlı değil", "bagli degil"
+    )):
+        return "RFQ_STREAM_UNAVAILABLE", "DATA"
     for code, cat, patterns in RULES:
         if any(p in t for p in patterns):
             return code, cat
@@ -127,8 +142,35 @@ def _num(x):
 
 def opportunity(c, at, decision, reasons, stage):
     """What was known about one opportunity when it was decided. Missing values stay
-    None; the score fields are per $1 notional as the ranking computed them."""
+    None. Deep-check money is in USD per position; initial scores are per $1 notional."""
     codes = [code_of(r)[0] for r in reasons] or []
+    size = _num(c.get("size"))
+    net = _num(c.get("net"))
+    deep = size is not None and size > 0 and net is not None
+    spread = _num(c.get("entry_gap", c.get("spread")))
+    capture = _num(
+        c.get("price_capture", c.get("entry_capture", c.get("reversion_cost")))
+    )
+    funding = _num(c.get("conservative_funding", c.get("funding_horizon")))
+    if deep:
+        gross = (
+            (capture or 0.0) + (funding or 0.0)
+        ) / size
+        fees = (
+            (_num(c.get("entry_fee")) or 0.0)
+            + (_num(c.get("exit_fee")) or 0.0)
+        ) / size
+        score = net / size
+    else:
+        price_screen = _num(c.get("screen_price_gap", c.get("spread")))
+        funding_screen = _num(c.get("screen_funding"))
+        gross = (
+            (price_screen or 0.0) + (funding_screen or 0.0)
+            if price_screen is not None or funding_screen is not None
+            else None
+        )
+        fees = _num(c.get("screen_fees", c.get("fee_roundtrip")))
+        score = _num(c.get("screen_score", c.get("score")))
     return dict(
         id=opportunity_id(c, at),
         at=at,
@@ -136,16 +178,34 @@ def opportunity(c, at, decision, reasons, stage):
         asset=c.get("asset"),
         long=c.get("long"),
         short=c.get("short"),
-        signed_spread_log=_num(c.get("spread")),  # log(short mark / long mark)
+        signed_spread_log=spread,  # log(short mark / long mark)
         signed_spread_bp=(
-            round(c["spread"] * 1e4, 3) if _num(c.get("spread")) is not None else None
+            round(spread * 1e4, 3) if spread is not None else None
+        ),
+        gross_edge_per_usd=gross,
+        cost_breakdown=dict(
+            basis="position_usd" if deep else "per_usd",
+            price_gap=spread,
+            price_target_gap=_num(c.get("target_gap")),
+            price_capture=capture,
+            price_capture_probability=_num(c.get("price_capture_probability")),
+            funding=funding,
+            entry_fee=_num(c.get("entry_fee")),
+            exit_fee=_num(c.get("exit_fee")),
+            execution_drag=_num(
+                c.get("exit_drag_proxy")
+                if c.get("strategy") == "convergence"
+                else c.get("execution_drag")
+            ),
+            risk_reserve=_num(c.get("risk_reserve", c.get("stress_loss"))),
+            net=net if deep else score,
         ),
         funding_gap_per_hour=_num(c.get("funding_gap")),
-        funding_forecast_per_usd=_num(c.get("funding_horizon")),
-        trading_costs_per_usd=_num(c.get("fee_roundtrip")),
-        score_per_usd=_num(c.get("score")),
-        expected_net_usd=_num(c.get("net")),
-        size_usd=_num(c.get("size")),
+        funding_forecast_per_usd=(funding / size if deep and funding is not None else _num(c.get("funding_horizon"))),
+        trading_costs_per_usd=fees,
+        score_per_usd=score,
+        expected_net_usd=net,
+        size_usd=size,
         profit_probability=None,  # scenario engine not implemented yet (phase B)
         stage=stage,
         decision=decision,
@@ -191,13 +251,14 @@ class Diagnostics:
             c = self.current["counts"]
             c[stage] = (c.get(stage) or 0) + n
 
-    def note(self, c, at, decision, reasons, stage):
+    def note(self, c, at, decision, reasons, stage, count_codes=True):
         """Code one blocked or rejected opportunity of this cycle."""
         if self.current is None:
             return
         rec = opportunity(c, at, decision, reasons, stage)
-        for code in rec["reason_codes"] or ["OTHER"]:
-            self.current["codes"][code] = self.current["codes"].get(code, 0) + 1
+        if count_codes:
+            for code in rec["reason_codes"] or ["OTHER"]:
+                self.current["codes"][code] = self.current["codes"].get(code, 0) + 1
         if decision != "opened":
             self.rejected.append(rec)
             del self.rejected[:-KEEP_REJECTED]
@@ -272,7 +333,6 @@ class Diagnostics:
             rejected=list(reversed(self.rejected[-20:])),
             stages=list(STAGES),
             not_implemented=dict(
-                combined_candidates="Birleşik funding + fiyat farkı stratejisi henüz yok",
                 profit_probability="Senaryo motoru henüz yok",
             ),
         )

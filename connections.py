@@ -29,7 +29,7 @@ CATALOG = {
         docs="https://developer.rise.trade/reference/marketservice_getmarkets",
         paper=False,
         auth="Public piyasa erişimi testi",
-        note="Mainnet piyasa erişimi test edilir; tarih/saat birimleri ve tam adaptör doğrulanmadan paper giriş yok.",
+        note="Mainnet piyasa erişimi test edilir. Zaman damgaları nanosaniye, funding saatlik ve long öder (resmî belge). Taker ücreti public API'de yok (yalnız oturum açmış hesabın ücret kademesi); ücret girilmeden paper giriş yok.",
     ),
     "Arcus": dict(
         url="https://api.arcus.xyz/v1/markets",

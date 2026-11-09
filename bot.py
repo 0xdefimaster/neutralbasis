@@ -136,6 +136,7 @@ class Store:
             """create table if not exists kv(k text primary key,v text);
    create table if not exists audit(id integer primary key,ts real,url text,sha text,raw blob);
    create table if not exists events(id integer primary key,ts real,kind text,body text);
+   create index if not exists events_time on events(ts desc);
    create table if not exists marks(venue text,asset text,ts real,price real);
    create index if not exists marks_lookup on marks(venue,asset,ts);
    create table if not exists payments(key text primary key,ts real,body text);"""
@@ -168,14 +169,17 @@ class Store:
         envelope = (
             json.dumps(dict(headers=headers, received=received)).encode() + b"\n" + raw
         )
+        # Compress outside the shared SQLite lock: large market responses must
+        # not stop history readers, position marks or the UI during compression.
+        digest, compressed = hashlib.sha256(envelope).hexdigest(), zlib.compress(envelope)
         with self.lock:
             c = self.db.execute(
                 "insert into audit(ts,url,sha,raw) values(?,?,?,?)",
                 (
                     received,
                     url,
-                    hashlib.sha256(envelope).hexdigest(),
-                    zlib.compress(envelope),
+                    digest,
+                    compressed,
                 ),
             )
             self.db.commit()
@@ -186,6 +190,12 @@ class Store:
             self.db.execute("insert into marks values(?,?,?,?)", (v, a, t, p))
             self.db.commit()
 
+    def marks(self, rows):
+        """Persist one market snapshot with one commit rather than one per asset."""
+        with self.lock:
+            self.db.executemany("insert into marks values(?,?,?,?)", rows)
+            self.db.commit()
+
     def before(self, v, a, t):
         with self.lock:
             r = self.db.execute(
@@ -194,14 +204,22 @@ class Store:
             ).fetchone()
         return r if r and t - r[0] <= 90 else None
 
-    def recent(self, table, limit=100):
+    def recent(self, table, limit=100, brief=False):
         if table not in ("events", "payments"):
             raise ValueError("Geçersiz tablo")
         with self.lock:
             cols = [c[1] for c in self.db.execute("pragma table_info(" + table + ")")]
-            rows = self.db.execute(
-                "select * from " + table + " order by ts desc limit ?", (limit,)
-            ).fetchall()
+            if table == "events" and brief:
+                rows = self.db.execute(
+                    "select id,ts,kind,json_object('message',json_extract(body,'$.message'),"
+                    "'asset',json_extract(body,'$.asset'),'position',json_extract(body,'$.position'),"
+                    "'net',json_extract(body,'$.net'),'reasons',json_extract(body,'$.reasons')) "
+                    "from events order by ts desc limit ?", (limit,)
+                ).fetchall()
+            else:
+                rows = self.db.execute(
+                    "select * from " + table + " order by ts desc limit ?", (limit,)
+                ).fetchall()
         return [{**dict(zip(cols, r)), "body": json.loads(r[-1])} for r in rows]
 
 
@@ -213,6 +231,10 @@ class Feed:
         self.status = {}
         self.history = {}
         self.funding = {}
+        self.funding_observed = {}
+        self.rwa_funding_attempted = {}
+        self.rwa_funding_lock = threading.Lock()
+        self.rwa_funding_busy = False
 
     def get(self, url, max_age=None):
         begin = now()
@@ -247,6 +269,7 @@ class Feed:
             url = L + "orderBookDetails" if v == "Lighter" else E + "info/markets"
             obj, info = self.get(url, 60)
             result = {}
+            marks = []
             for d in obj["order_book_details"] if v == "Lighter" else obj["data"]:
                 if v == "Lighter":
                     if (
@@ -270,6 +293,9 @@ class Feed:
                         / number(d["default_initial_margin_fraction"]),
                         mm=number(d["maintenance_margin_fraction"]) / 10000,
                         rfq=False,
+                        interval=3600,
+                        volume=number(d.get("daily_quote_token_volume")),
+                        oi=number(d.get("open_interest_usd")),
                         rate=None,
                         rate_ts=None,
                         next=hour(now()) + 3600,
@@ -279,7 +305,6 @@ class Feed:
                         not d.get("active")
                         or d.get("status") != "ACTIVE"
                         or d.get("type") != "PERPETUAL"
-                        or d.get("category") != "Crypto"
                     ):
                         continue
                     asset = d["assetName"]
@@ -297,21 +322,26 @@ class Feed:
                         max_leverage=number(c["maxLeverage"]),
                         mm=0.025,
                         rfq=d.get("isRfq", False),
+                        category=d.get("category"),
+                        interval=3600,
                         rate=number(s["fundingRate"]),
                         rate_ts=info["received"],
                         next=stamp(s["nextFundingRate"]),
                         max_order=number(c["maxMarketOrderValue"]),
+                        volume=number(s.get("dailyVolume")),
+                        oi=number(s.get("openInterest")),
                     )
                 if m["mark"] <= 0 or m["index"] <= 0:
                     continue
                 m.update(info)
                 result[asset] = m
-                self.store.mark(
-                    v,
-                    asset,
-                    info["received"],
-                    m["index"] if v == "Lighter" else m["mark"],
-                )
+                marks.append((v, asset, info["received"],
+                              m["index"] if v == "Lighter" else m["mark"]))
+            if hasattr(self.store, "marks"):
+                self.store.marks(marks)
+            else:
+                for mark in marks:
+                    self.store.mark(*mark)
             return v, result
 
         result = {}
@@ -329,6 +359,54 @@ class Feed:
                 except Exception as ex:
                     self.status[v] = dict(ok=False, ts=now(), message=str(ex))
         self.meta = result
+        # Lighter publishes marks for all perps, but not their current funding rate.
+        # Hydrate the RWA RFQ markets it shares with Extended so they can enter the
+        # paper funnel. Cached, recently settled rates avoid one request per cycle.
+        extended = result.get("Extended", {})
+        lighter = result.get("Lighter", {})
+        rwa_overlap = [
+            a
+            for a, m in extended.items()
+            if m.get("category") == "RWA" and m.get("rfq") and a in lighter
+        ]
+
+        def hydrate_lighter_funding(asset):
+            market = (self.meta.get("Lighter") or {}).get(asset)
+            if market is None:
+                return
+            cached = self.funding.get(("Lighter", asset)) or []
+            if cached and now() - cached[-1]["ts"] <= 4000:
+                market["rate"] = cached[-1]["rate"]
+                market["rate_ts"] = cached[-1]["ts"]
+                market["funding_observed_at"] = self.funding_observed.get(("Lighter", asset))
+                return
+            attempted = self.rwa_funding_attempted.get(asset, 0)
+            if now() - attempted < 60:
+                return
+            self.rwa_funding_attempted[asset] = now()
+            try:
+                self.funding_history("Lighter", asset, now() - 4 * 3600)
+            except Exception:
+                # Unknown/stale funding leaves the market out of executable candidates.
+                return
+
+        def hydrate_rwa_batch():
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(hydrate_lighter_funding, rwa_overlap))
+            finally:
+                with self.rwa_funding_lock:
+                    self.rwa_funding_busy = False
+
+        if rwa_overlap:
+            with self.rwa_funding_lock:
+                if not self.rwa_funding_busy:
+                    self.rwa_funding_busy = True
+                    threading.Thread(
+                        target=hydrate_rwa_batch,
+                        daemon=True,
+                        name="rwa-funding-hydration",
+                    ).start()
         for v in ("TxFlow", "RISEx", "Arcus", "Variational"):
             self.status[v] = dict(
                 ok=False,
@@ -481,10 +559,13 @@ class Feed:
         if not rows or end - rows[-1]["ts"] > 4000:
             raise ValueError("Son gerçekleşen funding verisi eksik/eski")
         self.funding[(v, asset)] = rows
+        self.funding_observed[(v, asset)] = info["received"]
         # Lighter quote feed has ambiguous horizon; use confirmed last hourly settlement as forecast.
         if v == "Lighter":
             m["rate"] = rows[-1]["rate"]
             m["rate_ts"] = rows[-1]["ts"]
+            m["funding_observed_at"] = info["received"]
+            m["funding_kind"] = "last_settled_projection"
         return rows
 
     def book(self, v, asset):
@@ -1223,13 +1304,37 @@ class Engine:
                 raise ValueError(
                     "İki platform birlikte erişilebilir değil; yeni girişler durdu"
                 )
-            assets = [
-                a
-                for a in self.cfg["symbols"]
-                if all(a in meta[v] for v in ("Lighter", "Extended"))
-            ]
-            missing = [a for a in self.cfg["symbols"] if a not in assets]
-            # RFQ markets have no executable public book; label them without fetching one.
+            if self.cfg.get("legacy_entries", True):
+                assets = [
+                    a
+                    for a in self.cfg["symbols"]
+                    if all(a in meta[v] for v in ("Lighter", "Extended"))
+                ]
+                missing = [a for a in self.cfg["symbols"] if a not in assets]
+            else:
+                # The multi-venue workspace has disabled new entries in this older
+                # two-venue engine. Do not refetch books/funding/history for every
+                # configured symbol; keep only data needed to monitor legacy positions
+                # or settle their pending payments.
+                needed = {
+                    p["asset"]
+                    for p in self.positions
+                }
+                needed.update(
+                    p["asset"]
+                    for p in self.closed
+                    if p.get("pending_funding")
+                    or p.get("funding_unverified")
+                    or p.get("funding_unknown")
+                )
+                assets = [
+                    a
+                    for a in needed
+                    if all(a in meta[v] for v in ("Lighter", "Extended"))
+                ]
+                missing = []
+            # The legacy two-venue engine has no RFQ order route. Its multi-venue paper
+            # counterpart uses ExtendedRfq's separate real-book stream.
             rfq = [
                 a
                 for a in assets
@@ -1497,9 +1602,30 @@ class Engine:
     def loop(self):
         while not self.stop_event.is_set():
             with self.lock:
-                self.cycle()
-                self.public_snapshot = json.loads(json.dumps(self.snapshot()))
+                self.cycle_started = now()
+                try:
+                    self.cycle()
+                    if self.stop_event.is_set():
+                        break
+                    self.stage = "Panel görünümü hazırlanıyor"
+                    self.public_snapshot = json.loads(json.dumps(self.snapshot()))
+                except Exception as ex:
+                    # A snapshot failure must not silently kill the only decision worker.
+                    self.error = str(ex)
+                    self.events("ERROR", "Karar döngüsü: " + str(ex))
+                finally:
+                    self.cycle_finished = now()
+                    self.stage = "Bekliyor"
             self.stop_event.wait(self.cfg["poll_seconds"])
+
+    def runtime_status(self):
+        started = getattr(self, "cycle_started", None)
+        finished = getattr(self, "cycle_finished", None)
+        return dict(stage=getattr(self, "stage", "Başlatılıyor"),
+                    started=started, finished=finished,
+                    elapsed_seconds=max(0, now()-started) if started and (not finished or started > finished) else None,
+                    last_cycle_age_seconds=max(0, now()-self.last_cycle) if self.last_cycle else None,
+                    error=self.error)
 
     def snapshot(self):
         return dict(
@@ -1516,7 +1642,7 @@ class Engine:
             platforms=self.feed.status,
             last_cycle=self.last_cycle,
             error=self.error,
-            events=self.store.recent("events", 60),
+            events=self.store.recent("events", 60, brief=True),
             payments=self.store.recent("payments", 60),
             pending_funding=any(
                 p.get("pending_funding") for p in self.positions + self.closed
@@ -1604,6 +1730,17 @@ def serve(engine, port, host="127.0.0.1", password=None):
                     return self.challenge()
                 return self.send({"error": "Yerel host gerekli"}, 403)
             if self.path == "/api/state":
+                # A dashboard poll reads a published immutable snapshot, never
+                # rebuilds pair histories or scans SQLite on a request thread.
+                if engine.public_snapshot is not None:
+                    runtime = getattr(engine, "runtime_status", lambda: {})()
+                    return self.send({
+                        **engine.public_snapshot,
+                        "running": engine.running,
+                        "busy": runtime.get("elapsed_seconds") is not None,
+                        "runtime": runtime,
+                        **({"feed_status": dict(engine.feed_status)} if hasattr(engine, "feed_status") else {}),
+                    })
                 # A cycle performs HTTP I/O; read state only between atomic updates to avoid torn JSON.
                 if not engine.lock.acquire(timeout=0.1):
                     return self.send(
@@ -1612,12 +1749,13 @@ def serve(engine, port, host="127.0.0.1", password=None):
                             "busy": True,
                             "running": engine.running,
                             "connections": engine.connections.view(),
+                            "runtime": getattr(engine, "runtime_status", lambda: {})(),
                         }
                         if engine.public_snapshot
                         else {"busy": True}
                     )
                 try:
-                    return self.send(engine.snapshot())
+                    return self.send({**engine.snapshot(), "runtime": getattr(engine, "runtime_status", lambda: {})()})
                 finally:
                     engine.lock.release()
             if self.path == "/api/audit-export":
