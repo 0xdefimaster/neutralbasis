@@ -121,6 +121,53 @@ PRICE_DISCOVERY_INTERVAL = 60
 PRICE_DISCOVERY_MAX_AGE = 90
 EXTENDED_MARKETS_URL = "https://api.starknet.extended.exchange/api/v1/info/markets"
 LIGHTER_CORE_MARKETS_URL = "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails"
+# Lighter Core funding comes from the venue's own public `fundings` endpoint (the same
+# API and parsing as Lighter RH in bot.Feed): CCXT's lighter adapter gives a rate with
+# no interval, no timestamps and no history (fetchFundingRateHistory NotSupported), and
+# its figure is 8x the settled hourly rate on BTC/ETH/SOL (2026-11-10): its unit is
+# UNKNOWN, so it is never used. The last settled payment is a projection, labelled so.
+LIGHTER_CORE_API = "https://mainnet.zklighter.elliot.ai/api/v1/"
+# Settlement rows older than this are not a current rate (bot.Feed.funding_history).
+LIGHTER_SETTLED_MAX_AGE = 4000
+# New `fundings` requests per scan; cached rows are reused until the next settlement.
+LIGHTER_CORE_FETCH_PER_SCAN = 40
+# CCXT reports Lighter Core taker 0.0. The account type is not verified: Standard
+# accounts pay 0 % with a 300 ms taker delay, Premium 0.028 % taker
+# (docs.lighter.xyz/trading/trading-fees, read 2026-11-10). Zero is never assumed.
+LIGHTER_CORE_TAKER_FEE = 0.00028
+LIGHTER_CORE_FEE_SOURCE = (
+    "Belge: Premium taker %0,028 (hesap türü doğrulanmadı; Standard %0, 300 ms gecikme)"
+)
+
+
+def lighter_fundings(obj):
+    """Native Lighter `fundings` rows -> [dict(ts, rate, value)], oldest first. Engine
+    convention (bot.Feed): direction "long" -> +|rate|/100 (the long pays)."""
+    rows = []
+    for x in obj.get("fundings") or []:
+        d = x.get("direction")
+        sign = 1 if d == "long" else -1 if d == "short" else None
+        if sign is None:
+            raise ValueError("Bilinmeyen funding yönü")
+        rate, ts = finite(x.get("rate")), finite(x.get("timestamp"))
+        if rate is None or ts is None:
+            continue
+        value = finite(x.get("value"))
+        rows.append(dict(ts=ts, rate=abs(rate) / 100 * sign,
+                         value=None if value is None else abs(value) * sign))
+    return sorted(rows, key=lambda r: r["ts"])
+
+
+def settled_interval(rows):
+    """The payment interval shown by the settlements themselves: the last three gaps
+    equal and within a day; None otherwise (never a guessed default)."""
+    times = [r["ts"] for r in rows][-4:]
+    gaps = {b - a for a, b in zip(times, times[1:])}
+    if len(times) >= 4 and len(gaps) == 1:
+        gap = gaps.pop()
+        if 0 < gap <= 86400:
+            return gap
+    return None
 
 
 def finite(x):
@@ -291,6 +338,81 @@ class WideMarkets:
         self.price_discovery_status = {}
         # Per-venue HTTP outcomes, 429 backoff (Retry-After) and circuit breaker.
         self.http_stats = runtime_metrics.HttpGuard()
+        # Lighter Core: last native settlement per market id, and this scan's budget.
+        self.lighter_core_settled = {}
+        self.lighter_core_budget = 0
+
+    def lighter_core_funding(self, market_id, at):
+        """The last settled payment of one Lighter Core market from the native API
+        (cached until the next settlement is due; new requests limited per scan).
+        None when unknown, stale or without a provable interval."""
+        with self.lock:
+            cached = self.lighter_core_settled.get(market_id)
+        due = cached is None or (
+            cached["interval"] is None
+            or at >= cached["ts"] + cached["interval"] + 300
+        )
+        if due and self.lighter_core_budget > 0:
+            self.lighter_core_budget -= 1
+            url = LIGHTER_CORE_API + "fundings?" + urllib.parse.urlencode(
+                dict(market_id=int(market_id), resolution="1h",
+                     start_timestamp=int(at) - 6 * 3600, end_timestamp=int(at) + 60,
+                     count_back=8)
+            )
+            obj, info = self._price_discovery_json(url)
+            rows = lighter_fundings(obj)
+            if rows:
+                cached = dict(ts=rows[-1]["ts"], rate=rows[-1]["rate"],
+                              interval=settled_interval(rows),
+                              observed=info["received"], audit_id=info["audit_id"])
+                with self.lock:
+                    self.lighter_core_settled[market_id] = cached
+        if not cached or not cached["interval"] or at - cached["ts"] > LIGHTER_SETTLED_MAX_AGE:
+            return None
+        return dict(
+            raw_rate=cached["rate"], interval=cached["interval"],
+            next=cached["ts"] + cached["interval"], funding_received=cached["observed"],
+            funding_kind="last_settled_projection", audit_id=cached["audit_id"],
+        )
+
+    def lighter_core_history(self, market_id, start):
+        """Settled hourly payments of a Lighter Core market since `start` from the
+        native API (at most 750 per call, as the venue documents); oldest first."""
+        rows, cursor, end = [], int(start), int(now()) + 60
+        for _ in range(4):
+            url = LIGHTER_CORE_API + "fundings?" + urllib.parse.urlencode(
+                dict(market_id=int(market_id), resolution="1h", start_timestamp=cursor,
+                     end_timestamp=end, count_back=750)
+            )
+            obj, info = self._price_discovery_json(url)
+            batch = [dict(r, audit_id=info["audit_id"]) for r in lighter_fundings(obj)
+                     if start <= r["ts"] <= now()]
+            rows += batch
+            if len(batch) < 750:
+                break
+            cursor = int(batch[-1]["ts"]) + 1
+        return sorted({r["ts"]: r for r in rows}.values(), key=lambda r: r["ts"])
+
+    def apply_lighter_core(self, row, market, at):
+        """Replace a Lighter Core row's CCXT funding (unit and interval UNKNOWN) and fee
+        (0.0) with the native last settlement and the documented Premium taker fee."""
+        try:
+            native = self.lighter_core_funding(market["id"], at)
+        except Exception as e:
+            native = None
+            row["funding_error"] = public_error(e)
+        row.update(fee=LIGHTER_CORE_TAKER_FEE, fee_source=LIGHTER_CORE_FEE_SOURCE)
+        if native is None:
+            row.update(raw_rate=None, rate=None, interval=None, next=None)
+            return row
+        row.update(
+            raw_rate=native["raw_rate"], interval=native["interval"],
+            rate=native["raw_rate"] / (native["interval"] / 3600), next=native["next"],
+            funding_received=native["funding_received"],
+            funding_kind=native["funding_kind"],
+            basis="Lighter Core yerel API: son gerçekleşen saatlik ödeme (projeksiyon)",
+        )
+        return row
 
     def client(self, v, spot=False, decision=False):
         key = v + ":spot" if spot else v
@@ -419,6 +541,16 @@ class WideMarkets:
             )
             raw = finite(r.get("fundingRate"))
             nxt = finite(r.get("nextFundingTimestamp") or r.get("fundingTimestamp"))
+            native = None
+            if v == "LighterCore":
+                # The CCXT figure (unit and interval UNKNOWN) is never used here.
+                try:
+                    native = self.lighter_core_funding(m["id"], received)
+                except Exception:
+                    native = None
+                raw = native["raw_rate"] if native else None
+                interval = native["interval"] if native else None
+                nxt = native["next"] * 1000 if native else None
             if raw is not None and not interval:
                 no_interval += 1
             if raw is None or not interval:
@@ -440,6 +572,12 @@ class WideMarkets:
                 oi=interest_value(interest.get(m["symbol"]), r.get("markPrice")),
                 received=received,
             )
+            if native is not None:
+                out[a].update(
+                    fee=LIGHTER_CORE_TAKER_FEE, fee_source=LIGHTER_CORE_FEE_SOURCE,
+                    funding_received=native["funding_received"],
+                    funding_kind=native["funding_kind"],
+                )
         with self.lock:
             self.universe[v] = out
             self.universe_status[v] = dict(
@@ -462,6 +600,8 @@ class WideMarkets:
     def scan_one(self, v):
         try:
             with self.client_locks[v]:
+                if v == "LighterCore":
+                    self.lighter_core_budget = LIGHTER_CORE_FETCH_PER_SCAN
                 ex = self.client(v)
                 ex.neutralbasis_live = True
                 selected = {}
@@ -478,6 +618,13 @@ class WideMarkets:
                     old = selected.get(a)
                     if old is None or (m["quote"] == "USDT" and old["quote"] != "USDT"):
                         selected[a] = m
+                if v == "LighterCore":
+                    # The selected (paper) markets get the request budget first.
+                    for m in selected.values():
+                        try:
+                            self.lighter_core_funding(m["id"], now())
+                        except Exception:
+                            pass
                 all_rates = self.scan_universe(v, ex)
                 if not selected:
                     raise ValueError(
@@ -655,6 +802,8 @@ class WideMarkets:
                             quote=m["quote"],
                         )
                     )
+                    if v == "LighterCore":
+                        self.apply_lighter_core(out[-1], m, received)
                 if not out:
                     raise ValueError("Fiyat snapshot’ı yok; eski veya eksik veri")
                 # Spot cannot be shorted in the simulator. It is only a long cash leg.
@@ -1148,6 +1297,8 @@ class WideMarkets:
                 ) or self.universe.get(v, {}).get(a)
             if not row:
                 raise ValueError(v + ": seçili piyasanın güncel verisi yok")
+            if v == "LighterCore":
+                return self.lighter_core_history(ex.market(row["symbol"])["id"], start)
             if not ex.has.get("fetchFundingRateHistory"):
                 raise ValueError(v + ": gerçekleşmiş funding geçmişi adaptörde yok")
             cursor = int(start * 1000)
