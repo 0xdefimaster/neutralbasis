@@ -493,6 +493,11 @@ class Registry:
             return
         seen = r.get("received") or at
         nxt = r.get("next")
+        if nxt and seen >= nxt:
+            # Seen at or after its own payment time: not a prediction of that payment,
+            # and it must not overwrite the observation made before it (2026-11-10:
+            # this dropped every hourly comparison of last-settled venues).
+            return
         bucket = str(int(nxt) if nxt else int(seen // iv + 1) * int(iv))
         obs = self.predictions.setdefault(market_key(r["venue"], r["asset"]), {})
         obs[bucket] = [round(seen), rate, nxt]

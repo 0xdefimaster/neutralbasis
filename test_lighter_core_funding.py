@@ -98,6 +98,16 @@ class NativeFundingTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertAlmostEqual(x["raw_rate"], 0.000024)
 
+    def test_projection_is_unknown_once_its_payment_is_due(self):
+        # 2026-11-10 pilot: rows kept the passed payment time as `next` for minutes after
+        # the hour; observed then, they replaced the valid pre-hour observation.
+        self.w.lighter_core_budget = 5
+        self.assertIsNotNone(self.w.lighter_core_funding("1", T0 + H - 1))
+        self.assertIsNone(self.w.lighter_core_funding("1", T0 + H + 10))  # due, not asked
+        self.response = mock_fundings(T0 + H)
+        x = self.w.lighter_core_funding("1", T0 + H + 31)  # asked 30 s after the hour
+        self.assertEqual(x["next"], T0 + 2 * H)
+
     def test_no_budget_and_no_cache_is_unknown_not_a_guess(self):
         self.w.lighter_core_budget = 0
         self.assertIsNone(self.w.lighter_core_funding("1", self.clock))
@@ -130,6 +140,24 @@ class NativeFundingTests(unittest.TestCase):
         self.assertEqual(len(rows), 25)  # T0-24h .. T0 inclusive
         self.assertTrue(all(r["ts"] >= T0 - 24 * H for r in rows))
         self.assertIn("count_back=750", self.calls[0])
+
+
+class PublishedEvidenceTests(unittest.TestCase):
+    """capabilities.observe_prediction: an observation made at or after its own payment
+    time never replaces the one made before it (the comparison is kept)."""
+
+    def test_late_observation_does_not_erase_the_comparison(self):
+        import capabilities
+        reg = capabilities.Registry({})
+        row = dict(venue="Hyperliquid", asset="BTC", interval=3600, raw_rate=1.2e-5,
+                   next=T0 + H)
+        reg.observe_prediction(dict(row, received=T0 + H - 600), T0 + H - 600)
+        reg.observe_prediction(dict(row, received=T0 + H + 180), T0 + H + 180)  # stale row
+        key = capabilities.market_key("Hyperliquid", "BTC")
+        self.assertEqual(reg.predictions[key][str(T0 + H)][0], T0 + H - 600)
+        reg.compare_published(key, 3600, [(T0 + H, 1.3e-5)], T0 + H + 300)
+        self.assertEqual(len(reg.published[key]), 1)
+        self.assertTrue(reg.published[key][0][1])  # same sign
 
 
 class FakeLighter:

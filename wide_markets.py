@@ -131,6 +131,8 @@ LIGHTER_CORE_API = "https://mainnet.zklighter.elliot.ai/api/v1/"
 LIGHTER_SETTLED_MAX_AGE = 4000
 # New `fundings` requests per scan; cached rows are reused until the next settlement.
 LIGHTER_CORE_FETCH_PER_SCAN = 40
+# A due settlement is asked for this long after its hour (publication measured <= 12 s).
+LIGHTER_SETTLED_ASK_AFTER = 30
 # CCXT reports Lighter Core taker 0.0. The account type is not verified: Standard
 # accounts pay 0 % with a 300 ms taker delay, Premium 0.028 % taker
 # (docs.lighter.xyz/trading/trading-fees, read 2026-11-10). Zero is never assumed.
@@ -348,9 +350,11 @@ class WideMarkets:
         None when unknown, stale or without a provable interval."""
         with self.lock:
             cached = self.lighter_core_settled.get(market_id)
+        # A new settlement is due at ts + interval; the venue published it within 12 s at
+        # the measured boundary (2026-11-10), so it is asked for 30 s later.
         due = cached is None or (
             cached["interval"] is None
-            or at >= cached["ts"] + cached["interval"] + 300
+            or at >= cached["ts"] + cached["interval"] + LIGHTER_SETTLED_ASK_AFTER
         )
         if due and self.lighter_core_budget > 0:
             self.lighter_core_budget -= 1
@@ -368,6 +372,10 @@ class WideMarkets:
                 with self.lock:
                     self.lighter_core_settled[market_id] = cached
         if not cached or not cached["interval"] or at - cached["ts"] > LIGHTER_SETTLED_MAX_AGE:
+            return None
+        if at >= cached["ts"] + cached["interval"]:
+            # Its next payment is already due: the projection is outdated until the new
+            # settlement is read. Unknown, not the previous period's rate.
             return None
         return dict(
             raw_rate=cached["rate"], interval=cached["interval"],
