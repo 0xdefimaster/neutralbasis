@@ -410,7 +410,7 @@ class Feed:
                     )
                 except Exception as ex:
                     self.status[v] = dict(ok=False, ts=now(), message=str(ex))
-        self.meta = result
+        self.meta = self.publish_markets(result)
         # Lighter publishes marks for all perps, but not their current funding rate.
         # Hydrate the RWA RFQ markets it shares with Extended so they can enter the
         # paper funnel. Cached, recently settled rates avoid one request per cycle.
@@ -619,6 +619,10 @@ class Feed:
             m["funding_observed_at"] = info["received"]
             m["funding_kind"] = "last_settled_projection"
         return rows
+
+    def publish_markets(self, result):
+        """The market map readers see from now on. The base feed owns all its venues."""
+        return result
 
     def market(self, v, asset):
         """This cycle's market entry. A venue whose market list failed this cycle (or a

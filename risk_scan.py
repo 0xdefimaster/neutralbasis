@@ -262,6 +262,15 @@ class FiveFeed(Feed):
             **extra,
         )
 
+    def publish_markets(self, result):
+        """The base refresh publishes Lighter and Extended first; this feed's other
+        venues are read afterwards (several seconds). Until then their last listing stays
+        readable, as it was before the refresh began, instead of vanishing: a deep check
+        in that window used to see "no RISEx market" (bare KeyError / "oracle" candles).
+        A venue whose listing fails in this refresh is dropped below, as before."""
+        keep = {v: m for v, m in (self.meta or {}).items() if v not in result}
+        return {**keep, **result}
+
     def markets(self):
         # Core/Ethereum host is never contacted by this feed.
         super().markets()
@@ -383,6 +392,9 @@ class FiveFeed(Feed):
                         + " seçili varlık",
                     )
                 except Exception as ex:
+                    # A failed listing leaves the venue out of this cycle, as before; its
+                    # previous listing is not kept past the refresh.
+                    meta.pop(v, None)
                     self.status[v] = dict(ok=False, ts=now(), message=str(ex))
             r.result()
         self.status.pop("Variational", None)

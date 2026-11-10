@@ -1,6 +1,7 @@
 """A venue whose market list failed this cycle gives a readable book error, not a bare
 KeyError whose text ("'Extended'") became a rejection reason in the pilot."""
 import unittest
+from unittest.mock import patch
 
 import bot
 import risk_scan
@@ -40,6 +41,52 @@ class FeedMarketTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as cm:
                     bare(cls, {}).funding_history(v, "SOL", 0)
                 self.assertIn(v + ": piyasa listesi bu turda alınamadı", str(cm.exception))
+
+    def test_refresh_keeps_other_venues_readable_until_replaced(self):
+        old_rise = {"BTC": dict(price_type="trade", received=1.0, mark=1.0)}
+        new_rise = {"ETH": dict(price_type="trade", received=2.0, mark=2.0)}
+        f = bare(risk_scan.FiveFeed, {"RISEx": old_rise, "Lighter": {}, "Extended": {}})
+        f.symbols, f.status = [], {}
+        f.store = type("S", (), {"mark": lambda *a, **k: None})()
+        seen = {}
+
+        def base_markets(feed):
+            feed.meta = feed.publish_markets({"Lighter": {}, "Extended": {}})
+            seen["mid_refresh"] = feed.meta.get("RISEx")
+            return feed.meta
+
+        def req(url, *a, **k):
+            if "rise.trade" in url:
+                return {}, {}
+            raise ValueError("offline")
+
+        with patch.object(bot.Feed, "markets", base_markets), \
+                patch.object(risk_scan.FiveFeed, "req", side_effect=req), \
+                patch.object(risk_scan, "rise_rows", return_value=(new_rise, {})):
+            f.markets()
+        # During the refresh RISEx was still the last listing, never missing.
+        self.assertIs(seen["mid_refresh"], old_rise)
+        # Afterwards it is this refresh's listing; failed venues are not kept.
+        self.assertIs(f.meta["RISEx"], new_rise)
+        self.assertNotIn("Arcus", f.meta)
+        self.assertNotIn("TxFlow", f.meta)
+
+    def test_failed_listing_drops_the_venue(self):
+        f = bare(risk_scan.FiveFeed, {"RISEx": {"BTC": {}}, "Lighter": {}, "Extended": {}})
+        f.symbols, f.status = [], {}
+
+        def base_markets(feed):
+            feed.meta = feed.publish_markets({"Lighter": {}, "Extended": {}})
+            return feed.meta
+
+        with patch.object(bot.Feed, "markets", base_markets), \
+                patch.object(risk_scan.FiveFeed, "req", side_effect=ValueError("offline")):
+            f.markets()
+        self.assertNotIn("RISEx", f.meta)
+        self.assertFalse(f.status["RISEx"]["ok"])
+        # The base feed alone keeps its own behaviour: it publishes only what it read.
+        self.assertEqual(bare(bot.Feed, {"RISEx": {}}).publish_markets({"Lighter": {}}),
+                         {"Lighter": {}})
 
     def test_present_market_is_returned(self):
         m = dict(rfq=True)
