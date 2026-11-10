@@ -38,8 +38,10 @@ class RisexUniverseTests(unittest.TestCase):
         self.assertAlmostEqual(aero["raw_rate"], 0.000047220822708962, places=12)
 
     def test_category_and_status_filters_still_apply(self):
-        out, _ = risk_scan.rise_rows(FakeFeed(), risex(), INFO)
+        feed = FakeFeed()
+        out, _ = risk_scan.rise_rows(feed, risex(), INFO)
         self.assertNotIn("SNDK", out)  # stocks: a different instrument class
+        self.assertIn("SNDK", feed.rwa_tickers)  # remembered for the identity gate
         self.assertFalse(any("deprecated" in a for a in out))  # inactive market
 
     def test_one_broken_market_does_not_drop_the_venue(self):

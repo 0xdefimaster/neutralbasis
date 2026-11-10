@@ -33,6 +33,7 @@ STAGES = (
 # Categories: DATA (data quality / verification evidence), HISTORY, ECONOMIC, RISK,
 # EXECUTION, STRATEGY.
 RULES = (
+    ("IDENTITY_UNVERIFIED", "DATA", ("kimlik doğrulanmadı",)),
     ("FUNDING_SIGN_CONFLICT", "DATA", ("prim yönünün tersine", "işareti çelişkili")),
     ("FUNDING_SIGN_UNVERIFIED", "DATA", ("funding işaret",)),
     ("FUNDING_UNIT_MISMATCH", "DATA", ("aynı birimde değil",)),

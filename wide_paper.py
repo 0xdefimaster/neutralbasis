@@ -3333,6 +3333,7 @@ class WidePaper:
                 ("funding", self.candidates),
                 ("convergence", self.conv_candidates),
             ):
+                rwa = self.rwa_assets()
                 for i, c in enumerate(ranked):
                     # The legs about to be deep-checked get their own schedule check.
                     if stored and i < 4 * self.cfg["wide_deep_top"]:
@@ -3352,6 +3353,10 @@ class WidePaper:
                     why = capabilities.pair_blockers(
                         self.capabilities, self.registry, key, c, self.rows, at
                     )
+                    if c["asset"] in rwa or c["asset"].split("_")[0] in rwa:
+                        why = list(why) + [
+                            "Kimlik doğrulanmadı: %s bir borsada RWA/hisse olarak listeleniyor; "
+                            "borsalar arası sözleşme eşleşmesi doğrulanmadı" % c["asset"]]
                     if why:
                         c["research"] = why
             diag.set("funding_candidates", len(self.candidates))
@@ -4023,6 +4028,22 @@ class WidePaper:
                     retry_at=wait["until"] if wait else None,
                 )
             )
+        return out
+
+    def rwa_assets(self):
+        """Tickers some venue lists as a real-world asset (Extended category RWA, RISEx
+        stocks/ETF/commodity). Lighter publishes no asset class, so a same-named market
+        there could be the same equity or not: every pair on such a ticker stays research
+        (IDENTITY_UNVERIFIED) until the contracts are matched. Only adds a block."""
+        out = set()
+        for (v, a), r in list(self.rows.items()):
+            if str(r.get("category") or "").upper() == "RWA":
+                out.update((a, a.split("_")[0]))
+        engine = getattr(self.source, "engine", None)
+        out.update(getattr(getattr(engine, "feed", None), "rwa_tickers", None) or ())
+        for r in list(getattr(getattr(engine, "wide", None), "price_discovery_rows", None) or []):
+            if str(r.get("category") or "").upper() == "RWA":
+                out.update((r["asset"], r["asset"].split("_")[0]))
         return out
 
     CANDIDATE_PAGE_MAX = 200

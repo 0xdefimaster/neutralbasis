@@ -124,12 +124,13 @@ def rise_rows(feed, o, info):
         try:
             a = d["underlying"].split("/")[0]
             c = d["config"]
-            if (
-                not d.get("active")
-                or not c["unlocked"]
-                or d.get("reduce_only")
-                or d.get("category") != "crypto"
-            ):
+            if not d.get("active") or not c["unlocked"] or d.get("reduce_only"):
+                continue
+            if d.get("category") != "crypto":
+                # Stocks / ETFs / commodities stay out of the engine feed; their tickers
+                # are remembered so a same-named market elsewhere is not taken for the
+                # same instrument (identity unverified).
+                feed.__dict__.setdefault("rwa_tickers", set()).add(a)
                 continue
             interval = number(d["funding_interval"]) / 1e9
             out[a] = feed.generic(
