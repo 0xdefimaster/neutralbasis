@@ -78,3 +78,27 @@ Before → after, measured:
 - **F1:** +45 pairs reach a deep check. Of these, 36 have another observed outcome that is economic, statistical or data; 9 are UNKNOWN.
 - **Lighter Core:** from 0 evaluable markets to 65 fresh in the pilot (215 listed), waiting for sign evidence.
 - **Eligible:** 0 → 0 in all completed evidence.
+
+## Update 2026-11-10 05:40: more defects, and the pilot's first real deep checks
+
+| # | Defect (real data) | Before | After | Commit / test |
+|---|---|---|---|---|
+| 8 | RISEx / Arcus kept only the legacy 15 symbols | RISEx 9 of 25 crypto markets; AERO Ext→RISEx impossible | 25/25; AERO Ext→RISEx engine rank 3–7 | `46300a7`, `test_native_universe` |
+| 9 | Lighter Core rows had no mark (CCXT: no mark price, no ticker bid/ask) | 215 markets in the matrix, **0 candidates** (last trade refused; universe mark None) | Native mark/index: selected 15/15, universe 19/20; **92 funding candidates** | `5d51f8e`, `test_lighter_core_funding` |
+| 10 | Legs paired by ticker across RWA and non-RWA markets (Lighter has no asset class) | "SOXL LighterCore → Extended" (Extended RWA) ranked 4th; would have become executable once the sign gate opened | Ticker listed as RWA anywhere → research (`IDENTITY_UNVERIFIED`) everywhere: 68 funding / 71 convergence pairs held | `b1d95e7`, `test_identity_gate` |
+| 11 | Top-40 view hid ranks 41+ | Only 40 of 469 candidates visible | `/api/candidates`, paged, read-only, every class and reason | `37b431f`, `test_candidate_page` |
+
+### Funding evidence (pilot database, read-only audit)
+
+| Time | Hyperliquid | Extended | Lighter RH | RISEx | Lighter Core |
+|---|---|---|---|---|---|
+| 03:04 | 0 samples | 1 market with 1 | 0 | 0 | **64/65 stale (overwrite bug)** |
+| 04:17 | 30 markets with 2 | 21 with 2 | 10 with 2 | 3 with 2 | 14 compared (`c49455f` works); 49 queued for the 15-min re-check |
+| 05:12 | 104 with 2 | 2 ready (3+); **venue gate OPEN** | 2 ready | — | 62 with 1, **0 stale** |
+| 05:35 | **71 ready, venue gate OPEN** (285 agree / 0 disagree) | **56 ready, gate OPEN** (248 / 0) | **16 ready, gate OPEN** (58 / 2) | 7 ready, sign gate open (6/7) | 45 with 2 (gate expected after 06:00) |
+
+### Pilot funnel after the gates opened (05:36)
+
+- 114 deep checks, **0 eligible, 0 risk approvals, 0 PAPER positions**.
+- First reference pair through the deep check: AERO Extended → Hyperliquid, rejected `NET_EXPECTED_PNL_NEGATIVE` (net −$44.06) on the engine's conservative real-RFQ-book fill model.
+- Whole-list classes and first codes: `PAIR_PARITY_AUDIT.md`.

@@ -1,5 +1,7 @@
 # Opportunity Visibility: arb.sh pairs in NeutralBasis
 
+> **Superseded for the final numbers by `PAIR_PARITY_AUDIT.md`** (all 14 reference pairs, measured 05:35–05:40 after the funding gates opened) and `pair_verdicts.json`. This file keeps the first investigation (03:27–03:38).
+
 2026-11-10 · PAPER ONLY · No gate bypass. Data:
 
 - `pilot/opportunity_audit.py` run at 03:27 TRT on public data, using the engine's own endpoints inside the pilot network guard: `C:\Users\W10\nb-pilot\opportunity-audit.json`;

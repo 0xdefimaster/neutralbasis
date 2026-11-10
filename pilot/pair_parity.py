@@ -320,10 +320,13 @@ def main():
         if any("RFQ" in s for s in v.get("execution_price_source") or []) or \
                 "RFQ" in json.dumps(v.get("markets")):
             pass
+        if row and row.get("first_code"):
+            # The engine's own deep-check decision comes first when there is one.
+            d = row.get("decision") or {}
+            blockers.insert(0, "DEEP_CHECK: %s (net %s)" % (
+                row["first_code"], None if d.get("net") is None else "$%.2f" % d["net"]))
         if any("indicative" in s for s in v.get("execution_price_source") or []):
             blockers.append("EXECUTION_MODEL_UNVERIFIED (RFQ indicative price is not firm)")
-        if row and row.get("first_code"):
-            blockers.append("DEEP_CHECK: " + row["first_code"])
         f48 = v.get("forward_48h")
         if isinstance(f48, (int, float)) and f48 < MIN_NET:
             blockers.append("ECONOMICS: forward 48 h at $1000 = %.1f bp < 5 bp" % (f48 * 1e4))
