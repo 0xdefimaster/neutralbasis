@@ -548,7 +548,7 @@ class Feed:
         return result
 
     def funding_history(self, v, asset, start=None):
-        m = self.meta[v][asset]
+        m = self.market(v, asset)
         end = now()
         start = start if start is not None else end - 7 * 86400
         if v == "Lighter":
@@ -625,7 +625,7 @@ class Feed:
         market it no longer lists) has none: say so instead of a bare KeyError."""
         venue = self.meta.get(v)
         if venue is None:
-            raise ValueError("%s: piyasa listesi bu turda alınamadı; defter okunmadı" % v)
+            raise ValueError("%s: piyasa listesi bu turda alınamadı" % v)
         m = venue.get(asset)
         if m is None:
             raise ValueError("%s %s: piyasa bu turun listesinde yok" % (v, asset))

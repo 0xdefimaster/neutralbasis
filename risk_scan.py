@@ -655,7 +655,7 @@ class FiveFeed(Feed):
         if v in ("Lighter", "Extended"):
             return super().funding_history(v, asset, start)
         start = start if start is not None else now() - 7 * 86400
-        m = self.meta[v][asset]
+        m = self.market(v, asset)
         if v == "TxFlow":
             raise ValueError(
                 "TxFlow public gerçekleşmiş funding geçmişi / pozisyon bazında tahakkuk modeli doğrulanmadı"

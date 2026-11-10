@@ -32,6 +32,15 @@ class FeedMarketTests(unittest.TestCase):
             bare(risk_scan.FiveFeed, {"RISEx": {}}).book("RISEx", "SOL")
         self.assertIn("RISEx SOL", str(cm.exception))
 
+    def test_funding_history_names_a_missing_venue(self):
+        # The pilot recorded "'RISEx'" and "'Lighter'" as reasons from this path.
+        for cls, venues in ((bot.Feed, ("Lighter", "Extended")),
+                            (risk_scan.FiveFeed, ("Lighter", "RISEx", "TxFlow"))):
+            for v in venues:
+                with self.assertRaises(ValueError) as cm:
+                    bare(cls, {}).funding_history(v, "SOL", 0)
+                self.assertIn(v + ": piyasa listesi bu turda alınamadı", str(cm.exception))
+
     def test_present_market_is_returned(self):
         m = dict(rfq=True)
         f = bare(bot.Feed, {"Extended": {"UNI": m}})
