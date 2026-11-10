@@ -343,6 +343,33 @@ class WideMarkets:
         # Lighter Core: last native settlement per market id, and this scan's budget.
         self.lighter_core_settled = {}
         self.lighter_core_budget = 0
+        self.lighter_core_mark_cache = None
+
+    def lighter_core_marks(self, at):
+        """{symbol: (mark, index, received)} from Lighter Core's own orderBookDetails
+        (mark_price / index_price, the fields bot.Feed uses for Lighter RH). CCXT's
+        lighter adapter has no mark price and no ticker bid/ask, so its rows fell back to
+        a last trade (refused by ranking) or no price at all. Reuses the price-discovery
+        snapshot when fresh, else one listing call (cached 60 s)."""
+        rows = [r for r in self.price_discovery_rows
+                if r.get("venue") == "LighterCore" and at - r["received"] <= PRICE_DISCOVERY_MAX_AGE]
+        if rows:
+            return {r["asset"]: (r["mark"], r.get("index"), r["received"]) for r in rows}
+        c = self.lighter_core_mark_cache
+        if c and at - c["at"] <= 60:
+            return c["marks"]
+        obj, info = self._price_discovery_json(LIGHTER_CORE_MARKETS_URL)
+        marks = {}
+        for m in obj.get("order_book_details") or []:
+            if (m.get("status") != "active" or m.get("market_type") != "perp"
+                    or m.get("is_frozen") or (m.get("market_config") or {}).get("force_reduce_only")):
+                continue
+            mark = finite(m.get("mark_price"))
+            sym = str(m.get("symbol") or "").strip().upper()
+            if sym and mark and mark > 0:
+                marks[sym] = (mark, finite(m.get("index_price")), info["received"])
+        self.lighter_core_mark_cache = dict(at=at, marks=marks)
+        return marks
 
     def lighter_core_funding(self, market_id, at):
         """The last settled payment of one Lighter Core market from the native API
@@ -404,6 +431,13 @@ class WideMarkets:
     def apply_lighter_core(self, row, market, at):
         """Replace a Lighter Core row's CCXT funding (unit and interval UNKNOWN) and fee
         (0.0) with the native last settlement and the documented Premium taker fee."""
+        try:
+            mark = self.lighter_core_marks(at).get(str(row.get("asset") or "").upper())
+        except Exception as e:
+            mark = None
+            row["mark_error"] = public_error(e)
+        if mark is not None:
+            row.update(mark=mark[0], index=mark[1], price_type="mark", received=mark[2])
         try:
             native = self.lighter_core_funding(market["id"], at)
         except Exception as e:
@@ -586,6 +620,12 @@ class WideMarkets:
                     funding_received=native["funding_received"],
                     funding_kind=native["funding_kind"],
                 )
+                try:
+                    mark = self.lighter_core_marks(received).get(a.upper())
+                except Exception:
+                    mark = None
+                if mark is not None:  # native mark; without it the row keeps mark None
+                    out[a].update(mark=mark[0], index=mark[1], received=mark[2])
         with self.lock:
             self.universe[v] = out
             self.universe_status[v] = dict(

@@ -73,8 +73,16 @@ class NativeFundingTests(unittest.TestCase):
             self.addCleanup(p.stop)
 
         def fake_json(url):
+            if "orderBookDetails" in url:  # MOCK native listing (mark_price / index_price)
+                self.listing_calls.append(url)
+                return dict(order_book_details=[dict(
+                    symbol="BTC", market_id=1, status="active", market_type="perp",
+                    mark_price="100.5", index_price="100.4")]), dict(
+                    received=self.clock, audit_id=None, http_age=0)
             self.calls.append(url)
             return self.response, dict(received=self.clock, audit_id=None, http_age=0)
+
+        self.listing_calls = []
 
         self.w._price_discovery_json = fake_json
         self.response = mock_fundings(T0)
@@ -160,6 +168,25 @@ class PublishedEvidenceTests(unittest.TestCase):
         self.assertTrue(reg.published[key][0][1])  # same sign
 
 
+class LighterCoreMarkTests(NativeFundingTests):
+    def test_no_native_mark_keeps_the_row_unpriced(self):
+        def fake_json(url):
+            if "orderBookDetails" in url:
+                return dict(order_book_details=[]), dict(received=self.clock, audit_id=None, http_age=0)
+            return self.response, dict(received=self.clock, audit_id=None, http_age=0)
+        self.w._price_discovery_json = fake_json
+        self.w.lighter_core_budget = 5
+        row = dict(asset="BTC", mark=99.0, price_type="last_trade", raw_rate=None)
+        self.w.apply_lighter_core(row, dict(id="1"), self.clock)
+        self.assertEqual(row["price_type"], "last_trade")  # not upgraded without evidence
+
+    def test_fresh_price_discovery_rows_are_reused(self):
+        self.w.price_discovery_rows = [dict(venue="LighterCore", asset="BTC", mark=101.0,
+                                            index=100.9, received=self.clock - 10)]
+        self.assertEqual(self.w.lighter_core_marks(self.clock)["BTC"][0], 101.0)
+        self.assertEqual(self.listing_calls, [])
+
+
 class FakeLighter:
     """MOCK CCXT lighter client: what the real adapter returns (no interval, no
     timestamps, fee 0.0, no funding history)."""
@@ -199,6 +226,9 @@ class ScanIntegrationTests(NativeFundingTests):
         self.assertAlmostEqual(row["raw_rate"], 0.000012)  # not CCXT's 0.000096
         self.assertEqual(row["fee"], LIGHTER_CORE_TAKER_FEE)  # not CCXT's 0.0
         self.assertEqual(row["funding_kind"], "last_settled_projection")
+        # Priced by the venue's own mark (CCXT gave only a last trade, refused by ranking).
+        self.assertEqual((row["price_type"], row["mark"], row["index"]), ("mark", 100.5, 100.4))
+        self.assertEqual(self.w.universe["LighterCore"]["BTC"]["mark"], 100.5)
         # The bulk universe keeps the market too (it dropped all of them before).
         self.assertIn("BTC", self.w.universe["LighterCore"])
         self.assertEqual(self.w.universe["LighterCore"]["BTC"]["interval"], 3600)
