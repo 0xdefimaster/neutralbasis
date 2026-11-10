@@ -112,6 +112,79 @@ def shortlist(meta, symbols, limit=5):
     return result, len(rows)
 
 
+# RISEx and Arcus send every market (rate, interval, mark, index) in one listing call,
+# so the whole listed universe costs no extra request. They used to keep only the
+# legacy two-venue desk's 15 configured symbols, which silently dropped real markets
+# (2026-11-10: AERO and 15 other active crypto markets on RISEx). One market that
+# fails to parse is counted and skipped; it never drops the venue (as e1ccf7e).
+# TxFlow and Lighter RH need one request per market and keep the configured list.
+def rise_rows(feed, o, info):
+    out, skipped = {}, {}
+    for d in o["data"]["markets"]:
+        try:
+            a = d["underlying"].split("/")[0]
+            c = d["config"]
+            if (
+                not d.get("active")
+                or not c["unlocked"]
+                or d.get("reduce_only")
+                or d.get("category") != "crypto"
+            ):
+                continue
+            interval = number(d["funding_interval"]) / 1e9
+            out[a] = feed.generic(
+                "RISEx",
+                a,
+                d["market_id"],
+                number(d["mark_price"]),
+                number(d["index_price"]),
+                number(d["current_funding_rate"]),
+                interval,
+                epoch(d["next_funding_time"]),
+                info,
+                step=number(c["step_size"]),
+                minimum=number(c["min_order_size"]),
+                max_leverage=number(c["max_leverage"]),
+                price_type="trade",
+                rate_basis="API current_funding_rate / funding_interval",
+            )
+        except MARKET_ERRORS as ex:
+            skipped[str(d.get("market_id"))] = type(ex).__name__
+    return out, skipped
+
+
+def arcus_rows(feed, o, info):
+    out, skipped = {}, {}
+    for d in o["markets"]:
+        try:
+            a = d["baseAsset"]
+            if d["status"] != "ONLINE":
+                continue
+            out[a] = feed.generic(
+                "Arcus",
+                a,
+                d["marketDisplayName"],
+                number(d["markPrice"]),
+                number(d["oraclePrice"]),
+                number(d["fundingRate"]),
+                3600,
+                epoch(d["nextFundingAt"]),
+                info,
+                step=number(d["stepSize"]),
+                minimum=number(d["minOrderSize"]),
+                max_leverage=1 / number(d["initialMarginFraction"]),
+                price_type="oracle",
+                rate_basis="API saatlik funding; tahmin olarak kullanılır",
+            )
+        except MARKET_ERRORS as ex:
+            skipped[str(d.get("marketDisplayName"))] = type(ex).__name__
+    return out, skipped
+
+
+# ArithmeticError covers decimal.InvalidOperation (an unparsable timestamp) and division.
+MARKET_ERRORS = (KeyError, TypeError, ValueError, AttributeError, ArithmeticError)
+
+
 class FiveFeed(Feed):
     def __init__(self, store):
         super().__init__(store)
@@ -223,28 +296,8 @@ class FiveFeed(Feed):
 
         def arcus():
             o, info = self.req("https://api.arcus.xyz/v1/markets", max_age=60)
-            out = {}
-            for d in o["markets"]:
-                a = d["baseAsset"]
-                if a not in self.symbols or d["status"] != "ONLINE":
-                    continue
-                m = self.generic(
-                    "Arcus",
-                    a,
-                    d["marketDisplayName"],
-                    number(d["markPrice"]),
-                    number(d["oraclePrice"]),
-                    number(d["fundingRate"]),
-                    3600,
-                    epoch(d["nextFundingAt"]),
-                    info,
-                    step=number(d["stepSize"]),
-                    minimum=number(d["minOrderSize"]),
-                    max_leverage=1 / number(d["initialMarginFraction"]),
-                    price_type="oracle",
-                    rate_basis="API saatlik funding; tahmin olarak kullanılır",
-                )
-                out[a] = m
+            out, skipped = arcus_rows(self, o, info)
+            self.__dict__.setdefault("market_errors", {})["Arcus"] = skipped
             fees, fi = self.req("https://api.arcus.xyz/v1/feetiers")
             self.arcus_fee = max(
                 number(t["taker_fee_ppm"]) / 1e6 for t in fees["tiers"]
@@ -253,35 +306,8 @@ class FiveFeed(Feed):
 
         def rise():
             o, info = self.req("https://api.rise.trade/v1/markets", max_age=60)
-            out = {}
-            for d in o["data"]["markets"]:
-                a = d["underlying"].split("/")[0]
-                c = d["config"]
-                if (
-                    a not in self.symbols
-                    or not d.get("active")
-                    or not c["unlocked"]
-                    or d.get("reduce_only")
-                    or d.get("category") != "crypto"
-                ):
-                    continue
-                interval = number(d["funding_interval"]) / 1e9
-                out[a] = self.generic(
-                    "RISEx",
-                    a,
-                    d["market_id"],
-                    number(d["mark_price"]),
-                    number(d["index_price"]),
-                    number(d["current_funding_rate"]),
-                    interval,
-                    epoch(d["next_funding_time"]),
-                    info,
-                    step=number(c["step_size"]),
-                    minimum=number(c["min_order_size"]),
-                    max_leverage=number(c["max_leverage"]),
-                    price_type="trade",
-                    rate_basis="API current_funding_rate / funding_interval",
-                )
+            out, skipped = rise_rows(self, o, info)
+            self.__dict__.setdefault("market_errors", {})["RISEx"] = skipped
             return "RISEx", out
 
         def tx():
