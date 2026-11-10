@@ -22,6 +22,7 @@ Metric definitions are kept apart (never compared across definitions):
 Missing values are null with a reason, never 0.
 """
 import json
+import math
 import statistics
 import sys
 import time
@@ -199,6 +200,14 @@ def main():
         hist = None
         if L.get("funding") and S.get("funding"):
             hist = oa.historical_7d(L, S, fl, fs, now)
+            # The basis term uses unsynchronised 1 h trade closes: show how much the same
+            # metric moves when the 7-day window ends 0..5 hours earlier.
+            ends = [oa.historical_7d(L, S, fl, fs, now - k * 3600) for k in range(6)]
+            tot = [e["net_bp"] for e in ends if e.get("net_bp") is not None]
+            if tot:
+                v["historical_total_window_range_bp"] = dict(
+                    min=min(tot), max=max(tot), median=statistics.median(tot), windows=len(tot),
+                    basis_noisy=max(tot) - min(tot) > 20)
         v["funding_realized_7d"] = None if not hist or hist.get("funding_bp") is None else hist["funding_bp"] / 1e4
         v["historical_basis_change"] = None if not hist or hist.get("price_bp") is None else hist["price_bp"] / 1e4
         v["historical_total_estimate"] = None if not hist or hist.get("net_bp") is None else hist["net_bp"] / 1e4
@@ -244,10 +253,38 @@ def main():
         v["slippage"] = m1000.get("slippage") if isinstance(m1000, dict) else None
         v["basis_risk"] = m1000.get("basis_risk_sd_7d") if isinstance(m1000, dict) else None
         if ref["kind"] == "price":
-            v["convergence"] = dict(
-                entry_now_mark_gap=idn["price_gap_bp"],
-                vs_7d_avg="UNKNOWN: Variational publishes no price history (metadata/v2/stats only)",
-                note="m8 needs synchronous executable prices on both legs")
+            conv = dict(last_trade_close_vs_mark_bp_NOT_EXECUTABLE=idn["price_gap_bp"],
+                        vs_7d_avg="UNKNOWN: Variational publishes no price history (metadata/v2/stats only)",
+                        note="m8 needs synchronous executable prices on both legs; research only")
+            # Executable-side entry at $1000: buy the long leg, sell the short leg. RISEx: book
+            # VWAP; Variational: INDICATIVE quote (not firm). Round-trip cost: 4 fees + both
+            # legs' spread crossing at the same size.
+            def side_px(X, side):
+                if X.get("var"):
+                    c = vp.indicative_cost(X["var"], side, 1000)
+                    return None if c is None else X["var"]["mark"] * (1 + c if side == "buy" else 1 - c)
+                b = (X.get("books") or {}).get("orderbook")
+                if not b:
+                    return None
+                lv = sorted(b["asks"]) if side == "buy" else sorted(b["bids"], reverse=True)
+                mid = (max(p for p, q in b["bids"]) + min(p for p, q in b["asks"])) / 2
+                qty, left, cost = 1000 / mid, 1000 / mid, 0.0
+                for p_, q_ in lv:
+                    t = min(left, q_); cost += t * p_; left -= t
+                    if left <= 1e-12:
+                        return cost / qty
+                return None
+            buy, sell = side_px(L, "buy"), side_px(S, "sell")
+            c1000 = per_size[1000]
+            src = next(iter(c1000)) if c1000 else None
+            cost = c1000[src]["executable_cost"] if src and isinstance(c1000[src], dict) else None
+            if buy and sell:
+                entry = math.log(sell / buy)
+                conv.update(entry_executable_spread_bp=round(entry * 1e4, 1),
+                            round_trip_cost_bp=None if cost is None else round(cost * 1e4, 1),
+                            net_if_gap_fully_closes_bp=None if cost is None else round((entry - cost) * 1e4, 1),
+                            caveat="upper bound: assumes the gap closes to zero; the normal gap is UNKNOWN")
+            v["convergence"] = conv
         v["full_position_pnl"] = "UNKNOWN (basis risk not modelled; funding-only values above)"
         verdicts.append(v)
     # Engine view: rank and blockers from the pilot (whole list, not the top 40).

@@ -53,9 +53,23 @@ PAIRS = [
 DAYS = 8
 
 
-def get(url, timeout=30):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
-        return json.load(r)
+def get(url, timeout=30, tries=4):
+    """Public GET; on HTTP 429 waits the server's Retry-After / retry_after_seconds (the
+    venues' per-IP budgets are shared with the live engine on this machine)."""
+    import urllib.error
+    for i in range(tries):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as ex:
+            if ex.code != 429 or i == tries - 1:
+                raise
+            wait = ex.headers.get("Retry-After")
+            try:
+                wait = float(wait or json.loads(ex.read() or b"{}").get("retry_after_seconds") or 10)
+            except (ValueError, TypeError):
+                wait = 10.0
+            time.sleep(min(60.0, max(1.0, wait)))
 
 
 hl = ccxt.hyperliquid({"enableRateLimit": True})
