@@ -1,0 +1,424 @@
+{
+ "_source": "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/v2/stats",
+ "_recorded_at": "2026-11-10T00:55Z",
+ "_note": "Recorded real public response, listings trimmed to reference assets; records unmodified.",
+ "response": {
+  "total_volume_24h": "1933987597.015411",
+  "cumulative_volume": "467424810547.148703",
+  "tvl": "220722234.088156238319",
+  "open_interest": "1666067127.8943625938973574896",
+  "num_markets": 588,
+  "loss_refund": {
+   "pool_size": "0",
+   "refunded_24h": "0"
+  },
+  "listings": [
+   {
+    "ticker": "CL-PERP",
+    "contract_type": "perpetual",
+    "name": "WTI Crude Oil",
+    "mark_price": "86.1019116552527",
+    "volume_24h": "7561524.426590",
+    "open_interest": {
+     "long_open_interest": "5767187.1736304899753963600000",
+     "short_open_interest": "2807309.5522897645698959300000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "-0.1509",
+      "interval_rate": "-0.00006889"
+     },
+     "next": {
+      "annualized_rate": "-0.1509",
+      "interval_rate": "-0.00006889"
+     },
+     "interval_seconds": 14400,
+     "next_timestamp": 1794283200
+    },
+    "base_spread_bps": "4.6456575970296445135905690000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:54:54.451776612Z",
+     "base": {
+      "bid": "86.0839",
+      "ask": "86.1239"
+     },
+     "size_1k": {
+      "bid": "86.0839",
+      "ask": "86.1239"
+     },
+     "size_100k": {
+      "bid": "86.0775",
+      "ask": "86.1311"
+     }
+    }
+   },
+   {
+    "ticker": "BTC-PERP",
+    "contract_type": "perpetual",
+    "name": "Bitcoin",
+    "mark_price": "74897.6737448363",
+    "volume_24h": "392754738.299970",
+    "open_interest": {
+     "long_open_interest": "80510568.47937081261191675000",
+     "short_open_interest": "81550571.96192757907968569000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.0001"
+     },
+     "next": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.0001"
+     },
+     "interval_seconds": 28800,
+     "next_timestamp": 1794297600
+    },
+    "base_spread_bps": "1.3324846421799655819994630000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:55:23.047245866Z",
+     "base": {
+      "bid": "74880.6",
+      "ask": "74890.58"
+     },
+     "size_1k": {
+      "bid": "74880.6",
+      "ask": "74890.58"
+     },
+     "size_100k": {
+      "bid": "74880.6",
+      "ask": "74890.58"
+     },
+     "size_1m": {
+      "bid": "74870.97",
+      "ask": "74890.58"
+     }
+    }
+   },
+   {
+    "ticker": "XRP-PERP",
+    "contract_type": "perpetual",
+    "name": "XRP",
+    "mark_price": "1.097490921260983",
+    "volume_24h": "6802452.290322",
+    "open_interest": {
+     "long_open_interest": "1223865.7115733320880027000000",
+     "short_open_interest": "2208631.4818330317622296600000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.0001"
+     },
+     "next": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.0001"
+     },
+     "interval_seconds": 28800,
+     "next_timestamp": 1794297600
+    },
+    "base_spread_bps": "4.1002617086159033460471750000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:55:13.493828141Z",
+     "base": {
+      "bid": "1.09688",
+      "ask": "1.09733"
+     },
+     "size_1k": {
+      "bid": "1.09688",
+      "ask": "1.09733"
+     },
+     "size_100k": {
+      "bid": "1.09648",
+      "ask": "1.09735"
+     },
+     "size_1m": {
+      "bid": "1.09482",
+      "ask": "1.09825"
+     }
+    }
+   },
+   {
+    "ticker": "VVV-PERP",
+    "contract_type": "perpetual",
+    "name": "Venice Token",
+    "mark_price": "21.46079033732449",
+    "volume_24h": "573921.696355",
+    "open_interest": {
+     "long_open_interest": "888483.8933165498169048000000",
+     "short_open_interest": "377679.87517905233669730000000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.000050"
+     },
+     "next": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.000050"
+     },
+     "interval_seconds": 14400,
+     "next_timestamp": 1794283200
+    },
+    "base_spread_bps": "7.2690705956287941196722390000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:55:19.530773886Z",
+     "base": {
+      "bid": "21.4445",
+      "ask": "21.4601"
+     },
+     "size_1k": {
+      "bid": "21.4371",
+      "ask": "21.4639"
+     },
+     "size_100k": {
+      "bid": "21.3409",
+      "ask": "21.5456"
+     }
+    }
+   },
+   {
+    "ticker": "BZ-PERP",
+    "contract_type": "perpetual",
+    "name": "Brent Oil",
+    "mark_price": "91.5266767569296",
+    "volume_24h": "5256542.976279",
+    "open_interest": {
+     "long_open_interest": "3853423.5351078058112595000000",
+     "short_open_interest": "2144251.3894888678893975000000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "-0.4300",
+      "interval_rate": "-0.0001963"
+     },
+     "next": {
+      "annualized_rate": "-0.4300",
+      "interval_rate": "-0.0001963"
+     },
+     "interval_seconds": 14400,
+     "next_timestamp": 1794283200
+    },
+    "base_spread_bps": "5.3427046335207095123942090000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:55:04.563058092Z",
+     "base": {
+      "bid": "91.4925",
+      "ask": "91.5414"
+     },
+     "size_1k": {
+      "bid": "91.4925",
+      "ask": "91.5414"
+     },
+     "size_100k": {
+      "bid": "91.4702",
+      "ask": "91.5581"
+     }
+    }
+   },
+   {
+    "ticker": "SOXL-PERP",
+    "contract_type": "perpetual",
+    "name": "Direxion Daily Semiconductor Bull 3X ETF",
+    "mark_price": "55.8810747628539",
+    "volume_24h": "16308414.873309",
+    "open_interest": {
+     "long_open_interest": "1509746.8583769263709314000000",
+     "short_open_interest": "1182918.1930303736385769300000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0",
+      "interval_rate": "0"
+     },
+     "next": {
+      "annualized_rate": "0",
+      "interval_rate": "0"
+     },
+     "interval_seconds": 28800,
+     "next_timestamp": 1794297600
+    },
+    "base_spread_bps": "6.4959380530973388599561990000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:55:20.824981661Z",
+     "base": {
+      "bid": "56.0128",
+      "ask": "56.0491"
+     },
+     "size_1k": {
+      "bid": "56.0128",
+      "ask": "56.0491"
+     },
+     "size_100k": {
+      "bid": "55.9866",
+      "ask": "56.059"
+     },
+     "size_1m": {
+      "bid": "55.9084",
+      "ask": "56.1173"
+     }
+    }
+   },
+   {
+    "ticker": "AERO-PERP",
+    "contract_type": "perpetual",
+    "name": "Aerodrome Finance",
+    "mark_price": "0.556313157802721",
+    "volume_24h": "192941.015364",
+    "open_interest": {
+     "long_open_interest": "436545.67901974636881600000000",
+     "short_open_interest": "882785.5558386165925290000000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.000050"
+     },
+     "next": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.000050"
+     },
+     "interval_seconds": 14400,
+     "next_timestamp": 1794283200
+    },
+    "base_spread_bps": "10.785292269013187125691988000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:54:55.472619074Z",
+     "base": {
+      "bid": "0.5562",
+      "ask": "0.5568"
+     },
+     "size_1k": {
+      "bid": "0.5561",
+      "ask": "0.5568"
+     },
+     "size_100k": {
+      "bid": "0.555",
+      "ask": "0.5579"
+     }
+    }
+   },
+   {
+    "ticker": "DRAM-PERP",
+    "contract_type": "perpetual",
+    "name": "Roundhill Memory ETF",
+    "mark_price": "41.4549959289286",
+    "volume_24h": "1510432.332214",
+    "open_interest": {
+     "long_open_interest": "751402.57317456373154805000000",
+     "short_open_interest": "533461.97417466177212583000000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0",
+      "interval_rate": "0"
+     },
+     "next": {
+      "annualized_rate": "0",
+      "interval_rate": "0"
+     },
+     "interval_seconds": 28800,
+     "next_timestamp": 1794297600
+    },
+    "base_spread_bps": "7.4779889143270244514244240000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:54:48.130159440Z",
+     "base": {
+      "bid": "41.474",
+      "ask": "41.505"
+     },
+     "size_1k": {
+      "bid": "41.4662",
+      "ask": "41.505"
+     },
+     "size_100k": {
+      "bid": "41.444",
+      "ask": "41.5156"
+     }
+    }
+   },
+   {
+    "ticker": "SOL-PERP",
+    "contract_type": "perpetual",
+    "name": "Solana",
+    "mark_price": "86.2517670448018",
+    "volume_24h": "28148222.086651",
+    "open_interest": {
+     "long_open_interest": "8407932.312527017536477330000",
+     "short_open_interest": "12507442.970738246678667750000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.0001"
+     },
+     "next": {
+      "annualized_rate": "0.1095",
+      "interval_rate": "0.0001"
+     },
+     "interval_seconds": 28800,
+     "next_timestamp": 1794297600
+    },
+    "base_spread_bps": "2.9564611687033057306755030000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:55:16.720846469Z",
+     "base": {
+      "bid": "86.214",
+      "ask": "86.2395"
+     },
+     "size_1k": {
+      "bid": "86.214",
+      "ask": "86.2395"
+     },
+     "size_100k": {
+      "bid": "86.2047",
+      "ask": "86.2395"
+     },
+     "size_1m": {
+      "bid": "86.1562",
+      "ask": "86.2646"
+     }
+    }
+   },
+   {
+    "ticker": "MSTR-PERP",
+    "contract_type": "perpetual",
+    "name": "Strategy Inc",
+    "mark_price": "125.7536477299406",
+    "volume_24h": "866808.418369",
+    "open_interest": {
+     "long_open_interest": "1512029.8479923282382308400000",
+     "short_open_interest": "461180.55961615233414948000000"
+    },
+    "funding": {
+     "last": {
+      "annualized_rate": "0.1176",
+      "interval_rate": "0.0001074"
+     },
+     "next": {
+      "annualized_rate": "0.1176",
+      "interval_rate": "0.0001074"
+     },
+     "interval_seconds": 28800,
+     "next_timestamp": 1794297600
+    },
+    "base_spread_bps": "6.361644488579940787079240000",
+    "quotes": {
+     "updated_at": "2026-11-10T00:55:07.160355515Z",
+     "base": {
+      "bid": "125.764",
+      "ask": "125.844"
+     },
+     "size_1k": {
+      "bid": "125.745",
+      "ask": "125.844"
+     },
+     "size_100k": {
+      "bid": "125.651",
+      "ask": "125.959"
+     }
+    }
+   }
+  ]
+ }
+}
