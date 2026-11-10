@@ -4025,6 +4025,68 @@ class WidePaper:
             )
         return out
 
+    CANDIDATE_PAGE_MAX = 200
+
+    def candidate_page(self, strategy="funding", offset=0, limit=100, asset=None,
+                       venue=None, long=None, short=None):
+        """Read-only, paged view of the WHOLE ranked candidate list of one strategy (the
+        state snapshot shows only the first 40). Each row: rank, screen score (not a net),
+        every research reason, class, the latest decision with its first and secondary
+        reason codes, and any rejection wait. Being beyond the first 40 is not a
+        rejection. A queried pair that is not ranked at all says why (its legs)."""
+        ranked = list(self.conv_candidates if strategy == "convergence" else self.candidates)
+        limit = max(1, min(int(limit), self.CANDIDATE_PAGE_MAX))
+        offset = max(0, int(offset))
+
+        def keep(c):
+            if asset and c["asset"] != asset:
+                return False
+            if venue and venue not in (c["long"], c["short"]):
+                return False
+            if long and c["long"] != long or short and c["short"] != short:
+                return False
+            return True
+
+        hits = [c for c in ranked if keep(c)]
+        opened = {(p.get("strategy", "funding"), p["asset"], l, s) for p in self.positions
+                  for l, s in [(next((x["venue"] for x in p["legs"] if x["side"] == "long"), None),
+                                next((x["venue"] for x in p["legs"] if x["side"] == "short"), None))]}
+        at = now()
+        rows = []
+        for c in hits[offset:offset + limit]:
+            key = (strategy, c["asset"], c["long"], c["short"])
+            d = self.decisions.get(key)
+            wait = self.rejected.get(key)
+            codes = [zero_trade.code_of(r)[0] for r in (d or {}).get("reasons") or []]
+            if key in opened:
+                cls = "OPENED"
+            elif c.get("research"):
+                cls = "RESEARCH_CANDIDATE"
+            elif d and d["outcome"] in ("eligible", "skipped"):
+                cls = "PAPER_EXECUTABLE"
+            elif d and d["outcome"] == "rejected":
+                cls = "REJECTED"
+            else:
+                cls = "PENDING_DEEP_CHECK"
+            rows.append(dict(
+                rank=c.get("rank"), asset=c["asset"], long=c["long"], short=c["short"],
+                screen_score_not_net=c.get("score"), funding_gap=c.get("funding_gap"),
+                rfq=dict(long=bool(c.get("rfq_long")), short=bool(c.get("rfq_short"))),
+                cls=cls, research=list(c.get("research") or []),
+                decision=d, first_code=codes[0] if codes else None,
+                secondary_codes=list(dict.fromkeys(codes[1:])),
+                waiting_until=wait["until"] if wait and wait["until"] > at else None,
+            ))
+        out = dict(strategy=strategy, total=len(ranked), matched=len(hits), offset=offset,
+                   limit=limit, rows=rows)
+        if not hits and asset and long and short:
+            v = self.verdict(asset, long, short)
+            out["not_ranked"] = dict(
+                legs=v["legs"],
+                why=[f"{x}: {r}" for x, r in v["legs"].items() if r]
+                or ["Sıralamada yok; bacak verisi tamam (yön veya skor sırası dışında)"])
+        return out
+
     def reject(self, x, reasons, at):
         groups = list(dict.fromkeys(reason_group(t) for t in reasons))
         for g in groups:

@@ -1916,6 +1916,18 @@ def serve(engine, port, host="127.0.0.1", password=None):
                     )
                 except ValueError as ex:
                     return self.send({"error": str(ex)}, 404)
+            if (self.path == "/api/candidates" or self.path.startswith("/api/candidates?")) and hasattr(
+                engine, "wide_paper"
+            ):
+                # Read-only, paged: the whole ranked list (the state shows the first 40).
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                arg = lambda k, d=None: q.get(k, [d])[0] or d
+                try:
+                    return self.send(engine.wide_paper.candidate_page(
+                        arg("strategy", "funding"), arg("offset", 0), arg("limit", 100),
+                        arg("asset"), arg("venue"), arg("long"), arg("short")))
+                except ValueError as ex:
+                    return self.send({"error": str(ex)}, 400)
             if self.path == "/api/read-jobs" and hasattr(engine, "read_status"):
                 return self.send(engine.read_status())
             if self.path == "/api/report.csv":
