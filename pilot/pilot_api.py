@@ -2,6 +2,7 @@
 
   python -m pilot.pilot_api configure   one-time: workspace on every selectable perp DEX
                                          (funding + convergence), documented fees
+  python -m pilot.pilot_api mirror-fees copy the live engine's owner-entered taker fees
   python -m pilot.pilot_api report      write the current evidence to DATA/reports/
                                          (candidates, first decisive reasons, positions)
 
@@ -23,6 +24,10 @@ if PORT == 8765:
 # Documented fees (official docs read 2026-11-10). Lighter RH Premium taker 0.035 %;
 # the account type is not verified, so the zero Standard fee is not used.
 PILOT_CONFIG = {"lighter_fee": 0.00035}
+# Owner-entered taker fees copied from the LIVE engine's own setting (`wide_fees`, source
+# "kullanıcı girişi" in its capability registry, read 2026-11-10). Mirrored so the pilot
+# ranks the same venues as the live engine; no venue document backs them.
+LIVE_USER_FEES = {"RISEx": 0.0003}
 
 
 def get(path, timeout=600):
@@ -61,6 +66,14 @@ def configure():
                           result=str(out)[:300]), indent=1))
 
 
+def mirror_fees():
+    ident = get("/api/identity")
+    if ident.get("mode") != "PAPER" or ident.get("pid") == 5988:
+        raise SystemExit("not the PAPER pilot: %s" % ident)
+    print(json.dumps(dict(mirrored=LIVE_USER_FEES, result=str(post("/api/wide_fees",
+                                                                    dict(fees=LIVE_USER_FEES)))[:200])))
+
+
 def report():
     at = time.time()
     state = get("/api/state")
@@ -77,18 +90,41 @@ def report():
                      first_reason=(x.get("reasons") or [None])[0], first_code=first(x.get("reasons")),
                      other_codes=[code_of(r)[0] for r in (x.get("reasons") or [])[1:]])
                 for x in wp.get("assessed") or []]
+    # Every visible candidate in exactly one class. RESEARCH: shown with its limits; the
+    # screen score is not a net and the net stays UNKNOWN. PAPER_EXECUTABLE: passed the
+    # deep check (all gates). REJECTED: first decisive code. PENDING: not deep-checked.
+    done = {(a["strategy"], a["asset"], a["long"], a["short"]): a for a in assessed}
+    opened = {(p.get("strategy"), p["asset"], p["decision"]["long"], p["decision"]["short"])
+              for p in (wp.get("positions") or []) if p.get("decision")}
     cands = {}
     for strat, lst in (("funding", wp.get("candidates") or []), ("convergence", wp.get("conv_candidates") or [])):
         for c in lst:
-            k = "%s|%s|%s|%s" % (strat, c["asset"], c["long"], c["short"])
-            cands[k] = dict(score=c.get("score"), research=c.get("research"), rank=c.get("rank"))
+            key = (strat, c["asset"], c["long"], c["short"])
+            a = done.get(key)
+            if c.get("research"):
+                cls = "RESEARCH_CANDIDATE"
+            elif a is None:
+                cls = "PENDING_DEEP_CHECK"
+            elif a["eligible"]:
+                cls = "PAPER_EXECUTABLE"
+            else:
+                cls = "REJECTED"
+            cands["%s|%s|%s|%s" % key] = dict(
+                cls=cls, rank=c.get("rank"), screen_not_net_bp=round((c.get("score") or 0) * 1e4, 1),
+                net_usd=None if a is None else a["net"],
+                limits=c.get("research") or [], first_code=None if a is None else a["first_code"],
+                opened=key in opened)
+    hidden = dict(funding=max(0, (wp.get("candidate_count") or 0) - len(wp.get("candidates") or [])),
+                  convergence=max(0, (wp.get("conv_candidate_count") or 0) - len(wp.get("conv_candidates") or [])))
     rep = dict(
         at=at, identity=get("/api/identity"), last_cycle=wp.get("last_cycle"),
         workspace=wp.get("workspace"), funnel=wp.get("funnel"), review=wp.get("review"),
         venues={v: dict(blocked=x.get("strategies"), discovery=x["caps"]["market_discovery"]["method"])
                 for v, x in (caps.get("venues") or {}).items()},
         candidates_unique=len(cands),
-        candidates_research=sum(1 for c in cands.values() if c["research"]),
+        classes={k: sum(1 for c in cands.values() if c["cls"] == k) for k in
+                 ("RESEARCH_CANDIDATE", "PENDING_DEEP_CHECK", "REJECTED", "PAPER_EXECUTABLE")},
+        beyond_api_top40=hidden,
         candidates=cands, assessed=assessed,
         positions=wp.get("positions"), closed=wp.get("closed"),
         why_no_trade=dict(verdict=wnt.get("verdict"), windows={k: w.get("reason_codes") for k, w in (wnt.get("windows") or {}).items()}),
@@ -99,7 +135,7 @@ def report():
     path.write_text(json.dumps(rep, ensure_ascii=False, indent=1, default=str), encoding="utf8")
     print(json.dumps(dict(file=str(path), last_cycle=rep["last_cycle"],
                           candidates_unique=rep["candidates_unique"],
-                          research=rep["candidates_research"], assessed=len(assessed),
+                          classes=rep["classes"], beyond_api_top40=hidden, assessed=len(assessed),
                           eligible=sum(1 for a in assessed if a["eligible"]),
                           positions=len(rep["positions"] or []), closed=len(rep["closed"] or []),
                           venues_blocked={v: x["blocked"] for v, x in rep["venues"].items()}),
@@ -108,4 +144,4 @@ def report():
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    {"configure": configure, "report": report}[sys.argv[1]]()
+    {"configure": configure, "report": report, "mirror-fees": mirror_fees}[sys.argv[1]]()
