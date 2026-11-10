@@ -713,7 +713,7 @@ class FiveFeed(Feed):
     def book(self, v, a):
         if v in ("Lighter", "Extended"):
             return super().book(v, a)
-        m = self.meta[v][a]
+        m = self.market(v, a)
         if v == "TxFlow":
             o, info = self.req(
                 "https://rpc.txflow.com/info",

@@ -620,8 +620,19 @@ class Feed:
             m["funding_kind"] = "last_settled_projection"
         return rows
 
+    def market(self, v, asset):
+        """This cycle's market entry. A venue whose market list failed this cycle (or a
+        market it no longer lists) has none: say so instead of a bare KeyError."""
+        venue = self.meta.get(v)
+        if venue is None:
+            raise ValueError("%s: piyasa listesi bu turda alınamadı; defter okunmadı" % v)
+        m = venue.get(asset)
+        if m is None:
+            raise ValueError("%s %s: piyasa bu turun listesinde yok" % (v, asset))
+        return m
+
     def book(self, v, asset):
-        m = self.meta[v][asset]
+        m = self.market(v, asset)
         if m["rfq"]:
             raise ValueError("RFQ gösterge defteri gerçek likidite sayılmaz")
         url = (
