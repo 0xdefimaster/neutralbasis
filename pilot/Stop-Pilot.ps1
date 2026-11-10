@@ -11,6 +11,13 @@ foreach ($id in ($ids | Select-Object -Unique)) {
     if ($id -eq 5988) { throw "Refusing: PID 5988 is the live engine." }
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $id" -ErrorAction SilentlyContinue
     if (-not $proc) { "PID $id is not running."; continue }
+    if (-not $proc.CommandLine) {
+        # A launcher whose engine child was just stopped exits on its own; its command
+        # line is empty while it does. Re-check instead of guessing.
+        Start-Sleep -Seconds 3
+        if (-not (Get-Process -Id $id -ErrorAction SilentlyContinue)) { "PID $id exited."; continue }
+        throw "Refusing: PID $id has no readable command line"
+    }
     if ($proc.CommandLine -notmatch 'run_pilot\.py') { throw "Refusing: PID $id is not the pilot ($($proc.CommandLine))" }
     Stop-Process -Id $id
     "Stopped pilot process $id"
