@@ -85,6 +85,11 @@ WIDE_DEFAULTS = dict(
     wide_conv_exit_bps=2.0,
     wide_max_spread_sd_bps=30.0,
     wide_weak_minutes=30,
+    # Owner decision 2026-11-10, PAPER: a pair on a ticker some venue lists as a
+    # real-world asset may leave research when both legs' prices agree (current marks,
+    # then the last 7 days of hourly closes in the deep check). Off by default.
+    wide_rwa_verified=False,
+    wide_rwa_max_gap_bps=50.0,
 )
 # Earlier defaults: a stored config still holding them is moved to the current ones
 # (only before any real trade, since the wallet follows the capital).
@@ -96,7 +101,7 @@ OLD_DEFAULTS = dict(
     wide_daily_loss=30.0,
     wide_deep_top=3,
 )
-BOOLS = ("wide_enabled", "wide_funding_enabled", "wide_conv_enabled")
+BOOLS = ("wide_enabled", "wide_funding_enabled", "wide_conv_enabled", "wide_rwa_verified")
 LIMITS = dict(
     wide_capital=(10, 1000000),
     wide_size=(10, 100000),
@@ -124,6 +129,7 @@ LIMITS = dict(
     wide_conv_exit_bps=(0, 50),
     wide_max_spread_sd_bps=(1, 500),
     wide_weak_minutes=(0, 1440),
+    wide_rwa_max_gap_bps=(1, 200),
 )
 # A single leg's adverse move over the hold may use at most this share of its own
 # liquidation distance; the other venue's profit does not protect it.
@@ -1941,6 +1947,9 @@ class WidePaper:
             )
             gap_history = convergence_stats(left, right, at, cfg)
             out["stats"] = stats
+            rwa_note = self.rwa_history_gap(c, left, right, at)
+            if rwa_note:
+                out["reasons"].append(rwa_note)
             # 1 day: each leg at the worse of its current quote and its last 24h payments.
             raw = self.conservative_raw(c, at)
             # 3 and 7 days: what this direction was really paid, day by day.
@@ -2095,6 +2104,9 @@ class WidePaper:
             hist = convergence_stats(left, right, at, cfg)
             out["stats"] = stats
             out["convergence_history"] = hist
+            rwa_note = self.rwa_history_gap(c, left, right, at)
+            if rwa_note:
+                out["reasons"].append(rwa_note)
             if hist["cross7"] < cfg["wide_conv_min_cross_7"] or hist["two_sided7"] < 4:
                 out["reasons"].append(
                     "7 günde istikrarlı kesişim yok (%d kesişim, %d çift yönlü gün)"
@@ -3354,9 +3366,15 @@ class WidePaper:
                         self.capabilities, self.registry, key, c, self.rows, at
                     )
                     if c["asset"] in rwa or c["asset"].split("_")[0] in rwa:
-                        why = list(why) + [
-                            "Kimlik doğrulanmadı: %s bir borsada RWA/hisse olarak listeleniyor; "
-                            "borsalar arası sözleşme eşleşmesi doğrulanmadı" % c["asset"]]
+                        note = self.rwa_identity(c)
+                        if note is None:
+                            # Prices agree now; the deep check re-tests 7 days of closes.
+                            c["rwa_price_verified"] = True
+                        else:
+                            why = list(why) + [
+                                "Kimlik doğrulanmadı: %s bir borsada RWA/hisse olarak "
+                                "listeleniyor; borsalar arası sözleşme eşleşmesi "
+                                "doğrulanmadı (%s)" % (c["asset"], note)]
                     if why:
                         c["research"] = why
             diag.set("funding_candidates", len(self.candidates))
@@ -4029,6 +4047,38 @@ class WidePaper:
                 )
             )
         return out
+
+    def rwa_identity(self, c):
+        """None when the owner-enabled price check passes for an RWA pair: both legs'
+        current marks within `wide_rwa_max_gap_bps`. Otherwise the reason it stays
+        research. Only the identity block is lifted; every other gate still applies."""
+        if not self.cfg.get("wide_rwa_verified"):
+            return "fiyat-uyum doğrulaması kapalı"
+        marks = [
+            (self.rows.get((v, c["asset"])) or {}).get("mark") for v in (c["long"], c["short"])
+        ]
+        if not all(m and m > 0 for m in marks):
+            return "bacak fiyatı yok"
+        gap = abs(math.log(marks[1] / marks[0])) * 1e4
+        limit = self.cfg["wide_rwa_max_gap_bps"]
+        if gap > limit:
+            return "anlık fiyat farkı %.1f bp > %.0f bp" % (gap, limit)
+        return None
+
+    def rwa_history_gap(self, c, left, right, at):
+        """Deep-check half of the RWA price check: the median absolute gap of the last
+        7 days of matched hourly closes. A reason when it is too wide, else None."""
+        if not c.get("rwa_price_verified"):
+            return None
+        times = matched(left, right, at, 7 * 24)
+        gaps = sorted(
+            abs(math.log(right["prices"][t] / left["prices"][t])) * 1e4 for t in times
+        )
+        med = statistics.median(gaps)
+        limit = self.cfg["wide_rwa_max_gap_bps"]
+        if med > limit:
+            return "RWA fiyat uyumu yok: 7g medyan fark %.1f bp > %.0f bp" % (med, limit)
+        return None
 
     def rwa_assets(self):
         """Tickers some venue lists as a real-world asset (Extended category RWA, RISEx

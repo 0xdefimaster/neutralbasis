@@ -113,6 +113,9 @@ def main():
     ap.add_argument("--fee-scale", type=float, default=1.0,
                     help="scenario: 1 = 4 taker fees; 0.5 = half (e.g. one leg at a 0 maker fee, "
                          "UNVERIFIED); 0 = no fees (theoretical upper bound)")
+    ap.add_argument("--alias", help='JSON {"venue|native symbol": "shared name"} declared '
+                    "equivalences (e.g. Hyperliquid kPEPE = 1000PEPE); research input, the "
+                    "price check of each pair is the engine's correlation / gap statistics")
     ap.add_argument("--drag-file", help="book_cost_snapshot output: each pair's own "
                     "round-trip book cost (today's books, an assumption) replaces the fixed "
                     "scenarios; pairs with an unknown cost are left out, never priced at 0")
@@ -120,6 +123,14 @@ def main():
     t0 = time.time()
     pairs = json.loads(Path(a.pairs).read_text(encoding="utf8"))
     candles, funding = load(a.db, sorted(FEES))
+    alias = json.loads(Path(a.alias).read_text(encoding="utf8")) if a.alias else {}
+    native = {}
+    for key, shared in alias.items():
+        v, sym = key.split("|", 1)
+        native[(v, shared)] = sym
+        for store in (candles, funding):
+            if (v, sym) in store:
+                store[(v, shared)] = store.pop((v, sym))
     legs = json.loads(Path(a.drag_file).read_text(encoding="utf8"))["legs"] if a.drag_file else None
     drags = ("pair",) if legs else DRAGS
     combos = list(itertools.product(HOLDS, FORECASTS, THRESH_BP, GAP_RULES, drags, DELAYS))
@@ -136,8 +147,8 @@ def main():
             continue
         pair_drag = None
         if legs:
-            ca = (legs.get("%s|%s" % (va, asset)) or {}).get("round_trip_bp")
-            cb = (legs.get("%s|%s" % (vb, asset)) or {}).get("round_trip_bp")
+            ca = (legs.get("%s|%s" % (va, native.get((va, asset), asset))) or {}).get("round_trip_bp")
+            cb = (legs.get("%s|%s" % (vb, native.get((vb, asset), asset))) or {}).get("round_trip_bp")
             if ca is None or cb is None:
                 skipped_unknown_cost += 1
                 continue

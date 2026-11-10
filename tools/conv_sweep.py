@@ -82,6 +82,9 @@ def main():
     ap.add_argument("--db", required=True)
     ap.add_argument("--pairs", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--alias", help='JSON {"venue|native symbol": "shared name"} declared '
+                    "equivalences (e.g. Hyperliquid kPEPE = 1000PEPE); research input, the "
+                    "price check of each pair is the engine's correlation / gap statistics")
     ap.add_argument("--drag-file", help="book_cost_snapshot output: each pair's own round-trip "
                     "book cost replaces the fixed scenarios; unknown cost = pair left out")
     a = ap.parse_args()
@@ -91,6 +94,14 @@ def main():
     exit_bps = cfg["wide_conv_exit_bps"] / 10000
     pairs = json.loads(Path(a.pairs).read_text(encoding="utf8"))
     candles, funding = load(a.db)
+    alias = json.loads(Path(a.alias).read_text(encoding="utf8")) if a.alias else {}
+    native = {}
+    for key, shared in alias.items():
+        v, sym = key.split("|", 1)
+        native[(v, shared)] = sym
+        for store in (candles, funding):
+            if (v, sym) in store:
+                store[(v, shared)] = store.pop((v, sym))
     legs = json.loads(Path(a.drag_file).read_text(encoding="utf8"))["legs"] if a.drag_file else None
     drags = ("pair",) if legs else DRAGS
     combos = list(itertools.product(WIDEST, LEVELS, EXITS, HOLDS, CORR, DELAYS, drags))
@@ -109,8 +120,8 @@ def main():
             continue
         pair_drag = None
         if legs:
-            ca = (legs.get("%s|%s" % (va, asset)) or {}).get("round_trip_bp")
-            cb = (legs.get("%s|%s" % (vb, asset)) or {}).get("round_trip_bp")
+            ca = (legs.get("%s|%s" % (va, native.get((va, asset), asset))) or {}).get("round_trip_bp")
+            cb = (legs.get("%s|%s" % (vb, native.get((vb, asset), asset))) or {}).get("round_trip_bp")
             if ca is None or cb is None:
                 skipped_unknown_cost += 1
                 continue
