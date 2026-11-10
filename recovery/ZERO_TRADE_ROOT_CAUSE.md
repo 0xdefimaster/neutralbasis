@@ -27,19 +27,30 @@ measured. What the fixed build will find once evidence accrues is not yet known.
 | 3 | **RFQ quota**: unsubscribed RFQ pair used a deep-check slot | 596 / 980 slots (60.8 %) in 98 real cycles; the 60 s wait also pushed the pair down the stream ranking | Skipped without a slot or wait. Would reach 45 more pairs: 36 have another observed outcome (21 price-gap stats, 6 net negative, 6 desync, 2 history, 1 RFQ), 9 UNKNOWN | `cff3b7f`, `test_rfq_not_subscribed` (6), capture replay |
 | 4 | RFQ freshness on quiet books | 41 desync + 17 RFQ-unavailable records | **Not changed** (owner ruling: a ping is not price evidence). Liveness is diagnostic only | `3102fa0` |
 | 5 | Screen score counts the whole price gap as profit (design, not a bug) | Top of the list = structural Extended–HL basis; CHIP / HBAR priced at −7.87 / −39.36 $ | Shadow ranking (offline, funding-only) | `27c7fc6` |
+| 7 | **Funding evidence overwrite** (found by the pilot evidence audit, 03:04): a rate observed after its own payment time replaced the valid pre-hour observation | Real pilot state after 03:00: 64/65 Lighter Core predictions stale. Every hourly comparison lost, so the sign gate could never open | `observe_prediction` ignores post-payment observations; Lighter Core projection unknown until the new settlement is read (asked 30 s after the hour) | `c49455f`, 2 tests, `pilot/evidence_audit.py` |
 | 6 | Stream allocation uses the previous cycle's ranking | RFQ pairs only; does not affect normal perps | Not changed (measure first, `d7d00ba` trace) | — |
 
-## Outcome classes (live engine, 98 cycles, 728 deep-check records)
+## Outcome classes (live engine, 98 cycles, **938** deep-check records)
 
-| Class | Records | Reason codes | Type |
+**Correction (2026-11-10 03:10).** Earlier reports gave 728 records and 732 rejections. Both numbers were wrong:
+
+- **728** counted only records whose pair also appeared in the top-40 candidate snapshot. 210 records were for pairs outside it.
+- **732** was those 728 plus 4 secondary codes. Records with two reasons were counted twice.
+
+Below, each record has exactly **one first decisive code**. Secondary codes are listed separately.
+
+| Class | First-decisive records | Reason codes | Type |
 |---|---|---|---|
-| BOOK_UNAVAILABLE | 472 | RFQ_STREAM_NOT_SUBSCRIBED 455, RFQ_STREAM_UNAVAILABLE 17 | Software (quota, fixed) / data |
-| ECONOMICALLY_UNPROFITABLE | 195 | PRICE_GAP_STATS_REJECT 145, NET_EXPECTED_PNL_NEGATIVE 50 | Economic / statistical |
-| DATA_STALE | 41 | ORDERBOOK_DESYNC | Data (quiet RFQ books) |
-| HISTORY_INSUFFICIENT | 19 | INSUFFICIENT_HISTORY | Data |
-| LIQUIDITY_INSUFFICIENT | 4 | INSUFFICIENT_LIQUIDITY | Economic |
+| BOOK_UNAVAILABLE | 613 | RFQ_STREAM_NOT_SUBSCRIBED 593, RFQ_STREAM_UNAVAILABLE 20 | Software (quota, fixed) / data |
+| ECONOMICALLY_UNPROFITABLE | 239 | PRICE_GAP_STATS_REJECT 162, NET_EXPECTED_PNL_NEGATIVE 77 | Economic / statistical |
+| DATA_STALE | 51 | ORDERBOOK_DESYNC | Data (quiet RFQ books) |
+| HISTORY_INSUFFICIENT | 27 | INSUFFICIENT_HISTORY | Data |
+| LIQUIDITY_INSUFFICIENT | 7 | INSUFFICIENT_LIQUIDITY | Economic |
 | (other) | 1 | RFQ_STREAM_WARMING | Data |
+| **Total** | **938** | — | — |
 | VERIFIED_ELIGIBLE | **0** | — | — |
+
+Secondary codes (not counted above): RFQ_STREAM_NOT_SUBSCRIBED 3, INSUFFICIENT_HISTORY 2. Five records carry two codes, and all of them are convergence: PAXG ×3, CRV, LIT.
 
 Candidates that never reached a deep check:
 
@@ -56,8 +67,8 @@ UNKNOWN is not counted as an economic rejection.
 
 | Stage | Live engine (window) | Fixed build |
 |---|---|---|
-| Deep checks | 728 records, 127 unique pairs | Pilot: 0 so far (evidence accrual) |
-| Economic or statistical verdict reached | 199 records (195 unprofitable + 4 liquidity) | — |
+| Deep checks | 938 records (127 unique pairs among those in the candidate snapshot) | Pilot: 0 so far (evidence accrual) |
+| Economic or statistical verdict reached | 246 records (239 unprofitable + 7 liquidity) | — |
 | Eligible | 0 | 0 observed |
 | Risk-approved | 0 | 0 |
 | PAPER opened | 0 | 0 (MOCK E2E: 1, excluded) |
