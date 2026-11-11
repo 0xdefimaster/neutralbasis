@@ -465,11 +465,14 @@ class Feed:
                         name="rwa-funding-hydration",
                     ).start()
         for v in ("TxFlow", "RISEx", "Arcus", "Variational"):
-            self.status[v] = dict(
+            # Only a default: a feed that reads these venues (risk_scan.FiveFeed) keeps
+            # its own last status instead of showing "not connected" during each
+            # refresh (TxFlow's refresh takes ~75 s).
+            self.status.setdefault(v, dict(
                 ok=False,
                 ts=None,
                 message="Adaptör bu sürümde bağlı değil; işlem havuzu dışında",
-            )
+            ))
         return result
 
     def candles(self, v, asset):
