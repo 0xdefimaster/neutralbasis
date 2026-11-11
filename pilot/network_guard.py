@@ -57,7 +57,7 @@ FORBIDDEN = re.compile(
     re.I,
 )
 # Pacifica answered HTTP 429 at the default spacing (pilot, 2026-11-11).
-SPACING = {"api.hyperliquid.xyz": 1.0, "api.pacifica.fi": 0.6}
+SPACING = {"api.hyperliquid.xyz": 1.0, "api.pacifica.fi": 1.2}
 DEFAULT_SPACING = 0.25
 
 

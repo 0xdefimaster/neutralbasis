@@ -126,6 +126,9 @@ PERP_QUOTES = ("USDT", "USDC", "USD", "USDG", "USDT0")
 # assets are currently 2x the usual fees" (taker 0.090 % at tier 0) and growth-mode
 # markets "base taker 0.0090%" (docs.trade.xyz/perpetuals/mechanics/fees.md). The
 # market's growthMode flag is read from the live meta each load.
+# Funding-history page size; ApeX refuses 200 ("invalid get page size", 2026-11-11)
+# and answers 100.
+FUNDING_PAGE = {"ApeX": 100}
 XYZ_DEX = "xyz"
 XYZ_TAKER = 0.0009
 XYZ_GROWTH_TAKER = 0.00009
@@ -719,6 +722,18 @@ class WideMarkets:
                         except Exception:
                             pass
                 all_rates = self.scan_universe(v, ex)
+                if not selected and all_rates:
+                    # None of the legacy desk's selected assets is listed here (e.g.
+                    # tradeXYZ has no crypto); the bulk universe still serves the venue.
+                    with self.lock:
+                        self.rows[v] = []
+                        self.status[v] = dict(
+                            ok=True, status="ready", ts=now(), markets=0, spots=0,
+                            message="Seçili varlık listelenmiyor; toplu evren %d piyasa"
+                            % len(all_rates),
+                            docs=ex.urls.get("doc"),
+                        )
+                    return
                 if not selected:
                     raise ValueError(
                         "Seçili varlıklarda doğrulanmış lineer perpetual yok"
@@ -1273,7 +1288,7 @@ class WideMarkets:
                     raise ValueError(v + ": gerçekleşmiş funding geçmişi adaptörde yok")
                 cursor = (start + 3600) * 1000
                 for _ in range(40):
-                    batch = ex.fetch_funding_rate_history(row["symbol"], cursor, 200)
+                    batch = ex.fetch_funding_rate_history(row["symbol"], cursor, FUNDING_PAGE.get(v, 200))
                     audit = ex.neutralbasis_audit
                     if not batch:
                         break
@@ -1398,7 +1413,7 @@ class WideMarkets:
             cursor = int(start * 1000)
             rates = []
             for _ in range(8):
-                batch = ex.fetch_funding_rate_history(row["symbol"], cursor, 200)
+                batch = ex.fetch_funding_rate_history(row["symbol"], cursor, FUNDING_PAGE.get(v, 200))
                 audit = ex.neutralbasis_audit
                 if not batch:
                     break
