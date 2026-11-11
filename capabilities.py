@@ -287,6 +287,11 @@ RISEX_DOCS = (
     "shorts\"; getfundingratehistory (SettleFundingRate, saatlik); general-information "
     "(zaman damgaları nanosaniye)"
 )
+TXFLOW_DOCS = (
+    "TxFlow resmî belgesi (docs.txflow.com, 2026-11-11): trade/funding (saatlik, "
+    "pozitif oranda long öder, ödeme = büyüklük x mark x oran), api/info/activeAssetCtx "
+    "ve marketTicker (oran yüzde)"
+)
 
 
 def _model(model, **kw):
@@ -346,7 +351,21 @@ FUNDING_MODELS = dict(
         "ayrıca doğrulanır",
         **HOURLY,
     ),
-    TxFlow=_model(UNKNOWN, note="Funding / tahakkuk modeli doğrulanmadı"),
+    # Read from the official docs on 2026-11-11 (docs.txflow.com/trade/funding.md,
+    # /api/info/activeAssetCtx.md, /api/info/marketTicker.md): "Funding settles on a
+    # fixed cycle (default every hour)"; "When funding is positive, longs pay shorts";
+    # "funding payment = position notional x funding rate = (size x mark price) x rate";
+    # the rate is published in percent. No public market-wide funding history exists
+    # (only the user-scoped userFundings), and the docs do not say whether the published
+    # rate is the next or the last settled one.
+    TxFlow=_model(
+        PERIODIC,
+        price="Mark fiyatı",
+        source=TXFLOW_DOCS,
+        note="Ödeme saatlik ve mark fiyatıyla; public gerçekleşmiş funding geçmişi yok, "
+        "yayımlanan oranın tahmin mi son ödeme mi olduğu belgede yok",
+        **dict(HOURLY, history="Public piyasa geçmişi yok (yalnız kullanıcıya özel userFundings)"),
+    ),
     Arcus=_model(UNKNOWN, note="Funding modeli bu masada belgelenmedi"),
     Variational=_model(UNKNOWN, note="Bağlayıcı yok"),
 )

@@ -90,7 +90,38 @@ WIDE_DEFAULTS = dict(
     # then the last 7 days of hourly closes in the deep check). Off by default.
     wide_rwa_verified=False,
     wide_rwa_max_gap_bps=50.0,
+    # Owner decision 2026-11-11, PAPER: TxFlow legs may trade although TxFlow publishes
+    # no market-wide realized funding (so its interval, sign and history can never be
+    # checked against payments). Only those funding-evidence blocks are lifted; fees,
+    # data, price history and every deep-check gate still apply. Off by default.
+    wide_txflow_paper=False,
 )
+# Reasons a TxFlow leg is held that need realized TxFlow payments, which no public
+# endpoint gives; lifted only with wide_txflow_paper.
+TXFLOW_PAYMENT_EVIDENCE = (
+    "Gerçekleşmiş funding",
+    "Funding aralığı",
+    "funding aralığı",
+    "Funding işareti",
+    "funding işareti",
+    "gerçekleşmiş ödeme",
+    "yayımlanan oran",
+    "günlük geçmiş",
+    "geçmiş kaydı",
+)
+
+
+def txflow_waived(reasons):
+    """`reasons` without the TxFlow blocks that only realized TxFlow payments could
+    clear; every other reason, TxFlow's included, stays."""
+    return [
+        r
+        for r in reasons
+        if not (
+            str(r).startswith("TxFlow:")
+            and any(k in str(r) for k in TXFLOW_PAYMENT_EVIDENCE)
+        )
+    ]
 # Earlier defaults: a stored config still holding them is moved to the current ones
 # (only before any real trade, since the wallet follows the capital).
 OLD_DEFAULTS = dict(
@@ -101,7 +132,13 @@ OLD_DEFAULTS = dict(
     wide_daily_loss=30.0,
     wide_deep_top=3,
 )
-BOOLS = ("wide_enabled", "wide_funding_enabled", "wide_conv_enabled", "wide_rwa_verified")
+BOOLS = (
+    "wide_enabled",
+    "wide_funding_enabled",
+    "wide_conv_enabled",
+    "wide_rwa_verified",
+    "wide_txflow_paper",
+)
 LIMITS = dict(
     wide_capital=(10, 1000000),
     wide_size=(10, 100000),
@@ -3365,6 +3402,11 @@ class WidePaper:
                     why = capabilities.pair_blockers(
                         self.capabilities, self.registry, key, c, self.rows, at
                     )
+                    if self.cfg.get("wide_txflow_paper") and "TxFlow" in (
+                        c["long"],
+                        c["short"],
+                    ):
+                        why = txflow_waived(why)
                     if c["asset"] in rwa or c["asset"].split("_")[0] in rwa:
                         note = self.rwa_identity(c)
                         if note is None:

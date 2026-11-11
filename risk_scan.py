@@ -2,8 +2,20 @@
 
 import concurrent.futures, itertools, json, math, statistics, time, urllib.parse, urllib.request, email.utils
 from decimal import Decimal, ROUND_DOWN
+import os
 import bot
 from bot import Feed, Engine, number, now, hour, analyze, walk
+
+
+def txflow_all():
+    """PAPER pilot switch: read every listed TxFlow perp (env NB_TXFLOW_ALL=1)."""
+    return os.environ.get("NB_TXFLOW_ALL") == "1"
+
+
+def risex_rwa():
+    """PAPER pilot switch: RISEx stock/ETF/commodity markets enter the feed (env
+    NB_RISEX_RWA=1); they stay RWA tickers for the identity check."""
+    return os.environ.get("NB_RISEX_RWA") == "1"
 from connections import CATALOG
 
 VENUES = ("TxFlow", "RISEx", "Arcus", "Extended", "Lighter")
@@ -127,11 +139,14 @@ def rise_rows(feed, o, info):
             if not d.get("active") or not c["unlocked"] or d.get("reduce_only"):
                 continue
             if d.get("category") != "crypto":
-                # Stocks / ETFs / commodities stay out of the engine feed; their tickers
-                # are remembered so a same-named market elsewhere is not taken for the
-                # same instrument (identity unverified).
+                # Stocks / ETFs / commodities: their tickers are remembered so a
+                # same-named market elsewhere is not taken for the same instrument
+                # (identity unverified). They stay out of the engine feed unless the
+                # PAPER pilot switch NB_RISEX_RWA=1 is set (owner decision 2026-11-11);
+                # then the RWA identity / price checks decide.
                 feed.__dict__.setdefault("rwa_tickers", set()).add(a)
-                continue
+                if not risex_rwa():
+                    continue
             interval = number(d["funding_interval"]) / 1e9
             out[a] = feed.generic(
                 "RISEx",
@@ -326,10 +341,14 @@ class FiveFeed(Feed):
                 {"type": "perpMeta", "exchangeId": "all"},
                 60,
             )
+            # PAPER pilot option (owner decision 2026-11-11): every listed TxFlow perp,
+            # not only the configured symbols. One activeAssetCtx request per market;
+            # TxFlow documents /info at 50 requests/s per IP.
+            every = txflow_all()
             universe = {
                 d["baseCurrency"]: d
                 for d in o["data"]["universe"]
-                if d["baseCurrency"] in self.symbols
+                if (every or d["baseCurrency"] in self.symbols)
                 and not d.get("haltTrading")
                 and not d.get("delisted")
             }
@@ -364,7 +383,7 @@ class FiveFeed(Feed):
                     rate_basis="nodeCtx funding yüzde / gerçek ödeme aralığı",
                 )
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as p:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8 if every else 3) as p:
                 fs = [p.submit(one, item) for item in universe.items()]
                 for f in fs:
                     try:
