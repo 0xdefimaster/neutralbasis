@@ -135,6 +135,24 @@ PERP_DEXES = (
     "Arcus",
     "Variational",
 )
+# PAPER pilot option (owner decision 2026-11-11): further perp DEXes read through their
+# CCXT public adapters. Only venues whose funding model was read from official docs
+# (FUNDING_MODELS below) may be added; every runtime evidence check still applies.
+EXTRA_PERP_DEXES = ("Aster", "Pacifica", "Nado", "Hibachi", "ApeX")
+
+
+def _extra_perp_dexes():
+    import os
+
+    names = [n.strip() for n in os.environ.get("NB_EXTRA_PERP_DEXES", "").split(",")
+             if n.strip()]
+    unknown = [n for n in names if n not in EXTRA_PERP_DEXES]
+    if unknown:
+        raise ValueError("NB_EXTRA_PERP_DEXES: not an allowed venue: %s" % unknown)
+    return tuple(n for n in EXTRA_PERP_DEXES if n in names)
+
+
+PERP_DEXES = PERP_DEXES + _extra_perp_dexes()
 # Venues whose rows come from the desk's own feed (not CCXT).
 NATIVE = ("Lighter", "Extended", "RISEx", "TxFlow", "Arcus")
 NOT_BUILT = "Bağlayıcıda yok"
@@ -257,6 +275,19 @@ DECLARED = dict(
         connector="Katalog kaydı (bağlayıcı yok)",
         caps={c: (NONE, None, "Bağlayıcı yazılmadı") for c in CAPABILITIES},
     ),
+    Aster=_ccxt("aster"),
+    Pacifica=_ccxt("pacifica"),
+    Nado=_ccxt(
+        "nado",
+        funding_rate=(
+            UNVERIFIED,
+            "CCXT funding rate",
+            "Belge: yayımlanan oran 24 saatlik (3F); CCXT birimi yayımlanan/gerçekleşen "
+            "karşılaştırmasıyla doğrulanır",
+        ),
+    ),
+    Hibachi=_ccxt("hibachi"),
+    ApeX=_ccxt("apex"),
 )
 
 # --- funding models -----------------------------------------------------------------
@@ -368,6 +399,65 @@ FUNDING_MODELS = dict(
     ),
     Arcus=_model(UNKNOWN, note="Funding modeli bu masada belgelenmedi"),
     Variational=_model(UNKNOWN, note="Bağlayıcı yok"),
+    # Extra perp DEXes, read from official docs on 2026-11-11. Each quote is from the
+    # page named in `source`; what the docs do not say is left out (None) or noted.
+    # docs.asterdex.com/trading/perpetuals/fees-and-specs/funding-rate.md: "a periodic
+    # payment", "Positive funding rate: ... long traders pay short traders", "Funding
+    # amount = Position size x Mark price x Funding rate"; interval per symbol
+    # (fundingIntervalHours, default 8h), public history GET /fapi/v3/fundingRate.
+    Aster=_model(
+        PERIODIC,
+        settlement="Piyasaya göre aralıklı ayrık ödeme (varsayılan 8 saat, fundingIntervalHours)",
+        rate="Ödeme başına oran (F / (8/N))",
+        direction=LONG_PAYS,
+        price="Mark fiyatı",
+        history="Public fundingRate geçmişi (ödeme başına oran)",
+        cashflow=HOURLY["cashflow"],
+        source="Aster resmî belgesi (docs.asterdex.com funding-rate; api-docs v3), 2026-11-11",
+        note="Aralık piyasa bazında; ödeme gerçek zamandan ~15 sn sapabilir",
+    ),
+    # docs.pacifica.fi/trading-on-pacifica/funding-rates.md: "updated every hour", "At the
+    # end of each 1-hour interval, the average funding rate is ... applied to open
+    # positions", "Positive Funding Rate: Traders holding long positions pay ...";
+    # the payment price is not stated; GET /api/v1/funding_rate/history is public.
+    Pacifica=_model(
+        PERIODIC,
+        price=None,
+        source="Pacifica resmî belgesi (docs.pacifica.fi funding-rates, get-historical-funding), 2026-11-11",
+        note="Ödemenin hangi fiyatla hesaplandığı belgede yok (oran oracle/impact fiyatından)",
+        **HOURLY,
+    ),
+    # docs.nado.xyz/core/funding-rates.md: "funding is settled every hour", "longs pay
+    # shorts when the perpetual price exceeds the spot price (positive rate)"; the
+    # published funding_rate is "the equivalent 24-hour rate" (settled at 1/24).
+    Nado=_model(
+        PERIODIC,
+        price=None,
+        source="Nado resmî belgesi (docs.nado.xyz core/funding-rates, archive funding-rate-history), 2026-11-11",
+        note="Yayımlanan oran 24 saatlik eşdeğer; saatlik ödeme 1/24. Birim, yayımlanan/"
+        "gerçekleşen oran karşılaştırması tutmadan kullanılmaz",
+        **HOURLY,
+    ),
+    # docs.hibachi.xyz/hibachi-docs/trading/funding.md: "funding payments are made every
+    # hour", "A positive funding rate means longs pay shorts", "Funding Payment = Q x
+    # Funding Rate x S_settlement" (spot index at payment time).
+    Hibachi=_model(
+        PERIODIC,
+        price="Endeks (spot) fiyatı",
+        source="Hibachi resmî belgesi (docs.hibachi.xyz trading/funding, fees), 2026-11-11",
+        **HOURLY,
+    ),
+    # api-docs.pro.apex.exchange: "Funding fees will be exchanged between long and short
+    # position holders every 1 hour", "If the funding rate is positive upon settlement,
+    # long position holders will pay", "Funding Fees = Position Value * Index Price *
+    # Funding Rate".
+    ApeX=_model(
+        PERIODIC,
+        price="Endeks fiyatı",
+        source="ApeX Omni resmî API belgesi (api-docs.pro.apex.exchange), 2026-11-11",
+        note="Oran birimi belgede açık değil; yayımlanan/gerçekleşen karşılaştırmasıyla doğrulanır",
+        **HOURLY,
+    ),
 )
 
 

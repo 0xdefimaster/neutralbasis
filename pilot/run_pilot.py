@@ -31,6 +31,10 @@ MAX_GB = float(os.environ.get("NB_PILOT_MAX_GB", "5"))
 # bodies referenced by any position, fill or payment are always kept (retention.py).
 AUDIT_RAW_DAYS = float(os.environ.get("NB_PILOT_AUDIT_RAW_DAYS", "1"))
 LIVE_DATA = Path(r"E:\NeutralBasis").resolve()
+# PAPER coverage switches (owner decision 2026-11-11), recorded in pilot.json. Each only
+# widens which public markets are read; none relaxes a gate.
+COVERAGE_SWITCHES = ("NB_EXTRA_PERP_DEXES", "NB_UNIVERSE_MIN_USD", "NB_LIGHTER_RH_ALL",
+                     "NB_RFQ_STREAMS", "NB_TXFLOW_ALL", "NB_RISEX_RWA")
 
 
 def refuse(msg):
@@ -80,7 +84,8 @@ def main():
     started = time.time()
     info = dict(pid=os.getpid(), started=started, port=PORT, data=str(DATA), mode="PAPER",
                 code=str(ROOT), scan_venues=sorted(keep), reference_off=sorted(off),
-                crash_log=str(crash), audit_raw_days=AUDIT_RAW_DAYS)
+                crash_log=str(crash), audit_raw_days=AUDIT_RAW_DAYS,
+                coverage={k: os.environ.get(k) for k in COVERAGE_SWITCHES})
     (DATA / "pilot.json").write_text(json.dumps(info, indent=1), encoding="utf8")
     print("PAPER pilot", json.dumps(info), flush=True)
 

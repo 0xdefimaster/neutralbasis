@@ -421,6 +421,11 @@ class Feed:
             for a, m in extended.items()
             if m.get("category") == "RWA" and m.get("rfq") and a in lighter
         ]
+        if os.environ.get("NB_LIGHTER_RH_ALL") == "1":
+            # PAPER pilot option (owner decision 2026-11-11): every Lighter RH market's
+            # funding, through the same cached hydration (one request per market per
+            # settlement at most), not only the RWA markets shared with Extended.
+            rwa_overlap = sorted(set(rwa_overlap) | set(lighter))
 
         def hydrate_lighter_funding(asset):
             market = (self.meta.get("Lighter") or {}).get(asset)

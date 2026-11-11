@@ -45,7 +45,11 @@ VIEW_MAX_AGE = 30
 ALIVE_MAX_AGE = 5
 WAITING = "RFQ defteri yeni snapshot bekliyor"
 # At most this many RFQ books are streamed (held legs always are, even beyond it).
-STREAM_LIMIT = 12
+# PAPER pilot option NB_RFQ_STREAMS (owner decision 2026-11-11: widen coverage of the
+# Extended RFQ markets); range-checked, default unchanged.
+STREAM_LIMIT = int(os.environ.get("NB_RFQ_STREAMS", "12"))
+if not 1 <= STREAM_LIMIT <= 80:
+    raise ValueError("NB_RFQ_STREAMS out of range: %s" % STREAM_LIMIT)
 # A stream keeps its slot this long after it starts while its market is still a
 # candidate: re-ranking every cycle used to retire books before their first snapshot.
 MIN_HOLD_SECONDS = 600

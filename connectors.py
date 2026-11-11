@@ -15,6 +15,7 @@ them (`MarketSnapshot`, `Instrument`, `Book`, `FundingPayment`). A future native
 connector (WebSocket books, account reads) plugs in without touching the strategies.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 import capabilities
@@ -25,7 +26,11 @@ FEED_VENUES = ("Lighter", "Extended", "TxFlow", "RISEx", "Arcus")
 NATIVE = ("Lighter", "Extended")
 # A bulk-scan market of an asset the desk does not hold needs this much open interest
 # (or volume, where OI is unknown) to be considered.
-UNIVERSE_MIN_USD = 1_000_000
+UNIVERSE_MIN_USD = float(os.environ.get("NB_UNIVERSE_MIN_USD", "1000000"))
+# PAPER pilot option (owner decision 2026-11-11): a lower floor brings thinner listed
+# markets into the bulk universe. Book depth is still checked at entry.
+if not 50_000 <= UNIVERSE_MIN_USD <= 100_000_000:
+    raise ValueError("NB_UNIVERSE_MIN_USD out of range: %s" % UNIVERSE_MIN_USD)
 
 
 @dataclass(frozen=True)

@@ -32,6 +32,17 @@ PUBLIC_HOSTS = {
     "api.arcus.xyz": (),
     "api.prod.paradex.trade": (),
     "omni-client-api.prod.ap-northeast-1.variational.io": (),
+    # Extra perp DEXes (owner decision 2026-11-11), reached only through CCXT public
+    # market-data calls; hosts read from the installed CCXT 4.5.90 `urls`. Nado's public
+    # reads are POST queries (gateway /v1/query, archive /v1); its order path
+    # (/v1/execute) is not on this list and is refused.
+    "fapi.asterdex.com": (),
+    "sapi.asterdex.com": (),  # CCXT load_markets also lists Aster spot (exchangeInfo)
+    "api.pacifica.fi": (),
+    "gateway.prod.nado.xyz": ("/v1/query",),
+    "archive.prod.nado.xyz": ("/v1",),
+    "data-api.hibachi.xyz": (),
+    "omni.apex.exchange": (),
 }
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 LIVE_ENGINE_PORT = 8765
@@ -39,7 +50,10 @@ LIVE_ENGINE_PORT = 8765
 FORBIDDEN = re.compile(
     r"^(exchange|orders?|order_?book_?cancel|cancel\w*|sendtx\w*|tx|account\w*|users?|"
     r"auth\w*|apikeys?|api_keys?|nonce|nextnonce|withdraw\w*|transfer\w*|private|"
-    r"sign\w*|deposit\w*|leverage|margin|subaccounts?|onboarding|referral\w*|rfq)$",
+    r"sign\w*|deposit\w*|leverage|margin|subaccounts?|onboarding|referral\w*|rfq|"
+    # Account reads on the extra CCXT venues' shared hosts (Aster fapi, ApeX v3).
+    r"balance\w*|position\w*|usertrades|listenkey|income|allorders|openorders|"
+    r"batchorders|fills|execute)$",
     re.I,
 )
 SPACING = {"api.hyperliquid.xyz": 1.0}
