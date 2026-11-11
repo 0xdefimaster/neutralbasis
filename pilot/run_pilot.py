@@ -25,6 +25,11 @@ from pilot import network_guard  # noqa: E402
 DATA = Path(os.environ.get("NB_PILOT_DATA", r"C:\Users\W10\nb-pilot\data")).resolve()
 PORT = int(os.environ.get("NB_PILOT_PORT", "18765"))
 MAX_GB = float(os.environ.get("NB_PILOT_MAX_GB", "5"))
+# Raw API response bodies kept in this pilot's audit table, in days (the engine's own
+# default is 3). The body is ~all of a pilot database (~2.6 GB/day measured
+# 2026-11-11); after this window only the fingerprint (time, URL, sha256) stays, and
+# bodies referenced by any position, fill or payment are always kept (retention.py).
+AUDIT_RAW_DAYS = float(os.environ.get("NB_PILOT_AUDIT_RAW_DAYS", "1"))
 LIVE_DATA = Path(r"E:\NeutralBasis").resolve()
 
 
@@ -63,15 +68,19 @@ def main():
             off.append(v)
 
     import bot
+    import retention
     import risk_main
 
+    if not 0.25 <= AUDIT_RAW_DAYS <= retention.AUDIT_KEEP_DAYS:
+        refuse("NB_PILOT_AUDIT_RAW_DAYS out of range: %s" % AUDIT_RAW_DAYS)
+    retention.AUDIT_RAW_DAYS = AUDIT_RAW_DAYS
     engine = risk_main.RiskEngine(DATA / "paper.sqlite3")
     engine.running = True
     crash = risk_main.enable_crash_log(DATA / "logs")
     started = time.time()
     info = dict(pid=os.getpid(), started=started, port=PORT, data=str(DATA), mode="PAPER",
                 code=str(ROOT), scan_venues=sorted(keep), reference_off=sorted(off),
-                crash_log=str(crash))
+                crash_log=str(crash), audit_raw_days=AUDIT_RAW_DAYS)
     (DATA / "pilot.json").write_text(json.dumps(info, indent=1), encoding="utf8")
     print("PAPER pilot", json.dumps(info), flush=True)
 
