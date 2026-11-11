@@ -109,6 +109,35 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(any(c[1] == "Lighter" for c in self.src.calls))
         self.assertEqual(self.keeper.status()["failed"], 0)
 
+    def test_failures_are_grouped_by_venue_and_error(self):
+        self.src.fail.add("Lighter")
+        self.keeper.run_once()
+        f = self.keeper.status()["failures"]
+        self.assertEqual(len(f), 1)
+        self.assertEqual((f[0]["venue"], f[0]["markets"]), ("Lighter", 1))
+        self.assertIn("kapalı", f[0]["error"])
+
+    def test_venue_without_public_funding_is_complete_on_candles_alone(self):
+        # TxFlow publishes no market-wide realized funding (docs, 2026-11-11): the keeper
+        # never asks for it, does not count it as a failure and fills nothing in.
+        self.src.list = [("TxFlow", "SOXL", "perp", 3600, "trade")]
+
+        def no_history(v, a, start):
+            raise ValueError("TxFlow public gerçekleşmiş funding geçmişi doğrulanmadı")
+
+        self.src.funding = no_history
+        self.keeper.run_once()
+        st = self.keeper.status()
+        self.assertEqual((st["synced"], st["failed"], st["failures"]), (1, 0, []))
+        s = self.keeper.market_state("TxFlow", "SOXL")
+        self.assertTrue(s["complete"])
+        self.assertFalse(s["coverage"]["funding_published"])
+        self.assertTrue(s["coverage"]["windows"]["7"])
+        prices, rates, _, _ = self.src.published[("TxFlow", "SOXL", "perp")]
+        self.assertEqual(len(prices), 30 * 24)
+        self.assertEqual(rates, [])
+        self.assertFalse(any(c[0] == "funding" for c in self.src.calls))
+
     def test_short_first_fill_is_completed_backwards_later(self):
         # The first fill only reached three days back (a cut-short or failed page).
         self.src.since["Binance"] = bot.hour(T0) - 3 * 86400

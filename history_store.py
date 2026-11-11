@@ -21,6 +21,11 @@ BATCH = 10
 BACKFILL_SECONDS = 12 * 3600
 # Candle holes refetched per market and retry, longest first.
 MAX_SPANS = 6
+# Venues whose docs publish no market-wide realized funding history (TxFlow: only the
+# user-scoped userFundings, docs.txflow.com read 2026-11-11). Their funding is not
+# fetched; that is a documented absence, not a failure, and their history is complete
+# on candles alone. Nothing is filled in for the missing payments.
+NO_PUBLIC_FUNDING = frozenset({"TxFlow"})
 
 
 def missing_spans(stored, start, end):
@@ -239,7 +244,7 @@ class HistoryKeeper:
             added += self.sync_candles(v, a, kind)
         except Exception as ex:
             errors.append("Mum: " + str(ex)[:160])
-        if kind == "perp":
+        if kind == "perp" and v not in NO_PUBLIC_FUNDING:
             try:
                 added += self.sync_funding(v, a, interval)
             except Exception as ex:
@@ -293,7 +298,7 @@ class HistoryKeeper:
                 added += self.db.add_candles(
                     v, a, kind, {t: p for t, p in prices.items() if start <= t < stop}
                 )
-        if kind == "perp":
+        if kind == "perp" and v not in NO_PUBLIC_FUNDING:
             ffloor = now() - FIRST_DAYS * 86400
             times = [r["ts"] for r in self.db.funding(v, a, ffloor)]
             gaps = funding_gaps(times, ffloor, interval)
@@ -320,7 +325,10 @@ class HistoryKeeper:
             candles_from=min(candles) if candles else None,
         )
         rates = []
-        if kind == "perp":
+        funded = kind == "perp" and v not in NO_PUBLIC_FUNDING
+        if kind == "perp" and not funded:
+            out["funding_published"] = False
+        if funded:
             rates = self.db.funding(v, a, now() - FIRST_DAYS * 86400)
             out.update(
                 funding=len(rates),
@@ -335,7 +343,7 @@ class HistoryKeeper:
         for days in range(7, FIRST_DAYS + 1):
             recent = sum(end - days * 86400 <= t < end for t in candles)
             enough = recent >= days * 24 * 0.95
-            if kind == "perp":
+            if funded:
                 paid = sum(now() - days * 86400 < r["ts"] <= now() for r in rates)
                 enough = enough and bool(interval) and paid >= int(days * 86400 / interval) * 0.95
             out["windows"][str(days)] = bool(enough)
@@ -438,8 +446,19 @@ class HistoryKeeper:
     def status(self):
         with self.lock:
             states = list(self.state.values())
+            failing = [(k[0], s.get("error") or "") for k, s in self.state.items() if not s["ok"]]
             active = [dict(s, seconds=max(0, now()-s["started"])) for s in self.active.values()]
             errors = dict(self.worker_errors)
+        # Failed markets grouped by venue and the start of their error, most common first:
+        # what to fix, without listing every market.
+        groups = {}
+        for v, e in failing:
+            g = groups.setdefault((v, str(e)[:120]), 0)
+            groups[(v, str(e)[:120])] = g + 1
+        failures = [
+            dict(venue=v, error=e, markets=n)
+            for (v, e), n in sorted(groups.items(), key=lambda x: -x[1])[:15]
+        ]
         try:
             listed = len(self.source.markets())
         except Exception:
@@ -457,6 +476,7 @@ class HistoryKeeper:
             synced=sum(s["ok"] for s in states),
             complete=sum(bool(s.get("complete")) for s in states),
             failed=sum(not s["ok"] for s in states),
+            failures=failures,
             stored=self.stored_count,
             active=active,
             worker_errors=errors,
