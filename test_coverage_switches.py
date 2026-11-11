@@ -139,5 +139,14 @@ class ExtraVenueGuardTests(unittest.TestCase):
             self.assertIsNotNone(g.check_request(h, m, p), (h, m, p))
 
 
+class QuoteTests(unittest.TestCase):
+    def test_nado_usdt0_quote_is_scanned_and_unknown_quotes_are_not(self):
+        import wide_markets
+
+        self.assertIn("USDT0", wide_markets.PERP_QUOTES)
+        for q in ("USD1", "U", "EUR", "BTC"):
+            self.assertNotIn(q, wide_markets.PERP_QUOTES)
+
+
 if __name__ == "__main__":
     unittest.main()

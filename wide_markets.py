@@ -116,6 +116,9 @@ CATALOG = {
     for v, k, a in SPECS
 }
 SCAN_PARALLEL = 12
+# Dollar quote currencies of linear perps. USDT0 is Tether's cross-chain USDT, the
+# collateral and quote of every Nado perp (CCXT 4.5.90 markets, read 2026-11-11).
+PERP_QUOTES = ("USDT", "USDC", "USD", "USDG", "USDT0")
 SPOT_ADAPTERS = {"Binance": "binance", "KuCoin": "kucoin", "KrakenFutures": "kraken"}
 PRICE_DISCOVERY_INTERVAL = 60
 PRICE_DISCOVERY_MAX_AGE = 90
@@ -548,7 +551,7 @@ class WideMarkets:
                 m.get("active") is False
                 or not m.get("swap")
                 or not m.get("linear")
-                or m.get("quote") not in ("USDT", "USDC", "USD", "USDG")
+                or m.get("quote") not in PERP_QUOTES
             ):
                 continue
             old = markets.get(m["base"])
@@ -659,7 +662,7 @@ class WideMarkets:
                         or m.get("active") is False
                         or not m.get("swap")
                         or not m.get("linear")
-                        or m.get("quote") not in ("USDT", "USDC", "USD", "USDG")
+                        or m.get("quote") not in PERP_QUOTES
                     ):
                         continue
                     a = m["base"]
