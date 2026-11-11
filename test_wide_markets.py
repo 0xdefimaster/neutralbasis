@@ -14,7 +14,9 @@ import test_desk_analytics as fixtures
 class WideTests(unittest.TestCase):
     def test_full_catalog_honest_capabilities(self):
         self.assertEqual(len(CATALOG), 63)
-        self.assertEqual(sum(v["scan"] for v in CATALOG.values()), 30)
+        # tradeXYZ (HIP-3 xyz) joined through the hyperliquid adapter on 2026-11-11.
+        self.assertEqual(sum(v["scan"] for v in CATALOG.values()), 31)
+        self.assertTrue(CATALOG["tradeXYZ"]["scan"])
         self.assertFalse(CATALOG["GMX"]["scan"])
         self.assertFalse(CATALOG["Binance"]["paper"])
         self.assertTrue(CATALOG["Binance"]["scan"])

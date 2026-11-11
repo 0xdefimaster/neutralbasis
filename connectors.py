@@ -376,6 +376,7 @@ def universe_rows(universe, rows, held=()):
                     min_quote=x.get("min_quote"),
                     contract_size=x.get("contract_size"),
                     index=x.get("index"),
+                    category=x.get("category"),
                 )
             )
     return out

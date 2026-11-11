@@ -138,7 +138,7 @@ PERP_DEXES = (
 # PAPER pilot option (owner decision 2026-11-11): further perp DEXes read through their
 # CCXT public adapters. Only venues whose funding model was read from official docs
 # (FUNDING_MODELS below) may be added; every runtime evidence check still applies.
-EXTRA_PERP_DEXES = ("Aster", "Pacifica", "Nado", "Hibachi", "ApeX")
+EXTRA_PERP_DEXES = ("Aster", "Pacifica", "Nado", "Hibachi", "ApeX", "tradeXYZ")
 
 
 def _extra_perp_dexes():
@@ -288,6 +288,7 @@ DECLARED = dict(
     ),
     Hibachi=_ccxt("hibachi"),
     ApeX=_ccxt("apex"),
+    tradeXYZ=_ccxt("hyperliquid (HIP-3 dex xyz)"),
 )
 
 # --- funding models -----------------------------------------------------------------
@@ -456,6 +457,19 @@ FUNDING_MODELS = dict(
         price="Endeks fiyatı",
         source="ApeX Omni resmî API belgesi (api-docs.pro.apex.exchange), 2026-11-11",
         note="Oran birimi belgede açık değil; yayımlanan/gerçekleşen karşılaştırmasıyla doğrulanır",
+        **HOURLY,
+    ),
+    # hyperliquid-docs trading/funding.md: "The funding rate on Hyperliquid is paid every
+    # hour", "the long position will pay the short position", "the spot oracle price is
+    # used to convert the position size to notional value"; HIP-3 deployer actions
+    # setFundingMultipliers / setFundingInterestRates / setFundingClamps; trade.xyz
+    # specification index: funding rate multiplier 0.5.
+    tradeXYZ=_model(
+        PERIODIC,
+        price="Oracle fiyatı (deployer oracle'ı)",
+        source="Hyperliquid resmî belgesi (trading/funding, HIP-3) ve docs.trade.xyz, 2026-11-11",
+        note="HIP-3 xyz: deployer funding çarpanı (0,5), faiz ve sınırı değiştirebilir; "
+        "oracle fiyatını deployer yayımlar",
         **HOURLY,
     ),
 )

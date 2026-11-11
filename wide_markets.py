@@ -72,7 +72,7 @@ SPECS = [
     ("SoDEX", "DEX", None),
     ("StandX", "DEX", None),
     ("SunX", "DEX", None),
-    ("tradeXYZ", "DEX", None),
+    ("tradeXYZ", "DEX", "hyperliquid"),
     ("TxFlow", "DEX", None),
     ("Variational", "DEX", None),
     ("Vest", "DEX", None),
@@ -119,6 +119,34 @@ SCAN_PARALLEL = 12
 # Dollar quote currencies of linear perps. USDT0 is Tether's cross-chain USDT, the
 # collateral and quote of every Nado perp (CCXT 4.5.90 markets, read 2026-11-11).
 PERP_QUOTES = ("USDT", "USDC", "USD", "USDG", "USDT0")
+# trade.xyz: the "xyz" HIP-3 deployment on Hyperliquid, read as its own venue through
+# CCXT's hyperliquid adapter (owner decision 2026-11-11). Read from the official docs
+# on 2026-11-11: hourly discrete funding, longs pay on a positive rate, paid on the
+# oracle price, deployer funding multiplier (0.5 on xyz); "Standard fees for all HIP-3
+# assets are currently 2x the usual fees" (taker 0.090 % at tier 0) and growth-mode
+# markets "base taker 0.0090%" (docs.trade.xyz/perpetuals/mechanics/fees.md). The
+# market's growthMode flag is read from the live meta each load.
+XYZ_DEX = "xyz"
+XYZ_TAKER = 0.0009
+XYZ_GROWTH_TAKER = 0.00009
+
+
+def xyz_markets(markets):
+    """CCXT names xyz markets "XYZ-NVDA"; the venue-neutral asset is "NVDA". Only xyz
+    markets are kept as tradeXYZ's; fee from the market's growth-mode flag."""
+    for m in markets.values():
+        if m.get("neutralbasis_category"):
+            continue  # already mapped (CCXT returns its cached markets on reload=False)
+        info = m.get("info") or {}
+        base = str(m.get("base") or "")
+        if info.get("dex") != XYZ_DEX or not base.upper().startswith("XYZ-"):
+            m["active"] = False
+            continue
+        m["base"] = base[4:]
+        growth = info.get("growthMode") == "enabled"
+        m["taker"] = XYZ_GROWTH_TAKER if growth else XYZ_TAKER
+        m["neutralbasis_category"] = "RWA"
+    return markets
 SPOT_ADAPTERS = {"Binance": "binance", "KuCoin": "kucoin", "KrakenFutures": "kraken"}
 PRICE_DISCOVERY_INTERVAL = 60
 PRICE_DISCOVERY_MAX_AGE = 90
@@ -287,7 +315,11 @@ def universe_liquidity(ex, symbols):
 
 def bulk_funding_rates(ex):
     """Every perp's current funding in one call. CCXT's HTX adapter only offers the
-    inverse batch endpoint, so its USDT-margined batch is requested directly."""
+    inverse batch endpoint, so its USDT-margined batch is requested directly. A HIP-3
+    deployment's contexts come from the same call with its `dex`."""
+    dex = getattr(ex, "neutralbasis_dex", None)
+    if dex:
+        return ex.fetch_funding_rates(None, {"dex": dex})
     if getattr(ex, "id", None) == "htx":
         response = ex.request(
             "linear-swap-api/v1/swap_batch_funding_rate", ["contract", "public"], "GET"
@@ -484,6 +516,15 @@ class WideMarkets:
             # Their unnormalized tickers cannot match this venue's candidates, and
             # reloading all deployments on each ticker scan delayed native quotes.
             ex.options["fetchMarkets"] = {"types": ["swap", "spot"]}
+        if v == "tradeXYZ":
+            ex.options["fetchMarkets"] = {"types": ["hip3"], "hip3": {"dexes": [XYZ_DEX]}}
+            ex.neutralbasis_dex = XYZ_DEX
+            loader = ex.load_markets
+
+            def load_xyz(reload=False, params={}):
+                return xyz_markets(loader(reload, params))
+
+            ex.load_markets = load_xyz
         original = ex.fetch
 
         def audited(url, method="GET", headers=None, body=None):
@@ -609,6 +650,7 @@ class WideMarkets:
                 interval=interval,
                 next=nxt / 1000 if nxt else None,
                 fee=finite(m.get("taker")),
+                category=m.get("neutralbasis_category"),
                 mark=finite(r.get("markPrice")),
                 index=finite(r.get("indexPrice")),
                 leverage=finite(m.get("limits", {}).get("leverage", {}).get("max")),
@@ -851,6 +893,7 @@ class WideMarkets:
                             audit_id=rate_audit,
                             execution=False,
                             quote=m["quote"],
+                            category=m.get("neutralbasis_category"),
                         )
                     )
                     if v == "LighterCore":

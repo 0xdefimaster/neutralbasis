@@ -148,5 +148,34 @@ class QuoteTests(unittest.TestCase):
             self.assertNotIn(q, wide_markets.PERP_QUOTES)
 
 
+class TradeXyzTests(unittest.TestCase):
+    def test_xyz_markets_are_renamed_priced_and_others_dropped(self):
+        import wide_markets as w
+
+        markets = {
+            "XYZ-NVDA/USDC:USDC": dict(base="XYZ-NVDA", info=dict(dex="xyz", growthMode="enabled")),
+            "XYZ-GOLD/USDC:USDC": dict(base="XYZ-GOLD", info=dict(dex="xyz")),
+            "KM-NVDA/USDH:USDH": dict(base="KM-NVDA", info=dict(dex="km")),
+        }
+        out = w.xyz_markets(markets)
+        self.assertEqual(out["XYZ-NVDA/USDC:USDC"]["base"], "NVDA")
+        self.assertEqual(out["XYZ-NVDA/USDC:USDC"]["taker"], w.XYZ_GROWTH_TAKER)
+        self.assertEqual(out["XYZ-GOLD/USDC:USDC"]["taker"], w.XYZ_TAKER)
+        self.assertEqual(out["XYZ-GOLD/USDC:USDC"]["neutralbasis_category"], "RWA")
+        self.assertFalse(out["KM-NVDA/USDH:USDH"]["active"])  # another deployer: not xyz
+        # CCXT hands back its cached markets: mapping twice changes nothing.
+        again = w.xyz_markets(out)
+        self.assertEqual(again["XYZ-NVDA/USDC:USDC"]["base"], "NVDA")
+        self.assertIsNot(again["XYZ-NVDA/USDC:USDC"].get("active"), False)
+
+    def test_tradexyz_model_documented(self):
+        import capabilities as c
+
+        self.assertIn("tradeXYZ", c.EXTRA_PERP_DEXES)
+        m = c.funding_model("tradeXYZ")
+        self.assertEqual(m["model"], c.PERIODIC)
+        self.assertIn("Oracle", m["price"])
+
+
 if __name__ == "__main__":
     unittest.main()
