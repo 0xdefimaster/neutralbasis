@@ -110,9 +110,15 @@ class StorageTests(Tmp):
         with self.assertRaises(storage.StorageError):
             storage.check_dir(r"E:\NeutralBasis\data-five-rh")
         with self.assertRaises(storage.StorageError):
-            storage.check_dir(r"E:\somewhere-else")
-        self.assertTrue(str(storage.check_dir(r"E:\nb-v2-phase8\run")).lower()
+            storage.check_dir(r"E:\somewhere-else", environ={storage.E_ACK: "1"})
+        with self.assertRaises(storage.StorageError):     # failing disk: no ack
+            storage.check_dir(r"E:\nb-v2-phase8\run", environ={})
+        self.assertTrue(str(storage.check_dir(r"E:\nb-v2-phase8\run",
+                                              environ={storage.E_ACK: "1"})).lower()
                         .startswith(r"e:\nb-v2-phase8"))
+        with self.assertRaises(storage.StorageError):
+            storage.check_dir(r"E:\NeutralBasis\x", environ={storage.E_ACK: "1"})
+        self.assertFalse(storage.DEFAULT_ROOT.lower().startswith(("e:", "d:")))
         storage.check_dir(self.dir)                       # off D:/E: is allowed
         with self.assertRaises(storage.StorageError):
             storage.ChainLog(self.dir / "x.sqlite3")
@@ -191,12 +197,16 @@ class EngineTests(Tmp):
         pn = L.PaperLedger.pnl(p)
         qty = p["legs"]["long"]["entry_qty"]
         # spread paid once per fill (inside the prices): 4 fills x 5 bp of 100
-        self.assertAlmostEqual(pn["price_pnl"], -4 * qty * 0.05, places=6)
-        self.assertAlmostEqual(pn["fees"], 4 * qty * 100.0 * 0.0004, delta=qty * 0.01)
+        self.assertAlmostEqual(pn["simulated_price_pnl"], -4 * qty * 0.05, places=6)
+        self.assertAlmostEqual(pn["simulated_fees"], 4 * qty * 100.0 * 0.0004,
+                               delta=qty * 0.01)
         ev = {f["evidence"] for f in p["funding"]}
-        self.assertEqual(ev, {"SETTLED_RATE", "PUBLISHED_ESTIMATE"})
-        self.assertAlmostEqual(pn["observed_part"] + pn["estimated_part"],
-                               pn["realized_total"])
+        self.assertEqual(ev, {"SETTLED_PUBLIC_RATE", "PUBLISHED_RATE_ESTIMATE"})
+        lay = pn["layers"]
+        self.assertAlmostEqual(lay["public_data_reproducible"] + lay["assumption_dependent"]
+                               + lay["account_verified"], pn["realized_total"])
+        self.assertEqual(lay["account_verified"], 0.0)          # PAPER: never an account
+        self.assertEqual(pn["price_basis"], "SIMULATED_FILLS_ON_OBSERVED_QUOTES")
         self.assertEqual(p["reliability"][-1], "RELIABLE")
         self.assertEqual(led.risk(), [])
 
@@ -247,6 +257,83 @@ class EngineTests(Tmp):
         self.assertEqual(p["state"], L.MONITORING)
         self.assertIn("RESTART_DURING_ATTEMPT", [s[2] for s in p["states"]])
         self.assertAlmostEqual(led2.exposure(p), 0.0, places=9)
+
+    # ---------------------------------------------------------- Phase 9 crash safety
+    def crash_then(self, restart_at, books=None):
+        led, eng = self.engine(crash_at="after_first_leg")
+        with self.assertRaises(paper_engine.Crash):
+            eng.step(obs_at(AT + 60, -0.0005))
+        led2 = L.PaperLedger(self.dir / "led")
+        eng2 = paper_engine.PaperEngine(led2, CFG, PAIR)
+        o = obs_at(restart_at, -0.0005, books=books)
+        eng2.step(o)
+        return led2, list(led2.positions.values())[0]
+
+    def restart_event(self, led):
+        recs, _ = storage.read_chain(self.dir / "led" / "ledger.jsonl")
+        return [r for r in recs if r["kind"] == "restart"]
+
+    def test_long_downtime_reduces_risk_instead_of_hedging_late(self):
+        # Phase 8 replay: restarted 5.2 h later and hedged at a different price
+        # (-6.75 $). Now: past the 60 s recovery timeout the open leg is unwound.
+        led, p = self.crash_then(AT + 60 + 5.2 * H)
+        states = [s[1] for s in p["states"]]
+        self.assertIn(L.LEG_RECOVERY, states)
+        self.assertEqual((p["state"], p["close_reason"]), (L.CLOSED, "LEG_RECOVERY_FLAT"))
+        self.assertEqual(p["legs"]["short"]["entry_qty"], 0.0)   # never hedged late
+        ev = self.restart_event(led)[0]
+        self.assertAlmostEqual(ev["positions"][0]["unhedged_seconds"], 5.2 * H, places=0)
+        self.assertEqual(ev["positions"][0]["reconcile"], "OK")
+        secs, since = L.PaperLedger.unhedged(p, AT + 10 * H)
+        self.assertAlmostEqual(secs, 5.2 * H, places=0)          # spell closed by unwind
+        self.assertIsNone(since)
+
+    def test_restart_without_data_keeps_the_risk_visible(self):
+        empty = {("TxFlow", "X"): None, ("Arcus", "X"): None}
+        led, p = self.crash_then(AT + 60 + 2 * H, books=empty)
+        self.assertEqual(p["state"], L.RECOVERY_PENDING)
+        r = led.risk({"X": 100.0}, at=AT + 60 + 3 * H)[0]
+        self.assertGreater(abs(r["unhedged_units"]), 0)
+        self.assertAlmostEqual(r["unhedged_seconds"], 3 * H, places=0)
+        self.assertEqual(r["unhedged_since"], AT + 60)
+
+    def test_reconcile_mismatch_is_never_trusted(self):
+        led, eng = self.engine()
+        eng.step(obs_at(AT + 60, -0.0005))
+        p = list(led.positions.values())[0]
+        p["legs"]["short"]["qty"] *= 0.5                          # state corrupted
+        self.assertTrue(L.PaperLedger.reconcile(p))
+        p["restarted"] = True
+        eng2 = paper_engine.PaperEngine(led, CFG, PAIR)
+        eng2.step(obs_at(AT + 120, -0.0005))
+        self.assertIn("RECONCILE_MISMATCH", [s[2] for s in p["states"]])
+
+    def test_heartbeat_every_step(self):
+        led, eng = self.engine()
+        for k in range(3):
+            eng.step(obs_at(AT + 60 + 20 * k, -0.0005))
+        recs, _ = storage.read_chain(self.dir / "led" / "ledger.jsonl")
+        self.assertEqual(sum(1 for r in recs if r["kind"] == "heartbeat"), 3)
+        self.assertEqual(led.last_heartbeat, AT + 100)
+
+    # ---------------------------------------------------------- Phase 9 entry gate
+    def test_alternative_worst_case_gate_is_opt_in(self):
+        o = obs_at(AT + 60, -0.00032)        # combined_moderate >= 0, half-filled leg < 0
+        led, eng = self.engine()
+        eng.step(o)
+        ev = [e for e in eng.evaluations if e["strategy"] == "funding"][0]
+        self.assertEqual(ev["entry_gate"], "STRICT_THRESHOLDS")
+        if not ev["alt_gate_blocks"]:
+            self.skipTest("MOCK carry gave a non-negative worst case: %s" % ev["sizes"])
+        self.assertEqual(len(led.signals), 1)                      # default: unchanged
+        self.assertIsNotNone(ev["gating_stresses"]["informational_worst"])
+        self.assertLess(ev["strict_best_net_min"], 0)
+        led2 = L.PaperLedger(self.dir / "alt")
+        eng2 = paper_engine.PaperEngine(led2, CFG, PAIR, entry_gate="WORST_CASE_NONNEGATIVE")
+        eng2.step(o)
+        self.assertEqual(led2.signals, [])
+        with self.assertRaises(ValueError):
+            paper_engine.PaperEngine(led2, CFG, PAIR, entry_gate="LOOSER")
 
     def test_missing_close_data_never_makes_a_closed_trade(self):
         led, eng = self.engine()
@@ -483,6 +570,34 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(len(rep["polling_gaps"]), 1)
         self.assertIn("UNKNOWN", rep["sequence_numbers"])
 
+    def test_parallel_cycle_keeps_each_answer_time_and_marks_cached_quotes(self):
+        import threading
+        import time as _t
+
+        from tools import v2_stream
+
+        class Base:
+            seen = []
+
+            def http_json(self, xid, method, url, body=None, headers=None, **kw):
+                Base.seen.append((xid, kw.get("tries")))
+                _t.sleep(0.2)
+                if xid == "variational":
+                    return {"listings": [{"ticker": "INIT-PERP",
+                                          "quotes": {"updated_at": "2026-11-12T12:00:00Z"}}]}
+                return {"time": 1000, "levels": [[], []]}
+
+        r = v2_stream.Reader(Base())
+        t0 = _t.time()
+        A = v2_stream.cycle(r, None, parallel=True)
+        took = _t.time() - t0
+        self.assertLess(took, 0.2 * len(A) * 0.6)            # not one after another
+        self.assertTrue(all(a["t1"] >= a["t0"] and a["ok"] for a in A.values()))
+        self.assertIn(("variational", 1), Base.seen)         # one try: no 429 hammering
+        self.assertEqual(A["variational_stats"]["quotes_unchanged"], [])
+        A2 = v2_stream.cycle(r, None, parallel=False)
+        self.assertEqual(A2["variational_stats"]["quotes_unchanged"], ["INIT-PERP"])
+
     def test_stream_reader_backs_off_a_failing_venue(self):
         from tools import v2_stream
 
@@ -511,3 +626,29 @@ class ObservationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+RESCUE = Path(r"C:\Users\W10\nb-benchmark\v2-phase8-rescue-2026-11-12")
+BENCH = Path(r"C:\Users\W10\nb-benchmark")
+
+
+@unittest.skipUnless((RESCUE / "stream-2026-11-12-1440" / "stream.jsonl").exists() and
+                     (BENCH / "v2-aligned-2026-11-12" / "aligned.json.gz").exists(),
+                     "OBSERVED Phase 8 data not on this machine")
+class VerifiedTradeTests(unittest.TestCase):
+    """OBSERVED data: the Phase 8 NATGAS TxFlow/tradeXYZ trade, recomputed line by line
+    from the raw public answers, must equal the ledger (Phase 9 item 3)."""
+
+    def test_natgas_trade_recomputes_exactly(self):
+        from tools import v2_verify_trade as vt
+
+        r = vt.verify(RESCUE / "replay-2026-11-12-final3" / "estimated" / "ledger.jsonl",
+                      "ep-012fa0060889eaf2",
+                      [BENCH / "v2-aligned-2026-11-12"] +
+                      [BENCH / "v2-bursts-2026-11-12" / ("burst-%d" % i) for i in (1, 2, 3)],
+                      RESCUE / "stream-2026-11-12-1440" / "stream.jsonl")
+        self.assertEqual(r["checks"], dict(fills=True, funding=True, net=True))
+        self.assertAlmostEqual(r["net"]["recomputed"], -0.4214, places=4)
+        lo, hi = r["gap"]["carried_funding"]["net_band"]
+        self.assertLess(lo, -3.0)                 # the gap could have cost ~2.7 $ more
+        self.assertAlmostEqual(hi, -0.4214, places=4)

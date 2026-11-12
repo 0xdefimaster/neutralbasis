@@ -4,8 +4,9 @@ Explicit opt-in (--observe), a FIXED number of cycles, then it stops: this is no
 24/7 recorder and not the engine. Public reads only, under the observation_v3 guard
 (never NB_V2); nothing is traded, signed or authenticated.
 
-Transport: REST polling. WebSocket is not used: the V2 egress guard allows HTTPS reads
-only and the venv has no websocket client; adding one is a network-policy change that
+Transport: REST polling. WebSocket is not used: the egress guard inspects HTTP only
+(a WS client exists, extended_rfq.WebSocket, but its frames would bypass the guard);
+enabling it needs a frame allowlist (docs/v2/35) and is a network-policy change that
 needs the owner's review (docs/v2/31). Each cycle reads, time-critical first:
   Variational /metadata/v2/stats, xyz and native metaAndAssetCtxs, TxFlow NATGAS
   activeAssetCtx + l2Book, xyz NATGAS l2Book, native INIT l2Book
@@ -18,6 +19,16 @@ once at the end, so payments that happened during the stream are known.
 Robustness: a failed read is recorded (never retried in a tight loop); a venue that
 fails twice in a row is skipped for an exponential back-off (v2.marketdata.Backoff);
 HTTP 429 pauses the venue for the time it asks (v2.venues.base.http_json).
+
+Phase 9:
+  * --parallel: the seven time-critical reads start together (one thread each), so
+    the receive times of one cycle are seconds closer; every answer still keeps its own
+    request/receive/source times (nothing is given a shared timestamp).
+  * Variational gets ONE try per cycle (TRIES): the Phase 8 stream lost ~5 s on each
+    of 14 global-limit 429s by retrying three times; now a 429 just marks that cycle's
+    answer failed and the venue pause applies.
+  * Quote cache: a Variational answer whose quote `updated_at` equals the previous one
+    is marked `quotes_unchanged` (cached at the venue: no new information).
 
 Storage (v2.storage): one hash-chained JSON line per cycle in the dedicated data
 folder (E:\\nb-v2-phase8 by default, owner decision 2026-11-12), plus a manifest.
@@ -64,13 +75,20 @@ def slim_variational(data):
     return dict(listings=keep)
 
 
+TRIES = dict(variational=1)
+
+
 class Reader:
     def __init__(self, base_mod, clock=time.time, sleep=time.sleep):
+        import threading
+
         self.base, self.clock, self.sleep = base_mod, clock, sleep
         self.backoff = {}
         self.skip_until = {}
         self.fail_streak = {}
         self.stats = dict(ok=0, failed=0, skipped=0)
+        self.lock = threading.Lock()
+        self.last_quote = {}
 
     def get(self, A, name, xid, method, url, body=None, headers=None, post=None):
         now = self.clock()
@@ -81,45 +99,76 @@ class Reader:
             return None
         t0 = self.clock()
         try:
-            data = self.base.http_json(xid, method, url, body, headers)
+            kw = dict(tries=TRIES[xid]) if xid in TRIES else {}
+            data = self.base.http_json(xid, method, url, body, headers, **kw)
             t1 = self.clock()
             if post:
                 data = post(data)
             st, field = source_time(name, data)
-            A[name] = dict(ok=True, xid=xid, t0=t0, t1=t1, source_ts=st,
-                           source_field=field, data=data)
-            self.fail_streak[xid] = 0
-            self.backoff.setdefault(xid, Backoff(2.0, 120.0)).reset()
-            self.stats["ok"] += 1
+            ans = dict(ok=True, xid=xid, t0=t0, t1=t1, source_ts=st,
+                       source_field=field, data=data)
+            if name == "variational_stats":
+                ups = {x.get("ticker"): (x.get("quotes") or {}).get("updated_at")
+                       for x in (data or {}).get("listings", [])}
+                with self.lock:
+                    ans["quotes_unchanged"] = sorted(
+                        k for k, u in ups.items() if u and self.last_quote.get(k) == u)
+                    self.last_quote.update(ups)
+            A[name] = ans
+            with self.lock:
+                self.fail_streak[xid] = 0
+                self.backoff.setdefault(xid, Backoff(2.0, 120.0)).reset()
+                self.stats["ok"] += 1
             return data
         except Exception as ex:
             t1 = self.clock()
             A[name] = dict(ok=False, xid=xid, t0=t0, t1=t1,
                            error="%s: %s" % (type(ex).__name__, str(ex)[:300]))
-            self.stats["failed"] += 1
-            self.fail_streak[xid] = self.fail_streak.get(xid, 0) + 1
-            if self.fail_streak[xid] >= 2:
-                d = self.backoff.setdefault(xid, Backoff(2.0, 120.0)).next()
-                self.skip_until[xid] = t1 + d
+            with self.lock:
+                self.stats["failed"] += 1
+                self.fail_streak[xid] = self.fail_streak.get(xid, 0) + 1
+                if self.fail_streak[xid] >= 2:
+                    d = self.backoff.setdefault(xid, Backoff(2.0, 120.0)).next()
+                    self.skip_until[xid] = t1 + d
             return None
 
 
-def cycle(reader, idx):
+def requests_for(idx):
     hl = hlo.INFO_URL
-    A = {}
-    g = reader.get
-    g(A, "variational_stats", "variational", *variational.stats_request(),
-      post=slim_variational)
-    g(A, "xyz_ctx", "tradexyz", "POST", hl, tradexyz.meta_and_ctxs())
-    g(A, "native_ctx", "hyperliquid_native", "POST", hl,
-      hlo.meta_and_ctxs("hyperliquid_native"))
+    out = [("variational_stats", "variational", *variational.stats_request(), None,
+            slim_variational),
+           ("xyz_ctx", "tradexyz", "POST", hl, tradexyz.meta_and_ctxs(), None, None),
+           ("native_ctx", "hyperliquid_native", "POST", hl,
+            hlo.meta_and_ctxs("hyperliquid_native"), None, None)]
     if idx:
-        g(A, "txflow_ctx_NATGAS", "txflow", *txflow.ctx_request(idx), headers=txflow.HEADERS)
-        g(A, "txflow_book_NATGAS", "txflow", *txflow.book_request(idx),
-          headers=txflow.HEADERS)
-    g(A, "xyz_book_NATGAS", "tradexyz", "POST", hl, tradexyz.l2_book("NATGAS"))
-    g(A, "native_book_INIT", "hyperliquid_native", "POST", hl,
-      hlo.l2_book("hyperliquid_native", "INIT"))
+        out.append(("txflow_ctx_NATGAS", "txflow", *txflow.ctx_request(idx),
+                    txflow.HEADERS, None))
+        out.append(("txflow_book_NATGAS", "txflow", *txflow.book_request(idx),
+                    txflow.HEADERS, None))
+    out += [("xyz_book_NATGAS", "tradexyz", "POST", hl, tradexyz.l2_book("NATGAS"), None,
+             None),
+            ("native_book_INIT", "hyperliquid_native", "POST", hl,
+             hlo.l2_book("hyperliquid_native", "INIT"), None, None)]
+    return out
+
+
+def cycle(reader, idx, parallel=False):
+    """One cycle of time-critical reads, in sequence or all at once (threads)."""
+    A = {}
+    reqs = requests_for(idx)
+
+    def one(r):
+        name, xid, method, url, body, headers, post = r
+        reader.get(A, name, xid, method, url, body=body, headers=headers, post=post)
+
+    if parallel:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=len(reqs)) as ex:
+            list(ex.map(one, reqs))
+    else:
+        for r in reqs:
+            one(r)
     return A
 
 
@@ -149,7 +198,7 @@ def histories(reader, end_s):
     return A
 
 
-def observe(out, cycles, every):
+def observe(out, cycles, every, parallel=False):
     from pilot import network_guard
     from v2.venues import base
 
@@ -170,10 +219,10 @@ def observe(out, cycles, every):
                     histories=histories(reader, started)))
     for i in range(cycles):
         t = time.time()
-        A = cycle(reader, idx)
+        A = cycle(reader, idx, parallel)
         t1s = [a["t1"] for a in A.values() if a.get("ok")]
         log.append(dict(kind="cycle", n=i, at=t, burst_end=max(t1s) if t1s else t,
-                        txflow_natgas_index=idx, answers=A))
+                        parallel=parallel, txflow_natgas_index=idx, answers=A))
         print("cycle %d/%d ok=%d failed=%d skipped=%d" % (i + 1, cycles, reader.stats["ok"],
                                                           reader.stats["failed"],
                                                           reader.stats["skipped"]),
@@ -183,6 +232,7 @@ def observe(out, cycles, every):
     ended = time.time()
     log.append(dict(kind="end", at=ended, histories=histories(reader, ended)))
     man = dict(created=ended, started=started, label=LABEL, mode=observation.MODE,
+               parallel=parallel,
                cycles=cycles, every_s=every, reads=reader.stats, chain_head=log.last,
                lines=log.count, guard=dict(guard.stats), by_venue=dict(guard.by_venue))
     (out / "stream_manifest.json").write_text(json.dumps(man, indent=1), encoding="utf-8")
@@ -195,12 +245,13 @@ def main():
     ap.add_argument("--observe", action="store_true")
     ap.add_argument("--cycles", type=int, default=30)
     ap.add_argument("--every", type=float, default=20.0)
+    ap.add_argument("--parallel", action="store_true")
     a = ap.parse_args()
     if not a.observe:
         raise SystemExit("--observe is required (explicit opt-in to public reads)")
     if a.cycles > 240 or a.every < 10:
         raise SystemExit("bounded only: at most 240 cycles, at least 10 s apart")
-    print(json.dumps(observe(Path(a.out), a.cycles, a.every), indent=1))
+    print(json.dumps(observe(Path(a.out), a.cycles, a.every, a.parallel), indent=1))
 
 
 if __name__ == "__main__":

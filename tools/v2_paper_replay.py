@@ -116,16 +116,24 @@ def report(led, eng, obs, asset):
             open_or_recovery=[dict(id=p["id"], state=p["state"],
                                    unhedged_units=led.exposure(p)) for p in open_],
             pnl=dict(
-                observed_part=sum(pn[p["id"]]["observed_part"] for p in filled),
-                estimated_part=sum(pn[p["id"]]["estimated_part"] for p in filled),
+                layers={k: sum(pn[p["id"]]["layers"][k] for p in filled)
+                        for k in ("public_data_reproducible", "assumption_dependent",
+                                  "account_verified")},
                 realized_total_closed=sum(pn[p["id"]]["realized_total"] for p in closed),
-                unrealized_open=sum(pn[p["id"]]["unrealized"] or 0.0 for p in open_),
-                unvalued_open=sum(1 for p in open_ if pn[p["id"]]["unrealized"] is None)),
+                realized_total_closed_reliable=sum(
+                    pn[p["id"]]["realized_total"] for p in closed
+                    if rel[p["id"]] == "RELIABLE"),
+                mark_to_market_open=sum(pn[p["id"]]["mark_to_market"] or 0.0 for p in open_),
+                unvalued_open=sum(1 for p in open_ if pn[p["id"]]["mark_to_market"] is None)),
             components=dict(
-                price_pnl=sum(pn[p["id"]]["price_pnl"] for p in filled),
-                fees=sum(pn[p["id"]]["fees"] for p in filled),
+                simulated_price_pnl=sum(pn[p["id"]]["simulated_price_pnl"] for p in filled),
+                simulated_fees=sum(pn[p["id"]]["simulated_fees"] for p in filled),
                 funding_by_evidence={k: sum(pn[p["id"]]["funding"][k] for p in filled)
                                      for k in L.FUNDING_KINDS}),
+            funding_payments={k: sum(1 for p in filled for f in p["funding"]
+                                     if f["evidence"] == k) for k in L.FUNDING_KINDS},
+            max_unhedged_s=max([L.PaperLedger.unhedged(p, obs[-1].at)[0] for p in filled]
+                               or [0.0]),
             fills=dict(total=len(fills), verified=sum(1 for f in fills if f["verified"]),
                        estimated_unverified=sum(1 for f in fills if not f["verified"]),
                        attempts_not_filled=len(not_filled)),
@@ -189,11 +197,30 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--aligned", nargs="*", default=[])
     ap.add_argument("--stream", nargs="*", default=[])
+    ap.add_argument("--runs", default="all",
+                    help="comma list of run names (default: all)")
+    ap.add_argument("--min-spacing", type=float, default=0.0,
+                    help="keep an observation only if it is at least this many seconds "
+                    "after the last kept one (makes a GAPPED replay from a continuous one; "
+                    "nothing is filled in)")
+    ap.add_argument("--entry-gate", default="STRICT_THRESHOLDS",
+                    choices=("STRICT_THRESHOLDS", "WORST_CASE_NONNEGATIVE"))
+    ap.add_argument("--recovery-timeout", type=float, default=60.0,
+                    help="seconds; negative = unbounded (the Phase 8 behaviour)")
     a = ap.parse_args()
     out = storage.check_dir(a.out)
     out.mkdir(parents=True, exist_ok=True)
     closes = closes_db()
     obs, sources = load(a.aligned, a.stream, closes)
+    if a.min_spacing > 0:
+        kept, last = [], None
+        for o in obs:
+            if last is None or o.at - last >= a.min_spacing:
+                kept.append(o)
+                last = o.at
+        obs = kept
+    common = dict(entry_gate=a.entry_gate,
+                  recovery_timeout_s=None if a.recovery_timeout < 0 else a.recovery_timeout)
     runs = dict(
         estimated=dict(pairs=NATGAS_PAIRS, scenario=False, kw={}),
         scenario_init=dict(pairs=INIT_PAIRS, scenario=True, kw={}),
@@ -205,8 +232,14 @@ def main():
         stress_crash_restart=dict(pairs=NATGAS_PAIRS, scenario=False,
                                   kw=dict(crash_at="after_first_leg")),
     )
+    if a.runs != "all":
+        want = a.runs.split(",")
+        runs = {k: v for k, v in runs.items() if k in want}
+    for r in runs.values():
+        r["kw"] = dict(common, **r["kw"])
     result = dict(label="ESTIMATED PAPER replay (simulated fills on observed public data;"
                   " no exchange order, no verified fill)", sources=sources,
+                  options=dict(runs=sorted(runs), min_spacing_s=a.min_spacing, **common),
                   integrity=paper_obs.integrity(obs, expected_every=20.0),
                   observations=len(obs), first=obs[0].at if obs else None,
                   last=obs[-1].at if obs else None, runs={})
@@ -220,21 +253,26 @@ def main():
             folder=str(folder), chain_head=chain_head(folder),
             ledger_integrity=storage.read_chain(folder / "ledger.jsonl")[1]["status"],
             report={a_: report(led, eng, obs, a_) for a_ in assets},
-            risk=led.risk(last_mids(obs, r["pairs"])))
+            risk=led.risk(last_mids(obs, r["pairs"]), at=obs[-1].at if obs else None),
+            alt_gate=dict(
+                evaluations_with_entry=sum(1 for e in eng.evaluations
+                                           if e.get("strict_best_net_min") is not None),
+                would_block=sum(1 for e in eng.evaluations if e.get("alt_gate_blocks"))))
         (folder / "stories.json").write_text(json.dumps(stories(led, obs), indent=1,
                                                         default=str), encoding="utf-8")
         (folder / "evaluations.json").write_text(json.dumps(eng.evaluations, default=str),
                                                  encoding="utf-8")
     # determinism: the estimated run once more in a scratch sub-folder, same head
-    again = out / "determinism_check"
-    run(again, obs, NATGAS_PAIRS, False)
-    result["determinism"] = dict(first=result["runs"]["estimated"]["chain_head"],
-                                 second=chain_head(again),
-                                 identical=chain_head(again) ==
-                                 result["runs"]["estimated"]["chain_head"])
+    if "estimated" in runs:
+        again = out / "determinism_check"
+        run(again, obs, NATGAS_PAIRS, False, **runs["estimated"]["kw"])
+        result["determinism"] = dict(first=result["runs"]["estimated"]["chain_head"],
+                                     second=chain_head(again),
+                                     identical=chain_head(again) ==
+                                     result["runs"]["estimated"]["chain_head"])
     (out / "replay_report.json").write_text(json.dumps(result, indent=1, default=str),
                                             encoding="utf-8")
-    print(json.dumps(dict(observations=len(obs), determinism=result["determinism"],
+    print(json.dumps(dict(observations=len(obs), determinism=result.get("determinism"),
                           runs={k: v["report"] for k, v in result["runs"].items()}),
                      indent=1, default=str))
 

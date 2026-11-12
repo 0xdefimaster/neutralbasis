@@ -71,7 +71,8 @@
   - Sequence numbers are UNKNOWN: the REST answers carry none.
   - Gaps between the sampled points are reported: 07:36→12:47 (5.2 h) and 12:53→14:39 (1.8 h).
 - **No look-ahead:** an observation sees settled points and hourly closes only up to its own time.
-- **WebSocket is not used** and is blocked by policy: the guard allows HTTPS reads only and the venv has no WS client. Adding one is a network-policy change for the owner to decide.
+- **WebSocket is not used** and is blocked by policy. Adding one is a network-policy change for the owner to decide.
+  - **Phase 9 correction:** the repo HAS a WS client (`extended_rfq.WebSocket`, used for TxFlow books, off by default). What is missing is a frame-level policy (doc 35).
 - **Payment times:**
   - TxFlow: `nodeCtx.nextFundingTime`, 1 h.
   - Variational: `funding.next_timestamp`, 4 h for NATGAS, 1 h for INIT.

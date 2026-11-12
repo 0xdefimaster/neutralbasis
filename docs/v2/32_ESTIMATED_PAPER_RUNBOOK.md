@@ -12,6 +12,7 @@ list do not change. Risk settings stay as they are: `wide_max_breakeven_hours=24
 The owner decided on 2026-11-12 that C: is full, so data goes to E:.
 
 - **Root folder:** `E:\nb-v2-phase8`. Override it with `NB_V2_PAPER_DATA_DIR`.
+  - **Phase 9 change:** E: and D: are one failing disk (34,246 bad-block events in 14 days, doc 34). The default root is now `C:\Users\W10\nb-benchmark\v2-paper-data`. E: writes are refused unless `NB_V2_E_WRITE_ACK=1` is set by the owner.
 - **Path guard:** `v2/storage.py`. It refuses:
   - D:
   - anything under `E:\NeutralBasis`, where `paper.sqlite3` and its WAL have no backup
@@ -43,7 +44,7 @@ python -m tools.v2_stream --observe --cycles 90 --every 20 --out E:\nb-v2-phase8
 - **Funding histories:** xyz NATGAS and native INIT, 3 days, read at the start and at the end.
 - **Failures:** a venue that fails twice in a row is skipped with an exponential back-off (2–120 s). HTTP 429 pauses the venue for the time it asks.
 - **Outputs:** `stream.jsonl` (hash chain) and `stream_manifest.json` (reads, guard counts, chain head).
-- **WebSocket is not used.** The guard allows HTTPS reads only, and the venv has no WebSocket client. Adding one is a network-policy change and needs the owner's review.
+- **WebSocket is not used.** Adding it needs the owner's review. A client exists in the repo (`extended_rfq.WebSocket`); the guard cannot inspect WS frames, so a frame allowlist is required first (doc 35).
 
 ## 3. Deterministic replay
 

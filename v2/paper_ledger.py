@@ -23,17 +23,29 @@ States (a signal is not a position; a position starts at the execution attempt):
 Unhedged exposure is never hidden: `risk()` reports, per position, each leg's open
 quantity, the unhedged units and their value at the last observed mid.
 
-Accounting per position (USD):
-  price_pnl         from simulated fill prices (spread is inside the prices; never
-                    added again)
-  fees              taker fees of every simulated fill
-  funding           by evidence: SETTLED_RATE (a public settled rate, valued at the
-                    observed mark: the venue's price basis is not in the history ->
-                    value estimated), PUBLISHED_ESTIMATE (a published rate at a
-                    payment time), PUBLISHED_CARRIED_FORWARD (no observation at the
-                    payment time: the last published rate is carried, an assumption)
-  total             price_pnl - fees + all funding; `observed_part` = price_pnl - fees
-                    + SETTLED_RATE funding; `estimated_part` = the published funding
+Accounting per position (USD), Phase 9 - every number says what it rests on:
+  simulated_price_pnl   from SIMULATED fill prices (IOC walked through an observed book,
+                        or an indicative RFQ quote); the spread is inside the prices.
+                        Never an exchange fill: reproducible from saved public data, but
+                        still a simulation.
+  simulated_fees        published taker fee rate x simulated fills
+  funding (by evidence):
+    SETTLED_PUBLIC_RATE        the venue's own settled public rate x simulated units x
+                               observed mark (the venue's price basis is not in the
+                               history, so the AMOUNT is an estimate; the RATE is not)
+    ACCOUNT_PAYMENT_CONFIRMED  an account's real funding payment: always 0 here (PAPER
+                               has no account); kept as its own line so it can never
+                               be confused with the above
+    PUBLISHED_RATE_ESTIMATE    a rate published in the same funding period, not settled
+    ASSUMED_CARRIED_FORWARD    no observation in that period: the last published rate
+                               was carried (an assumption, not data)
+  mark_to_market        open quantity at the last OBSERVED mid (unrealized)
+Layers (they replace Phase 8's misleading `observed_part`, which mixed simulated
+fills with observed data):
+  public_data_reproducible  simulated price PnL - simulated fees + SETTLED_PUBLIC_RATE
+                            (recomputable from the saved public answers; a simulation)
+  assumption_dependent      PUBLISHED_RATE_ESTIMATE + ASSUMED_CARRIED_FORWARD
+  account_verified          ACCOUNT_PAYMENT_CONFIRMED (0: no account, no real fills)
 """
 import hashlib
 import json
@@ -48,7 +60,11 @@ LEG_RECOVERY, MONITORING, EXIT_SIGNAL = "LEG_RECOVERY", "POSITION_MONITORING", "
 CLOSE_ATTEMPT, RECOVERY_PENDING, CLOSED = ("PAPER_CLOSE_ATTEMPT", "RECOVERY_PENDING",
                                            "CLOSED")
 FINAL = (CLOSED,)
-FUNDING_KINDS = ("SETTLED_RATE", "PUBLISHED_ESTIMATE", "PUBLISHED_CARRIED_FORWARD")
+FUNDING_KINDS = ("SETTLED_PUBLIC_RATE", "ACCOUNT_PAYMENT_CONFIRMED",
+                 "PUBLISHED_RATE_ESTIMATE", "ASSUMED_CARRIED_FORWARD")
+# Phase 8 ledgers used shorter names; read them under the Phase 9 names.
+ALIASES = dict(SETTLED_RATE="SETTLED_PUBLIC_RATE", PUBLISHED_ESTIMATE="PUBLISHED_RATE_ESTIMATE",
+               PUBLISHED_CARRIED_FORWARD="ASSUMED_CARRIED_FORWARD")
 EPS = 1e-9
 
 
@@ -65,6 +81,7 @@ class PaperLedger:
         self.log = storage.ChainLog(self.folder / "ledger.jsonl", environ)
         self.seed = seed
         self.positions, self.signals = {}, []
+        self.last_heartbeat = None
         events, self.integrity = storage.read_chain(self.log.path)
         for e in events:
             self._apply(e)
@@ -93,7 +110,8 @@ class PaperLedger:
                 funding=[], funding_keys=[], states=[[e["at"], ATTEMPT, None]],
                 expected=e.get("expected"), exit_params=e.get("exit_params"),
                 close_reason=None, secondary=[], retries=0, restarted=False,
-                reliability=[], marks=[], scenario_only=e.get("scenario_only", False))
+                reliability=[], marks=[], scenario_only=e.get("scenario_only", False),
+                exposure_path=[[e["at"], 0.0]])
         elif k == "fill":
             p = self.positions[e["pos"]]
             leg = p["legs"][e["side"]]
@@ -110,6 +128,7 @@ class PaperLedger:
                 leg["exit_value"] += e["qty"] * e["price"]
                 leg["exit_qty"] += e["qty"]
                 leg["qty"] = max(0.0, leg["qty"] - e["qty"])
+            p.setdefault("exposure_path", []).append([e["at"], self.exposure(p)])
         elif k == "state":
             p = self.positions[e["pos"]]
             p["state"] = e["state"]
@@ -129,9 +148,10 @@ class PaperLedger:
             p = self.positions[e["pos"]]
             if e["key"] not in p["funding_keys"]:
                 p["funding_keys"].append(e["key"])
-                p["funding"].append({x: e.get(x) for x in (
-                    "key", "side", "ts", "rate", "units", "price", "amount", "evidence",
-                    "basis")})
+                f = {x: e.get(x) for x in ("key", "side", "ts", "rate", "units", "price",
+                                           "amount", "evidence", "basis")}
+                f["evidence"] = ALIASES.get(f["evidence"], f["evidence"])
+                p["funding"].append(f)
         elif k == "mark":
             p = self.positions[e["pos"]]
             p["marks"].append({x: v for x, v in e.items()
@@ -139,6 +159,8 @@ class PaperLedger:
             del p["marks"][:-50]
         elif k == "reliability":
             self.positions[e["pos"]]["reliability"].append(e["note"])
+        elif k == "heartbeat":
+            self.last_heartbeat = e["at"]
 
     # -- views -------------------------------------------------------------------------
     @staticmethod
@@ -167,22 +189,51 @@ class PaperLedger:
         fund = {k: sum(f["amount"] for f in p["funding"] if f["evidence"] == k)
                 for k in FUNDING_KINDS}
         total_f = sum(fund.values())
-        out = dict(price_pnl=price, fees=fees, funding=fund, funding_total=total_f,
-                   realized_total=price - fees + total_f,
-                   observed_part=price - fees + fund["SETTLED_RATE"],
-                   estimated_part=fund["PUBLISHED_ESTIMATE"] +
-                   fund["PUBLISHED_CARRIED_FORWARD"],
-                   unrealized=None if unvalued else unreal)
+        out = dict(simulated_price_pnl=price, simulated_fees=fees, funding=fund,
+                   funding_total=total_f, realized_total=price - fees + total_f,
+                   layers=dict(
+                       public_data_reproducible=price - fees + fund["SETTLED_PUBLIC_RATE"],
+                       assumption_dependent=fund["PUBLISHED_RATE_ESTIMATE"] +
+                       fund["ASSUMED_CARRIED_FORWARD"],
+                       account_verified=fund["ACCOUNT_PAYMENT_CONFIRMED"]),
+                   mark_to_market=None if unvalued else unreal,
+                   price_basis="SIMULATED_FILLS_ON_OBSERVED_QUOTES",
+                   mark_basis="OBSERVED_MID")
         if p["strategy"] == "hybrid":
             out["components"] = dict(convergence_price_pnl=price, funding=total_f,
                                      shared_fees=fees, counted="fees once")
         return out
 
     @staticmethod
+    def unhedged(p, until):
+        """(seconds the position held unhedged units up to `until`, start of the
+        current unhedged spell or None) from the exposure after every fill."""
+        path = p.get("exposure_path") or []
+        total, since = 0.0, None
+        for (t0, x0), (t1, _) in zip(path, path[1:] + [[until, None]]):
+            if abs(x0) > EPS:
+                total += max(0.0, t1 - t0)
+                since = since if since is not None else t0
+            else:
+                since = None
+        return total, since
+
+    @staticmethod
+    def reconcile(p):
+        """Each leg's open quantity recomputed from its fills; [] when they agree."""
+        out = []
+        for side, leg in p["legs"].items():
+            q = sum(f["qty"] for f in leg["fills"] if f["action"] in ("open", "retry")) - \
+                sum(f["qty"] for f in leg["fills"] if f["action"] not in ("open", "retry"))
+            if abs(max(q, 0.0) - leg["qty"]) > 1e-6 * max(1.0, abs(q)):
+                out.append(dict(side=side, from_fills=q, state_qty=leg["qty"]))
+        return out
+
+    @staticmethod
     def exposure(p):
         return p["legs"]["long"]["qty"] - p["legs"]["short"]["qty"]
 
-    def risk(self, mids=None):
+    def risk(self, mids=None, at=None):
         """Open, unhedged risk of every position that is not CLOSED (never hidden)."""
         out = []
         for p in self.positions.values():
@@ -190,7 +241,9 @@ class PaperLedger:
                 continue
             x = self.exposure(p)
             m = (mids or {}).get(p["asset"])
+            secs, since = self.unhedged(p, at if at is not None else 0.0)
             out.append(dict(id=p["id"], asset=p["asset"], strategy=p["strategy"],
+                            unhedged_since=since, unhedged_seconds=secs,
                             state=p["state"], long_qty=p["legs"]["long"]["qty"],
                             short_qty=p["legs"]["short"]["qty"], unhedged_units=x,
                             unhedged_usd=None if m is None else abs(x) * m,

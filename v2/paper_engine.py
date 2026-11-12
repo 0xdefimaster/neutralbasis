@@ -29,6 +29,27 @@ Exits (checked only on a time-aligned observation; MAX_HOLD always):
   hybrid       two component exits - convergence done (CONVERGED seen) and funding
                done (FUNDING_REVERSED) - the position closes when BOTH are done, or
                at once on STOP / RISK_LIMIT / MAX_HOLD
+
+Crash safety (Phase 9):
+  heartbeat         one `heartbeat` event per step (time, open positions, unhedged USD)
+  restart           the first step after a restart emits `restart` with the downtime
+                    since the last heartbeat and, per position, the unhedged seconds;
+                    positions are handled in order of unhedged USD (largest first)
+  reconcile         each leg's quantity is recomputed from its fills; a mismatch moves
+                    the position to RECOVERY_PENDING (never trusted silently)
+  recovery timeout  a missing hedge is completed only while the position has been
+                    unhedged for at most `recovery_timeout_s` (default 60 s); later the
+                    risk is REDUCED first: the excess leg is unwound at the current book
+                    instead of hedging hours later at a different price. Without data to
+                    act, the position stays RECOVERY_PENDING and its exposure is reported.
+
+Entry gate (Phase 9 item 8): the default (`STRICT_THRESHOLDS`) is unchanged: an entry
+needs net >= wide_min_net, break-even <= 24 h, combined_moderate >= 0, rfq_moderate >= 0
+and the reference stress >= 0. Other, harsher scenarios (exit spread x3, +5 bp per
+fill, funding -50 %, half-filled second leg, firm gap 25 bp, last look 20 %, sign flip)
+are REPORTED in net_min but do not gate, so a signal can carry a negative worst case.
+`WORST_CASE_NONNEGATIVE` (opt-in, owner decision) also requires net_min >= 0; every
+evaluation records `alt_gate_blocks` either way.
 """
 import math
 
@@ -51,7 +72,12 @@ def cfg_at(cfg, size):
 class PaperEngine:
     def __init__(self, ledger, cfg, pairs, strategies=STRATEGIES, sizes=SIZES,
                  scenario=False, max_retries=2, slippage_bp=paper_exec.DEFAULT_SLIPPAGE_BP,
-                 firm_gap_bp=0.0, last_look=None, crash_at=None):
+                 firm_gap_bp=0.0, last_look=None, crash_at=None, recovery_timeout_s=60.0,
+                 entry_gate="STRICT_THRESHOLDS"):
+        if entry_gate not in ("STRICT_THRESHOLDS", "WORST_CASE_NONNEGATIVE"):
+            raise ValueError("unknown entry gate %r" % entry_gate)
+        self.recovery_timeout_s, self.entry_gate = recovery_timeout_s, entry_gate
+        self.resumed = False
         self.ledger, self.cfg, self.pairs = ledger, cfg, list(pairs)
         self.strategies, self.sizes, self.scenario = strategies, sizes, scenario
         self.max_retries, self.slippage_bp, self.firm_gap_bp = (max_retries, slippage_bp,
@@ -79,6 +105,11 @@ class PaperEngine:
                               result=r))
         entries = [x for x in table if x["status"] == estimated.ENTERED
                    and x["net_min"] is not None]
+        strict_best = max(entries, key=lambda x: (x["net_min"], -x["size"])) \
+            if entries else None
+        alt_blocks = bool(strict_best) and strict_best["net_min"] < 0
+        if self.entry_gate == "WORST_CASE_NONNEGATIVE":
+            entries = [x for x in entries if x["net_min"] >= 0]
         best = max(entries, key=lambda x: (x["net_min"], -x["size"])) if entries else None
         interesting = any(x["net"] is not None for x in table)
         stage = (L.ENTRY_SIGNAL if best and aligned else
@@ -90,13 +121,38 @@ class PaperEngine:
                    sizes=[{k: x[k] for k in ("size", "status", "first", "net", "net_min")}
                           for x in table],
                    chosen_size=best["size"] if best else None,
-                   blocked_by_time=bool(best) and not aligned)
+                   blocked_by_time=bool(best) and not aligned,
+                   entry_gate=self.entry_gate, alt_gate_blocks=alt_blocks,
+                   strict_best_net_min=strict_best["net_min"] if strict_best else None,
+                   gating_stresses=self.gating(strict_best["result"]) if strict_best
+                   else None)
         self.evaluations.append(rec)
         return rec, (best["result"] if best and aligned else None)
 
+    @staticmethod
+    def gating(r):
+        """Which scenarios gate the entry and which only lower net_min."""
+        st = {x["name"]: x["net"] for x in r.get("stress") or []}
+        rq = {x["name"]: x["net"] for x in r.get("rfq_stress") or []}
+        fs = {x["name"]: x["net"] for x in (r.get("funding_scenarios") or {}).get(
+            "scenarios", [])}
+        gate = dict(combined_moderate=st.get("combined_moderate"),
+                    rfq_moderate=rq.get("rfq_moderate"),
+                    reference_gap_x1=(r.get("reference_stress") or {}).get("net"))
+        info = {k: v for d in (st, rq) for k, v in d.items()
+                if k not in ("base", "combined_moderate", "rfq_moderate") and v is not None}
+        info.update({"funding:" + k: v for k, v in fs.items() if v is not None})
+        worst = min(info.items(), key=lambda kv: kv[1]) if info else None
+        return dict(gating=gate, informational_worst=worst,
+                    negative_informational=sorted(k for k, v in info.items() if v < 0))
+
     # ================================================================== step
     def step(self, obs):
-        for p in list(self.ledger.open_positions()):
+        if not self.resumed:
+            self.resume(obs)
+        order = sorted(self.ledger.open_positions(),
+                       key=lambda p: -abs(self.ledger.exposure(p)))
+        for p in order:
             self.progress(p, obs)
         for asset, lv, sv in self.pairs:
             if (lv, asset) not in obs.rows or (sv, asset) not in obs.rows:
@@ -128,6 +184,38 @@ class PaperEngine:
                                        freshness_limit_s=rec["freshness_limit_s"],
                                        expected=self.expected(result))
                 self.open(sig, result, obs)
+        self.heartbeat(obs)
+
+    def resume(self, obs):
+        """First step of this process: report the downtime and every restarted
+        position's unhedged time, reconcile legs against fills."""
+        self.resumed = True
+        restarted = [p for p in self.ledger.open_positions() if p.get("restarted")]
+        if not restarted:
+            return
+        last = self.ledger.last_heartbeat
+        items = []
+        for p in sorted(restarted, key=lambda p: -abs(self.ledger.exposure(p))):
+            secs, since = L.PaperLedger.unhedged(p, obs.at)
+            bad = L.PaperLedger.reconcile(p)
+            items.append(dict(pos=p["id"], state=p["state"],
+                              unhedged_units=self.ledger.exposure(p),
+                              unhedged_seconds=secs, unhedged_since=since,
+                              reconcile=bad or "OK"))
+            if bad:
+                self.state(p, obs, L.RECOVERY_PENDING, "RECONCILE_MISMATCH")
+        self.ledger.emit("restart", at=obs.at, last_heartbeat=last,
+                         downtime_s=None if last is None else obs.at - last,
+                         positions=items)
+
+    def heartbeat(self, obs):
+        mids = {}
+        risk = self.ledger.risk(at=obs.at)
+        self.ledger.emit("heartbeat", at=obs.at, open=len(risk),
+                         unhedged=[dict(id=r["id"], units=r["unhedged_units"],
+                                        seconds=r["unhedged_seconds"])
+                                   for r in risk if abs(r["unhedged_units"]) > L.EPS])
+        return mids
 
     @staticmethod
     def expected(r):
@@ -249,6 +337,14 @@ class PaperEngine:
         missing = abs(x)
         leg = p["legs"][short_side]
         got = 0.0
+        secs, since = L.PaperLedger.unhedged(p, obs.at)
+        if (self.recovery_timeout_s is not None and since is not None and
+                obs.at - since > self.recovery_timeout_s):
+            # Too late to complete the hedge at the entry's terms: reduce risk first.
+            self.state(p, obs, L.LEG_RECOVERY, "RECOVERY_TIMEOUT: unhedged %.0f s > %.0f s;"
+                       " unwind first" % (obs.at - since, self.recovery_timeout_s),
+                       retries=p["retries"])
+            return self.recover(p, obs)
         if leg["model"] == "CLOB" or p["legs"][short_side]["qty"] <= L.EPS:
             got = self.sim_fill(p, short_side, obs, "retry", qty=missing)
         else:
@@ -302,7 +398,7 @@ class PaperEngine:
         gap = (math.log(m["short"] / m["long"]) if m["long"] and m["short"] else None)
         x = self.ledger.exposure(p)
         mid_any = m["long"] or m["short"]
-        return dict(pos=p["id"], at=obs.at, unrealized=pn["unrealized"], gap=gap,
+        return dict(pos=p["id"], at=obs.at, unrealized=pn["mark_to_market"], gap=gap,
                     carry_hourly=carry, rates=rates, marks=marks_, mids=m,
                     net_open_risk=None if mid_any is None else abs(x) * mid_any)
 
@@ -373,7 +469,7 @@ class PaperEngine:
             (obs.rows.get((leg["venue"], p["asset"])) or {}).get("mark")
         if settled is not None:
             rate = settled["rate"]             # per hour (Hyperliquid history)
-            evidence, basis = "SETTLED_RATE", "public settled rate x observed mark " \
+            evidence, basis = "SETTLED_PUBLIC_RATE", "public settled rate x observed mark " \
                 "(venue price basis not in history: value estimated)"
         elif has_history:
             return                              # not published yet: wait (pending)
@@ -383,7 +479,7 @@ class PaperEngine:
             if r_prev is None:
                 return
             rate = r_prev
-            evidence = "PUBLISHED_ESTIMATE" if near else "PUBLISHED_CARRIED_FORWARD"
+            evidence = "PUBLISHED_RATE_ESTIMATE" if near else "ASSUMED_CARRIED_FORWARD"
             basis = "published rate observed %.0f s before the payment" % (
                 T - prev["at"]) if prev else "published"
         units = leg["qty"]
@@ -411,7 +507,7 @@ class PaperEngine:
                                  units=units, price=price,
                                  amount=(-1 if side == "long" else 1) * units * price * r *
                                  ((leg.get("interval") or HOUR) / HOUR),
-                                 evidence="PUBLISHED_CARRIED_FORWARD",
+                                 evidence="ASSUMED_CARRIED_FORWARD",
                                  basis="settled point missing at close")
 
     def monitor(self, p, obs):
@@ -458,7 +554,7 @@ class PaperEngine:
         reversed_ = weak_since is not None and \
             obs.at - weak_since >= cfg["wide_weak_minutes"] * 60
         pn = L.PaperLedger.pnl(p, snap["mids"])
-        mtm = (pn["unrealized"] or 0.0) + pn["realized_total"]
+        mtm = (pn["mark_to_market"] or 0.0) + pn["realized_total"]
         limit = min(cfg["wide_risk"], p["size"] * cfg["wide_conv_stop_pct"] / 100.0)
         if mtm < -limit:
             out.append("RISK_LIMIT")
@@ -519,7 +615,7 @@ class PaperEngine:
         why = []
         if p.get("time_quality_close") not in (None, "ALIGNED"):
             why.append("CLOSE_TIME_MISALIGNED")
-        if any(f["evidence"] == "PUBLISHED_CARRIED_FORWARD" for f in p["funding"]):
+        if any(f["evidence"] == "ASSUMED_CARRIED_FORWARD" for f in p["funding"]):
             why.append("FUNDING_CARRIED_FORWARD")
         if p.get("restarted"):
             why.append("RESTARTED")

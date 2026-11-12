@@ -1,9 +1,15 @@
 """Where ESTIMATED PAPER data may be written, and how (PAPER research only).
 
-Owner decision 2026-11-12: C: has no room, so ESTIMATED PAPER ledgers, replay outputs
-and bounded observation streams go to E:, in ONE dedicated new folder (default
-E:\\nb-v2-phase8, or NB_V2_PAPER_DATA_DIR). E: has known bad blocks, so:
+Phase 9 (2026-11-12): E: and D: are two partitions of ONE failing disk (TOSHIBA
+MQ02ABD100H): 34,246 "bad block" events (disk 7) in 14 days, 6,151 on 2026-11-12
+(839 between 14:00 and 16:00, while the Phase 8 stream was written there), NTFS
+corruption events on D:, four unexpected shutdowns (8 and 10 Nov). Disk safety is
+NOT proven, so E: writes are REFUSED unless NB_V2_E_WRITE_ACK=1 (the owner accepts
+the failing disk for that run). The default root is on C:
+(C:\\Users\\W10\\nb-benchmark\\v2-paper-data; small JSON-lines files only). The Phase 8
+owner decision (C: full -> E:\\nb-v2-phase8) remains possible only with that flag.
 
+For every folder:
   * nothing is ever written under E:\\NeutralBasis (its paper.sqlite3 + WAL have no
     backup) or on D:;
   * no SQLite database is created by this module (append-only JSON lines only);
@@ -20,7 +26,9 @@ import os
 from pathlib import Path
 
 ENV = "NB_V2_PAPER_DATA_DIR"
-DEFAULT_ROOT = r"E:\nb-v2-phase8"
+DEFAULT_ROOT = r"C:\Users\W10\nb-benchmark\v2-paper-data"
+E_ROOT = r"E:\nb-v2-phase8"
+E_ACK = "NB_V2_E_WRITE_ACK"
 FORBIDDEN = (r"e:\neutralbasis",)          # unbacked engine data: never written
 GENESIS = "0" * 64
 TORN_MARK = "TORN_TAIL_SKIPPED"
@@ -41,9 +49,10 @@ def _norm(p):
 
 def check_dir(path, environ=None):
     """The resolved folder if ESTIMATED PAPER data may be written there, else raise.
-    Allowed: inside the configured root (E:\\nb-v2-phase8 by default) or anywhere off
-    D:/E: (tests use temporary folders). Never D:, never E:\\NeutralBasis, never
-    elsewhere on E:."""
+    Allowed: anywhere off D:/E:, and on E: only inside E:\\nb-v2-phase8 (or the
+    configured root) AND only with NB_V2_E_WRITE_ACK=1 (failing disk, Phase 9).
+    Never D:, never E:\\NeutralBasis."""
+    env = os.environ if environ is None else environ
     p = _norm(path)
     if p[:2] == "d:":
         raise StorageError("D: is a failing disk: refused (%s)" % path)
@@ -51,10 +60,13 @@ def check_dir(path, environ=None):
         if p == bad or p.startswith(bad + os.sep):
             raise StorageError("E:\\NeutralBasis holds unbacked engine data: refused")
     if p[:2] == "e:":
-        r = _norm(root(environ))
-        if not (p == r or p.startswith(r + os.sep)):
+        if (env.get(E_ACK) or "").strip() != "1":
+            raise StorageError("E: is on a failing disk (bad blocks); writing there needs "
+                               "%s=1 from the owner (%s)" % (E_ACK, path))
+        allowed = [_norm(E_ROOT), _norm(root(environ))]
+        if not any(p == r or p.startswith(r + os.sep) for r in allowed):
             raise StorageError("on E: only the dedicated folder %s is allowed (%s)"
-                               % (r, path))
+                               % (E_ROOT, path))
     return Path(p)
 
 
