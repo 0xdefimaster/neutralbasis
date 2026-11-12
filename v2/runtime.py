@@ -29,8 +29,15 @@ DEFAULT_HYBRID = dict(wide_hybrid_enabled=False, wide_hybrid_max_open=1)
 
 class Runtime:
     def __init__(self, collector, gate, cfg, desk=None, recorder=None, data_dir=None,
-                 db_path=None, clock=time.time, sleep=time.sleep):
+                 db_path=None, clock=time.time, sleep=time.sleep, estimated=None):
         self.collector, self.gate, self.cfg = collector, gate, dict(DEFAULT_HYBRID, **cfg)
+        # ESTIMATED PAPER (opt-in, v2.estimated): None follows NB_V2_ESTIMATED_RFQ. Its
+        # results go to the snapshot only, never to the desk.
+        if estimated is None:
+            from v2 import estimated as est
+
+            estimated = est.enabled()
+        self.estimated = bool(estimated)
         self.desk, self.recorder = desk, recorder
         self.data_dir, self.db_path = data_dir, db_path
         self.clock, self.sleep = clock, sleep
@@ -102,7 +109,9 @@ class Runtime:
                                      exchange_id=r.get("exchange_id"),
                                      market_id=r.get("market_id"),
                                      underlying_id=r.get("underlying_id"))
+        est = self.estimate(cands, at) if self.estimated else None
         snap = dict(at=at, rows=len(rows), safe=safe, safety_findings=findings,
+                    estimated=est,
                     strategies={s: summarize(v) for s, v in results.items()},
                     top={s: top(v) for s, v in results.items()},
                     open_hybrids=[public(p) for p in (self.desk.open_positions()
@@ -113,6 +122,34 @@ class Runtime:
             self.last = snap
             self.rounds += 1
         return snap
+
+    def rfq_record(self, v, a):
+        row = self.collector.by_key.get((v, a)) or {}
+        if row.get("exchange_id") != "variational":
+            return None
+        for r in self.collector.records.get("variational", []):
+            if r["instrument"].market_id == row.get("market_id"):
+                return r
+        return None
+
+    def estimate(self, cands, at):
+        """ESTIMATED PAPER results (labelled, separate). Called after the desk cycle and
+        never handed to it."""
+        from v2 import estimated as est
+
+        ev = est.EstimatedEvaluator(self.gate, self.cfg, self.rfq_record)
+        out = []
+        for strategy, cs in cands.items():
+            for c in cs:
+                try:
+                    out.append(ev.evaluate(c, at, strategy))
+                except Exception as ex:
+                    out.append(dict(asset=c["asset"], long=c["long"], short=c["short"],
+                                    strategy=strategy, status=est.REJECTED,
+                                    first="EVAL_ERROR", reasons=[str(ex)[:200]]))
+        return dict(label="ESTIMATED PAPER (not strict, not filled)",
+                    summary=est.summary(out),
+                    entries=[x for x in out if x.get("status") == est.ENTERED][:50])
 
     def run(self, stop, every=60.0):
         """Loop until `stop` is set; an error is logged and retried with backoff."""

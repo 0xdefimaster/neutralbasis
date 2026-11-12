@@ -30,11 +30,19 @@ class Leg:
         return self.row.get("rate")
 
 
+def priced(x):
+    r = x.get("rate")
+    return isinstance(r, (int, float)) and not isinstance(r, bool) and r == r
+
+
 def settled_coverage(leg, at, days):
     """(have, expected) settled payments in (at - days, at]."""
     if not leg.settled or not leg.interval:
         return 0, int(days * DAY / (leg.interval or HOUR))
-    have = sum(1 for x in leg.settled if at - days * DAY < x["ts"] <= at)
+    # Only points with a numeric rate count (a payment row with an unverified rate
+    # unit, rate None, proves a payment but not the market rate).
+    have = sum(1 for x in leg.settled if at - days * DAY < x["ts"] <= at
+               and priced(x))
     return have, int(days * DAY / leg.interval)
 
 
@@ -49,6 +57,8 @@ def daily_carry(long, short, at, days=7):
     out = [0.0] * days
     for leg, sign in ((short, 1), (long, -1)):
         for x in leg.settled or []:
+            if not priced(x):
+                continue
             age = at - x["ts"]
             if 0 <= age < days * DAY:
                 out[int(age // DAY)] += sign * x["rate"]
@@ -56,7 +66,8 @@ def daily_carry(long, short, at, days=7):
 
 
 def realized_hourly(leg, at, hours=24):
-    xs = [x["rate"] for x in leg.settled or [] if at - hours * HOUR < x["ts"] <= at]
+    xs = [x["rate"] for x in leg.settled or [] if at - hours * HOUR < x["ts"] <= at
+          and priced(x)]
     if not xs or not leg.interval:
         return None
     return statistics.mean(xs) / (leg.interval / HOUR)

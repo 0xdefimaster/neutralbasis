@@ -221,6 +221,13 @@ def market_evidence(exchange_id, points, at, interval_s=3600, window_days=7):
                     sufficient=False, confidence="NONE", revisions=[])
     statuses = [kind_status(p.get("kind")) for p in points]
     status = min(statuses, key=lambda x: RANK.get(x, 0))
+    unpriced = sum(1 for p in points if not is_number(p.get("rate")))
+    if unpriced:
+        # Payments exist (e.g. TxFlow userFundings) but no verified rate per point:
+        # proof that funding was paid, not a market funding yield.
+        return dict(status=status, basis="RATE_UNIT_UNVERIFIED", window=name,
+                    coverage=None, sufficient=False, confidence="LOW", revisions=[],
+                    unpriced_points=unpriced)
     rev = revisions(points)
     if rev:
         status = REVISED
@@ -231,3 +238,7 @@ def market_evidence(exchange_id, points, at, interval_s=3600, window_days=7):
             "MEDIUM" if settled and cov["status"] == "PARTIAL" else "LOW")
     return dict(status=status, basis="MARKET_POINTS", window=name, coverage=cov,
                 sufficient=sufficient, confidence=conf, revisions=rev)
+
+
+def is_number(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x

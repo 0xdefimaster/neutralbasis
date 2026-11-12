@@ -70,10 +70,10 @@ class Gate:
             # field (v2.references); one UNKNOWN or difference keeps it closed.
             xl = rows[(c["long"], c["asset"])].get("exchange_id")
             xs = rows[(c["short"], c["asset"])].get("exchange_id")
-            if not references.compare(xl, xs, c["asset"])["verified"]:
+            if not references.classify(xl, xs, c["asset"])["hedge_ok"]:
                 out.append(reason(DATA, "RWA_REFERENCE_UNVERIFIED",
-                                  "venues do not state the same reference contract: "
-                                  + references.gate_text(xl, xs, c["asset"], fine)))
+                                  "reference not proven identical: "
+                                  + references.gate_text_class(xl, xs, c["asset"], fine)))
         elif fine in SESSION_CLASSES:
             state = self.provider.rth_open()
             if state is None:
@@ -102,7 +102,10 @@ class Gate:
             pts = self.provider.settled(v, a, at)
         except Exception:
             return False
-        return bool(pts) and all(fe.kind_status(p.get("kind")) in fe.SETTLED for p in pts)
+        # Every point must be a settlement AND carry a verified numeric rate (an
+        # account payment whose rate unit is unverified proves a payment, not a yield).
+        return bool(pts) and all(fe.kind_status(p.get("kind")) in fe.SETTLED
+                                 and fe.is_number(p.get("rate")) for p in pts)
 
     def legs(self, c, rows, at):
         out = []

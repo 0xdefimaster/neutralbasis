@@ -75,26 +75,24 @@ class ReferenceTests(unittest.TestCase):
         self.assertFalse(c["verified"])
         self.assertFalse(c["registered"]["a"])
 
-    def test_gate_opens_only_on_a_full_verified_match(self):
+    def test_gate_opens_only_on_exact_reference(self):
         rows = {("A", "X"): row("A", "arcus", "X"), ("B", "X"): row("B", "lighter_rh", "X")}
         g = gates.Gate(Provider(rows), CFG)
-        c = dict(asset="X", long="A", short="B")
-        self.assertIn("RWA_REFERENCE_UNVERIFIED",
-                      [r["code"] for r in g.static(dict(c, strategy="convergence"), rows)])
-        same = {f: ("same value", "https://example.invalid/doc") for f in references.REQUIRED}
-        saved = dict(references.REGISTRY)
-        try:  # MOCK registry: identical, fully known specs
-            references.REGISTRY[("arcus", "X")] = same
-            references.REGISTRY[("lighter_rh", "X")] = same
-            self.assertNotIn("RWA_REFERENCE_UNVERIFIED", [
-                r["code"] for r in g.static(dict(c, strategy="convergence"), rows)])
-            one_unknown = dict(same, exchange=(references.UNKNOWN, "https://x.invalid"))
-            references.REGISTRY[("lighter_rh", "X")] = one_unknown
-            self.assertIn("RWA_REFERENCE_UNVERIFIED", [
-                r["code"] for r in g.static(dict(c, strategy="convergence"), rows)])
+        c = dict(asset="X", long="A", short="B", strategy="convergence")
+        codes = lambda: [r["code"] for r in g.static(c, rows)]  # noqa: E731
+        self.assertIn("RWA_REFERENCE_UNVERIFIED", codes())       # no spec: UNKNOWN
+        full = dict(underlying_id="U", unit="USD/x", exchange="EX", contract_month="F27",
+                    roll_rule_id="R1")
+        saved = dict(references.NORM)
+        try:  # MOCK normalized specs
+            references.NORM[("arcus", "X")] = dict(full)
+            references.NORM[("lighter_rh", "X")] = dict(full)
+            self.assertNotIn("RWA_REFERENCE_UNVERIFIED", codes())
+            references.NORM[("lighter_rh", "X")] = dict(full, exchange=references.UNKNOWN)
+            self.assertIn("RWA_REFERENCE_UNVERIFIED", codes())
         finally:
-            references.REGISTRY.clear()
-            references.REGISTRY.update(saved)
+            references.NORM.clear()
+            references.NORM.update(saved)
 
 
 class MarketEvidenceTests(unittest.TestCase):

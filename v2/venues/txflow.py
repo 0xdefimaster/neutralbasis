@@ -135,3 +135,41 @@ def parse_user_fundings(raw):
                         rate_raw=num(x.get("fundingRate")), rate=None,
                         kind="account_payment"))
     return sorted(out, key=lambda r: r["ts"])
+
+
+
+def infer_rate_unit(rows, mark_at, min_rows=3, tolerance=0.05):
+    """Check the unit of userFundings `fundingRate` against the payment itself.
+
+    docs.txflow.com/trade/funding.md: payment = size x mark price x rate (positive rate:
+    longs pay). For each row with szi, amount, rate_raw and a mark price AT that funding
+    time (`mark_at(ts)` -> price or None; it must come from venue data, never guessed),
+    the implied rate is -amount / (szi x mark). The unit is FRACTION or PERCENT only if
+    at least `min_rows` rows agree with one reading within `tolerance` (relative) and
+    none agrees with the other only; otherwise UNVERIFIED. Returns (unit, details)."""
+    votes = dict(FRACTION=0, PERCENT=0, NEITHER=0)
+    checked = []
+    for r in rows or []:
+        szi, amount, raw = r.get("szi"), r.get("amount"), r.get("rate_raw")
+        mark = mark_at(r["ts"]) if mark_at else None
+        if not szi or amount is None or not raw or not mark:
+            continue
+        implied = -amount / (szi * mark)
+        ok_f = abs(implied - raw) <= tolerance * abs(raw)
+        ok_p = abs(implied - raw / 100.0) <= tolerance * abs(raw / 100.0)
+        votes["FRACTION" if ok_f and not ok_p else "PERCENT" if ok_p and not ok_f
+              else "NEITHER"] += 1
+        checked.append(dict(ts=r["ts"], implied=implied, raw=raw, mark=mark))
+    unit = "UNVERIFIED"
+    for u, other in (("FRACTION", "PERCENT"), ("PERCENT", "FRACTION")):
+        if votes[u] >= min_rows and votes[other] == 0 and votes["NEITHER"] == 0:
+            unit = u
+    return unit, dict(votes=votes, checked=checked)
+
+
+def apply_rate_unit(rows, unit):
+    """Rows with `rate` (fraction per payment) set ONLY for a verified unit; any other
+    unit leaves rate None (no market funding yield is derived)."""
+    k = {"FRACTION": 1.0, "PERCENT": 0.01}.get(unit)
+    return [dict(r, rate=None if k is None or r.get("rate_raw") is None
+                 else r["rate_raw"] * k, rate_unit=unit) for r in rows]
