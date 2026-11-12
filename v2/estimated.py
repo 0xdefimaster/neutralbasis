@@ -20,16 +20,33 @@ loss):
                                (DIFFERENT_UNDERLYING stays rejected)
 Everything else stays a rejection (scope/CONFIG_EXCLUDED, unknown fee, session closed or
 unknown, stale book, identity, missing price history, liquidity at size). The strict
+gate stops at its first failing stage, so checks it never reached for an estimable
+reason (book present and fresh) are run here again (`critical`). The strict
 thresholds apply unchanged: break-even <= wide_max_breakeven_hours (24 h), funding
 realization wide_funding_realization (1.0), wide_min_net, the combined stress; RFQ legs
 must also survive the rfq_moderate stress.
+
+Status ESTIMATED_ENTRY_SIGNAL means "an entry would be signalled"; it is NOT a position.
+A position exists only in the separate ESTIMATED PAPER ledger (v2.paper_ledger), after
+a simulated execution attempt.
+
+Strategies are kept apart (Phase 8):
+  funding      published carry over the funding horizon; the constant-rate assumption is
+               reported with history / regime / sign-flip / payment-schedule scenarios
+               (v2.funding_scenarios)
+  convergence  the strict convergence strategy on real books (no RFQ: no history)
+  hybrid       a funding component (published carry over the convergence's expected
+               hold) and a convergence component (capture), on ONE round trip and ONE
+               reserve; without a convergence component it is not a hybrid
+               (HYBRID_CONVERGENCE_UNAVAILABLE) - the funding strategy covers that case
 """
 import math
 import os
 import statistics
 
-from v2 import economics, observation, references, rfq_paper
+from v2 import economics, marketdata, observation, references, rfq_paper
 from v2 import funding_evidence as fe
+from v2 import funding_scenarios as fsc
 from v2.strategies import COST, DATA, EXECUTION, reason
 
 ENV = "NB_V2_ESTIMATED_RFQ"
@@ -38,7 +55,8 @@ ESTIMABLE = ("EXECUTION_MODEL_UNVERIFIED", "SETTLEMENT_EVIDENCE_MISSING",
 LABELS = dict(EXECUTION_MODEL_UNVERIFIED=rfq_paper.LABEL,
               SETTLEMENT_EVIDENCE_MISSING="ESTIMATED_FUNDING_PUBLISHED",
               RWA_REFERENCE_UNVERIFIED="ESTIMATED_REFERENCE_BASIS_RISK")
-ENTERED, REJECTED, STRICT = "ESTIMATED_PAPER_ENTRY", "ESTIMATED_REJECTED", "STRICT_ELIGIBLE"
+ENTERED, REJECTED, STRICT = ("ESTIMATED_ENTRY_SIGNAL", "ESTIMATED_REJECTED",
+                             "STRICT_ELIGIBLE")
 
 
 class EstimatedError(RuntimeError):
@@ -124,9 +142,42 @@ class EstimatedEvaluator:
         if hard:
             return dict(out, status=REJECTED, first=hard[0]["code"],
                         reasons=[r["code"] for r in hard], estimated=False)
+        crit = self.critical(c, rows, at)
+        if crit:
+            return dict(out, status=REJECTED, first=crit[0], reasons=crit, estimated=False,
+                        note="checks the strict gate never reached (it stopped earlier)")
         if strategy == "convergence":
             return self.convergence(out, c, at, strict, ref)
+        if strategy == "hybrid":
+            return self.hybrid(out, c, at, ref)
         return self.funding(out, c, at, strategy, codes, ref)
+
+    def critical(self, c, rows, at):
+        """Book present and fresh on every order-book leg. The strict gate checks this
+        only after its static stage passes, so a candidate it stopped for an estimable
+        reason was never checked; the estimate must not skip it. RFQ legs are checked
+        by quote age in leg_cost."""
+        out = []
+        for side in ("long", "short"):
+            v = c[side]
+            book = self.provider.book(v, c["asset"])
+            if book is None:
+                out.append("BOOK_MISSING")
+            elif book.get("model") != "rfq_indicative" and marketdata.stale(
+                    book, rows[(v, c["asset"])].get("exchange_id"), at):
+                out.append("BOOK_STALE")
+        return out
+
+    def leg_inputs(self, v, asset, row, at):
+        """Rate, interval, settled history and next payment of one leg (scenarios)."""
+        try:
+            hist = self.provider.settled(v, asset, at) or []
+        except Exception:
+            hist = []
+        hist = [dict(p, per_hour=False) for p in hist
+                if fe.kind_status(p.get("kind")) in fe.SETTLED and fe.is_number(p.get("rate"))]
+        return dict(rate=row.get("rate"), interval=row.get("interval"), history=hist,
+                    next_funding=row.get("next_funding"))
 
     def scenario(self, c, at, strategy="funding"):
         """The same estimate for a pair with an OBSERVATION-ONLY leg (e.g. INIT on
@@ -134,13 +185,31 @@ class EstimatedEvaluator:
         The status is SCENARIO_ONLY: never an estimated PAPER entry, never strict."""
         strict = self.gate.evaluate(c, at, strategy)
         codes = [r["code"] for r in strict.get("reasons") or []]
+        if codes == ["CONFIG_EXCLUDED"] * len(codes):
+            # The strict gate stops at CONFIG_EXCLUDED: run its remaining static checks
+            # (RFQ, fee, reference/session, settlement) with the observation-only
+            # identity masked, so none of them is skipped for the scenario.
+            rows = self.provider.rows_by()
+            masked = {k: dict(v, exchange_id=None) if v.get("exchange_id") and not
+                      observation.is_paper_venue(v["exchange_id"]) else v
+                      for k, v in rows.items()}
+            codes = codes + [r["code"] for r in self.gate.static(
+                dict(c, strategy=strategy), masked, at)]
         other = [x for x in codes if x not in ESTIMABLE + ("CONFIG_EXCLUDED",)]
         base = dict(asset=c["asset"], long=c["long"], short=c["short"], strategy=strategy,
                     strict_eligible=False, strict_reasons=codes)
         if other:
             return dict(base, status="SCENARIO_REJECTED", first=other[0], reasons=other)
-        r = self.funding(base, c, at, strategy, codes + ["SETTLEMENT_EVIDENCE_MISSING"],
-                         None)
+        crit = self.critical(c, self.provider.rows_by(), at)
+        if crit:
+            return dict(base, status="SCENARIO_REJECTED", first=crit[0], reasons=crit)
+        if strategy == "convergence":
+            r = self.convergence(base, c, at, strict, None)
+        elif strategy == "hybrid":
+            r = self.hybrid(base, c, at, None)
+        else:
+            r = self.funding(base, c, at, strategy,
+                             codes + ["SETTLEMENT_EVIDENCE_MISSING"], None)
         r["scenario_result"] = r["status"]
         r["status"] = "SCENARIO_ONLY"
         r["label"] = "SCENARIO_ONLY: a leg is outside the PAPER universe"
@@ -223,6 +292,11 @@ class EstimatedEvaluator:
                                              x["net"] is not None]
         if basis_st:
             stresses.append(basis_st["net"])
+        # The published rate is assumed constant over the horizon: say so, and show
+        # what history, a regime change, a sign flip and the payment times would do.
+        fs = fsc.scenarios(size, horizon, self.leg_inputs(c["long"], c["asset"], lr, at),
+                           self.leg_inputs(c["short"], c["asset"], sr, at), at,
+                           fees + spread + reserve)
         return dict(out, status=ENTERED if not reasons else REJECTED,
                     first=reasons[0] if reasons else None, reasons=reasons,
                     estimated=True, label="ESTIMATED_PAPER (not a strict decision)",
@@ -241,8 +315,15 @@ class EstimatedEvaluator:
                                      staleness_known=all(sig[s] is not None
                                                          for s in rfq_sides),
                                      funding_basis="published rates of one snapshot; "
-                                     "persistence not evidenced"),
-                    stress=st, rfq_stress=rfq_st, reference_stress=basis_st)
+                                     "persistence not evidenced",
+                                     constant_rate_assumed=True,
+                                     funding_scenario_min=fs["net_min"]),
+                    stress=st, rfq_stress=rfq_st, reference_stress=basis_st,
+                    funding_scenarios=fs,
+                    components=dict(funding=econ["expected_funding"], convergence=None,
+                                    shared_costs=dict(fees=fees, spread=spread,
+                                                      counted="once"),
+                                    reserve=reserve))
 
     def convergence(self, out, c, at, strict, ref):
         """Convergence needs hourly price history on both legs; Variational has none
@@ -265,7 +346,78 @@ class EstimatedEvaluator:
                 codes.append("REFERENCE_STRESS_NEGATIVE")
         return dict(out, status=ENTERED if not codes else REJECTED,
                     first=codes[0] if codes else None, reasons=codes, estimated=True,
-                    assumptions=self.assumptions(out["strict_reasons"], ref), net=net)
+                    assumptions=self.assumptions(out["strict_reasons"], ref), net=net,
+                    baseline=ev.get("baseline"), mad=ev.get("mad"),
+                    deviation=ev.get("deviation"), expected_hold_h=ev.get("expected_hold_h"),
+                    components=None if net is None else dict(
+                        funding=ev.get("funding"), convergence=ev.get("basis"),
+                        shared_costs=dict(fees=ev.get("fees"), spread=ev.get("spread"),
+                                          counted="once"), reserve=ev.get("reserve")))
+
+    def hybrid(self, out, c, at, ref):
+        """One position, two components on one round trip and one reserve:
+          convergence  capture from the strict convergence strategy (real books, 7 d
+                       of matched hourly closes, past episodes)
+          funding      published carry x size x the convergence's expected hold x
+                       realization (ESTIMATED_FUNDING_PUBLISHED); the convergence net
+                       already holds the same carry, so the net is rebuilt from the
+                       components here, never added to it
+        Without a convergence component (RFQ leg, no history, gap not extreme) there is
+        no hybrid: HYBRID_CONVERGENCE_UNAVAILABLE."""
+        from v2.strategies import convergence as conv
+
+        rows = self.provider.rows_by()
+        legs = self.gate.legs(c, rows, at)
+        a = self.assumptions(out["strict_reasons"], ref)
+        if any((l.book or {}).get("model") == "rfq_indicative" for l in legs):
+            return dict(out, status=REJECTED, first="HYBRID_CONVERGENCE_UNAVAILABLE",
+                        reasons=["HYBRID_CONVERGENCE_UNAVAILABLE", "PRICE_HISTORY_MISSING"],
+                        estimated=True, assumptions=a,
+                        note="no public price history for the RFQ venue")
+        size = self.cfg["wide_size"]
+        cv = conv.evaluate(legs[0], legs[1], size, self.cfg, at)
+        if "expected_hold_h" not in cv:
+            codes = [r["code"] for r in cv["reasons"]] or ["NO_CONVERGENCE_COMPONENT"]
+            return dict(out, status=REJECTED, first="HYBRID_CONVERGENCE_UNAVAILABLE",
+                        reasons=["HYBRID_CONVERGENCE_UNAVAILABLE"] + codes, estimated=True,
+                        assumptions=a)
+        hold = cv["expected_hold_h"]
+        carry = fe.pair_carry(legs[0].hourly, legs[1].hourly)
+        if carry is None:
+            return dict(out, status=REJECTED, first="FUNDING_RATE_MISSING",
+                        reasons=["FUNDING_RATE_MISSING"], estimated=True, assumptions=a)
+        funding_cash = size * carry * hold * self.cfg["wide_funding_realization"]
+        gap = abs(economics.mid(legs[1].book) / economics.mid(legs[0].book) - 1)
+        reserve = max(size * gap, cv.get("reserve") or 0.0)
+        costs = cv["costs"]
+        n = economics.net(costs, funding=funding_cash, basis=cv["basis"], reserve=reserve)
+        st = economics.stress(costs, funding_cash, cv["basis"], reserve)
+        reasons = []
+        if n["net"] < self.cfg["wide_min_net"]:
+            reasons.append("NET_BELOW_MIN")
+        if next(x["net"] for x in st if x["name"] == "combined_moderate") < 0:
+            reasons.append("STRESS_NEGATIVE")
+        basis_st = None
+        if ref is not None:
+            basis_st = dict(name="reference_gap_x1", net=n["net"] - size * gap)
+            if basis_st["net"] < 0:
+                reasons.append("REFERENCE_STRESS_NEGATIVE")
+        return dict(out, status=ENTERED if not reasons else REJECTED,
+                    first=reasons[0] if reasons else None, reasons=reasons,
+                    estimated=True, assumptions=a, net=n["net"], carry_hourly=carry,
+                    carry_8h=fe.per_8h(carry), expected_hold_h=hold,
+                    baseline=cv["baseline"], mad=cv["mad"], deviation=cv["deviation"],
+                    components=dict(
+                        funding=funding_cash, funding_basis="ESTIMATED_FUNDING_PUBLISHED "
+                        "x expected hold %.1f h" % hold,
+                        convergence=cv["basis"], capture_share=cv["capture_share"],
+                        shared_costs=dict(fees=costs["fees"], spread=costs["spread"],
+                                          counted="once"),
+                        reserve=reserve, reserve_basis="max(funding gap proxy, "
+                        "convergence 2 x MAD)"),
+                    stress=st, reference_stress=basis_st,
+                    uncertainty=dict(net_min=min([x["net"] for x in st] + (
+                        [basis_st["net"]] if basis_st else [])), net_max=n["net"]))
 
 
 def summary(results):

@@ -22,6 +22,7 @@ Son üç okumada guard 18/20/18 istek izinli, 0 reddedilen istek, 0 CEX.
 - **Kotasyon kademeleri:** `base` (asgari emir), `size_1k`, `size_100k`, `size_1m`.
   - Boyut bir kademeye eşitse EXACT_TIER.
   - İki kademe arasındaysa BRACKETED: **bir üst kademeden** (daha geniş, ihtiyatlı) fiyatlanır; alt kademenin fiyatı belirsizlik bandı olarak raporlanır. Ara değer üretilmez.
+    - **Phase 8 ile değişti (doc 31):** kademe arası boyut artık hiç fiyatlanmıyor (`BETWEEN_TIERS_UNPRICED`). Yalnız gözlenen iki kademe fiyatı aralık olarak raporlanıyor. Üst kademenin her zaman daha kötü olduğu varsayılmıyor; `tier_order` kotasyonların gerçekte ne gösterdiğini raporluyor.
   - En büyük kademenin üstündeki boyut için fiyat yok (`ABOVE_LARGEST_TIER`); likidite uydurulmaz.
 - **Zaman:** her tahmin `updated_at` ile karar anı arasındaki yaşı kontrol eder.
   - En fazla 60 s; belge 600 s'ye kadar önbellek diyor.
@@ -153,7 +154,7 @@ STRICT: tüm okumalarda 0. Retler RWA_REFERENCE_UNVERIFIED ve SETTLEMENT_EVIDENC
 | 12:53 | −0.779% | CARRY_NOT_POSITIVE (−$35.1) | INSUFFICIENT_LIQUIDITY | MISALIGNED |
 
 **Farklı zamanlarda açılıp kapanan RFQ simülasyonları** (36 adet; long Variational):
-- **NATGAS/tradeXYZ, 18 simülasyon:** hepsi negatif. $1k'de −0.27 ile −1.59 $, $10k'de −27.7 ile −32.7 $. $5k ve $10k, 100k kademesinden BRACKETED fiyatlandı.
+- **NATGAS/tradeXYZ, 18 simülasyon:** hepsi negatif. $1k'de −0.27 ile −1.59 $, $10k'de −27.7 ile −32.7 $. $5k ve $10k, 100k kademesinden BRACKETED fiyatlandı. (Phase 8'den sonra bu boyutlar fiyatlanmıyor; bkz. doc 31.)
 - **INIT/Hyperliquid, 18 simülasyon (yalnız senaryo):** 4'ü hesaplanabildi; $1k'de −10.1 ile +7.7 $ arası. 14'ünde diğer bacakta (HL) likidite yetersiz.
   - INIT sonuçlarındaki değişkenliğin kaynağı fiyat gürültüsü; funding değil.
 - **36 simülasyonun hiçbiri** iki ucunda da zaman açısından hizalı değil (`trustworthy=False`).
@@ -168,3 +169,5 @@ STRICT: tüm okumalarda 0. Retler RWA_REFERENCE_UNVERIFIED ve SETTLEMENT_EVIDENC
 - `test_v2_estimated.py`: 23 test, 1'i gerçek 05:12 verisiyle.
 - Tam takım: **990 test, OK (2 atlandı)**, 259 s; önceki 967 testin hepsi geçiyor.
 - `git diff ea1a1d6 -- v2/policy.py v2/network_policy.py wide_paper.py` boş.
+
+> **Phase 8 notu:** bu belgedeki `ESTIMATED_PAPER_ENTRY` durumu `ESTIMATED_ENTRY_SIGNAL` olarak yeniden adlandırıldı: bir sinyal pozisyon değildir. 05:12 kaydındaki 2 hibrit "giriş", funding hesabının kopyasıydı. Hibrit artık ayrı bileşenlerle hesaplanıyor ve bu iki aday `HYBRID_CONVERGENCE_UNAVAILABLE` ile reddediliyor (doc 31).

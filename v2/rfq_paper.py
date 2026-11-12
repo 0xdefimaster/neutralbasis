@@ -8,11 +8,12 @@ cached up to 600 s, with `updated_at`.
 
 This module turns those quotes into ESTIMATED fills, never verified ones:
   * the quote's age is checked at decision time (STALE_QUOTE / QUOTE_IN_FUTURE);
-  * a size is priced only from a published tier that covers it: an exact tier is
-    EXACT_TIER; a size between tiers is BRACKETED: it is priced on the next LARGER
-    tier (wider, conservative) and the smaller tier's price is reported as the other
-    end of the uncertainty band; nothing is interpolated or invented; a size above the
-    largest published tier has NO price (ABOVE_LARGEST_TIER);
+  * a size is priced only by a published tier of EXACTLY that notional (EXACT_TIER).
+    A size between two tiers is BRACKETED and gets NO price: the two observed tier
+    quotes are reported as a range, but nothing is interpolated and neither end is
+    claimed conservative (a larger tier is not assumed to be worse: `tier_order`
+    reports what the quotes actually show). A size above the largest published tier
+    has no price either (ABOVE_LARGEST_TIER): no liquidity is invented;
   * the spread is paid once: a buy fills at the tier's ask, a sell at its bid; the
     price P&L already contains it; `spread_cost` (vs the tier mid) is only a breakdown,
     never added again as slippage;
@@ -33,6 +34,7 @@ MAX_QUOTE_AGE_S = 60.0       # stricter default for PAPER estimates
 FUTURE_TOLERANCE_S = 5.0     # clock skew allowed for an updated_at after `at`
 EXACT, BRACKETED, ABOVE, NO_QUOTE = ("EXACT_TIER", "BRACKETED", "ABOVE_LARGEST_TIER",
                                      "NO_QUOTE")
+UNPRICED = "BETWEEN_TIERS_UNPRICED"
 
 
 def ts(iso):
@@ -73,13 +75,31 @@ def quote_for(record, size_usd):
     above = [t for t in sized if t[1] > size_usd]
     if not above:
         return dict(status=ABOVE, largest=sized[-1][0] if sized else None)
-    use = above[0]
+    up = above[0]
     lower = [t for t in ts_ if t[1] is None or t[1] < size_usd]
-    below = lower[-1] if lower else None
-    return dict(status=BRACKETED, tier=use[0], bid=use[2], ask=use[3],
-                mid=(use[2] + use[3]) / 2,
-                below=None if below is None else dict(tier=below[0], bid=below[2],
-                                                      ask=below[3]))
+    lo = lower[-1] if lower else None
+    ends = [x for x in (lo, up) if x is not None]
+    return dict(status=BRACKETED,
+                lower=None if lo is None else dict(tier=lo[0], bid=lo[2], ask=lo[3]),
+                upper=dict(tier=up[0], bid=up[2], ask=up[3]),
+                bid_range=[min(x[2] for x in ends), max(x[2] for x in ends)],
+                ask_range=[min(x[3] for x in ends), max(x[3] for x in ends)])
+
+
+def tier_order(record):
+    """What the published quotes show about size (a fact, not an assumption): per
+    consecutive pair of tiers, whether the larger one is wider. OBSERVED_MONOTONE /
+    OBSERVED_NOT_MONOTONE / TOO_FEW_TIERS."""
+    ts_ = tiers(record)
+    if len(ts_) < 2:
+        return dict(status="TOO_FEW_TIERS", pairs=[])
+    pairs = []
+    for (n1, _, b1, a1), (n2, _, b2, a2) in zip(ts_, ts_[1:]):
+        pairs.append(dict(smaller=n1, larger=n2, larger_wider=(a2 - b2) >= (a1 - b1),
+                          bid_lower=b2 <= b1, ask_higher=a2 >= a1))
+    ok = all(x["bid_lower"] and x["ask_higher"] for x in pairs)
+    return dict(status="OBSERVED_MONOTONE" if ok else "OBSERVED_NOT_MONOTONE",
+                pairs=pairs)
 
 
 def quote_age(record, at):
@@ -102,15 +122,17 @@ def fill(record, buy, size_usd, at, max_age=MAX_QUOTE_AGE_S, fee=0.0):
     q = quote_for(record, size_usd)
     if q["status"] in (NO_QUOTE, ABOVE):
         return dict(base, reason=q["status"], quote=q)
+    if q["status"] == BRACKETED:
+        # No published quote for this size: report the observed range, price nothing.
+        return dict(base, reason=UNPRICED, quote=q,
+                    observed_range=q["ask_range"] if buy else q["bid_range"],
+                    tier_order=tier_order(record)["status"])
     price = q["ask"] if buy else q["bid"]
     qty = size_usd / q["mid"]
-    other = q.get("below")
-    band = sorted([price, (other["ask"] if buy else other["bid"])]) if other else [price,
-                                                                                   price]
     return dict(base, reason=None, status=q["status"], tier=q["tier"], price=price,
                 mid=q["mid"], qty=qty, fee=qty * price * (fee or 0.0),
-                spread_cost=qty * abs(price - q["mid"]), price_band=band,
-                band_bp=1e4 * (band[1] - band[0]) / q["mid"])
+                spread_cost=qty * abs(price - q["mid"]), price_band=[price, price],
+                band_bp=0.0)
 
 
 def round_trip(record, buy, size_usd, at, max_age=MAX_QUOTE_AGE_S, fee=0.0):

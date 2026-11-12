@@ -33,20 +33,33 @@ class RfqQuoteTests(unittest.TestCase):
         r = record()
         self.assertEqual(rfq_paper.quote_for(r, 1000.0)["status"], rfq_paper.EXACT)
         b = rfq_paper.quote_for(r, 5000.0)
-        self.assertEqual((b["status"], b["tier"], b["below"]["tier"]),
+        self.assertEqual((b["status"], b["upper"]["tier"], b["lower"]["tier"]),
                          (rfq_paper.BRACKETED, "size_100k", "size_1k"))
         self.assertEqual(rfq_paper.quote_for(r, 200000.0)["status"], rfq_paper.ABOVE)
         small = rfq_paper.quote_for(r, 500.0)
-        self.assertEqual((small["tier"], small["below"]["tier"]), ("size_1k", "base"))
+        self.assertEqual((small["upper"]["tier"], small["lower"]["tier"]),
+                         ("size_1k", "base"))
         self.assertEqual(rfq_paper.quote_for(dict(quotes={}), 1000.0)["status"],
                          rfq_paper.NO_QUOTE)
 
-    def test_bracketed_uses_the_larger_tier_and_reports_the_band(self):
+    def test_between_tiers_has_no_price_only_the_observed_range(self):
+        # Phase 8 A3: no unverified interpolation and no "larger tier is worse" claim.
         f = rfq_paper.fill(record(), True, 5000.0, AT)
-        self.assertEqual(f["price"], 101.0)                  # 100k ask, not interpolated
-        self.assertEqual(f["price_band"], [100.1, 101.0])
-        self.assertGreater(f["band_bp"], 0)
+        self.assertEqual(f["reason"], rfq_paper.UNPRICED)
+        self.assertNotIn("price", f)
+        self.assertEqual(f["observed_range"], [100.1, 101.0])
         self.assertEqual(f["label"], rfq_paper.LABEL)
+
+    def test_larger_tier_is_not_assumed_worse(self):
+        # A 100k quote TIGHTER than the 1k one: the observed order is reported, and a
+        # 5k size is still unpriced.
+        r = record(size_100k=(99.95, 100.05))
+        self.assertEqual(rfq_paper.tier_order(r)["status"], "OBSERVED_NOT_MONOTONE")
+        self.assertEqual(rfq_paper.tier_order(record())["status"], "OBSERVED_MONOTONE")
+        f = rfq_paper.fill(r, True, 5000.0, AT)
+        self.assertEqual(f["reason"], rfq_paper.UNPRICED)
+        self.assertEqual(f["observed_range"], [100.05, 100.1])
+        self.assertEqual(f["tier_order"], "OBSERVED_NOT_MONOTONE")
 
     def test_no_liquidity_is_invented_above_the_largest_tier(self):
         r = record(size_100k=None)
