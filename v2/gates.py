@@ -18,7 +18,8 @@ Order (first failure wins, all are reported):
   7. the strategy itself (v2.strategies), on the real books at the position size:
      liquidity, fees, spread, funding, basis, reserve, break-even, net.
 """
-from v2 import marketdata, observation
+from v2 import funding_evidence as fe
+from v2 import marketdata, observation, references
 from v2.strategies import COST, DATA, EXECUTION, convergence, funding, hybrid, reason
 from v2.strategies.common import Leg
 
@@ -38,7 +39,7 @@ class Gate:
         self.cfg = cfg
         self.size = size
 
-    def static(self, c, rows):
+    def static(self, c, rows, at=None):
         out = []
         legs = [(side, c[side]) for side in ("long", "short")]
         for side, v in legs:
@@ -65,9 +66,14 @@ class Gate:
                 out.append(reason(DATA, "FEE_UNKNOWN", "%s %s fee UNKNOWN" % (side, v)))
         fine = rows[(c["long"], c["asset"])].get("fine_class")
         if fine in REFERENCE_UNVERIFIED:
-            out.append(reason(DATA, "RWA_REFERENCE_UNVERIFIED",
-                              "%s: venues do not state the same reference contract "
-                              "(%s)" % (c["asset"], fine)))
+            # Open only when both venues' primary docs give the same reference on every
+            # field (v2.references); one UNKNOWN or difference keeps it closed.
+            xl = rows[(c["long"], c["asset"])].get("exchange_id")
+            xs = rows[(c["short"], c["asset"])].get("exchange_id")
+            if not references.compare(xl, xs, c["asset"])["verified"]:
+                out.append(reason(DATA, "RWA_REFERENCE_UNVERIFIED",
+                                  "venues do not state the same reference contract: "
+                                  + references.gate_text(xl, xs, c["asset"], fine)))
         elif fine in SESSION_CLASSES:
             state = self.provider.rth_open()
             if state is None:
@@ -78,11 +84,25 @@ class Gate:
                                   "outside US regular trading hours (Arcus isOutsideRth)"))
         if c.get("strategy") in ("funding", "hybrid", None):
             for side, v in legs:
-                if v in PUBLISHED_ONLY:
+                # A rate-only venue passes only with settled evidence for THIS market
+                # (e.g. an authorized account-payment feed); a published rate never
+                # counts as a payment.
+                if v in PUBLISHED_ONLY and not self.market_settled(v, c["asset"], at):
                     out.append(reason(DATA, "SETTLEMENT_EVIDENCE_MISSING",
-                                      "%s %s publishes a rate only; no public settled "
-                                      "payments" % (side, v)))
+                                      "%s %s publishes a rate only; no settled payments "
+                                      "for this market" % (side, v)))
         return out
+
+    def market_settled(self, v, a, at):
+        """True when the provider returns payments for this market whose kind is a
+        settlement (market history or account payment), not a sampled rate."""
+        if at is None:
+            return False
+        try:
+            pts = self.provider.settled(v, a, at)
+        except Exception:
+            return False
+        return bool(pts) and all(fe.kind_status(p.get("kind")) in fe.SETTLED for p in pts)
 
     def legs(self, c, rows, at):
         out = []
@@ -96,7 +116,7 @@ class Gate:
     def evaluate(self, c, at, strategy=None):
         strategy = strategy or c.get("strategy") or "funding"
         rows = self.provider.rows_by()
-        reasons = self.static(dict(c, strategy=strategy), rows)
+        reasons = self.static(dict(c, strategy=strategy), rows, at)
         if reasons:
             return dict(strategy=strategy, reasons=reasons, eligible=False)
         long, short = self.legs(c, rows, at)

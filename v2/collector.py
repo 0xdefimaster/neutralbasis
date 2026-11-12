@@ -30,6 +30,9 @@ class Collector:
     def __init__(self, transport=None, clock=time.time):
         # transport(exchange_id, method, url, body, headers) -> json
         self.transport = transport or (lambda x, m, u, b, h=None: base.http_json(x, m, u, b, h))
+        # Only a live collector shares the process-wide Variational answer; a replay or
+        # recording transport keeps its own (v2.venues.variational.stats).
+        self.source = variational.LIVE if transport is None else "transport:%d" % id(transport)
         self.clock = clock
         self.lock = threading.Lock()
         self.cache = {}
@@ -95,7 +98,8 @@ class Collector:
             lighter_rh=dict(markets=self.get("rh:markets", TTL["meta"], lambda: self.call(
                 "lighter_rh", lighter_rh.markets_request())), fundings={}),
             variational=dict(stats=variational.stats(
-                lambda: self.call("variational", variational.stats_request()))[0]),
+                lambda: self.call("variational", variational.stats_request()),
+                source=self.source)[0]),
         )
         meta = self.get("tx:meta", TTL["slow_meta"], lambda: self.call(
             "txflow", txflow.meta_request(), tx))

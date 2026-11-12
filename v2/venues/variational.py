@@ -38,14 +38,26 @@ _CACHE = ratelimit.SharedCache(STATS_TTL)
 _LOCK = threading.Lock()
 
 
-def stats(fetch=None):
-    """The shared /metadata/v2/stats answer: (json, from_cache). `fetch` is for tests."""
+LIVE = "live"
+
+
+def stats(fetch=None, source=None):
+    """The shared /metadata/v2/stats answer: (json, from_cache).
+
+    The cache key is the answer's SOURCE, not only the URL: live readers (source
+    "live", the default without `fetch`) share one answer per TTL, so the venue sees one
+    client; a replay, a recording or a test fetch (any other source; a `fetch` without
+    a source gets its own key) never receives an answer from another source or another
+    moment (fixed 2026-11-12: a test's MOCK stats leaked into a later replay)."""
+    if source is None:
+        source = LIVE if fetch is None else "fetch:%d" % id(fetch)
+
     def get():
         if fetch is not None:
             return fetch()
         return http_json(XID, "GET", STATS_URL)
 
-    return _CACHE.get(STATS_URL, get)
+    return _CACHE.get((STATS_URL, source), get)
 
 
 def stats_request():
@@ -99,3 +111,56 @@ def quote_book_for(record, size_usd):
         if size_usd <= cap and (record.get("quotes") or {}).get(name):
             return quote_book(record, name)
     return book([], [], source=XID + ":rfq")
+
+
+
+# What a PAPER fill model for Omni RFQ needs, and whether public data gives it
+# (docs.variational.io, read 2026-11-12). Any requirement not MET keeps the gate's
+# EXECUTION_MODEL_UNVERIFIED: an indicative quote is "not a commitment to execute".
+RFQ_DOC = "https://docs.variational.io/omni/trading/quoted-index-and-mark-prices.md"
+RFQ_FILL_MODEL_REQUIREMENTS = (
+    dict(id="indicative_tiers", need="bid/ask at the trade size",
+         status="MET", source="api.md quotes: base, size_1k, size_100k, size_1m"),
+    dict(id="quote_age", need="age of the quote at decision time",
+         status="MET", source="api.md: quotes.updated_at; cached up to 600 s"),
+    dict(id="firm_vs_indicative", need="distribution of firm price minus indicative "
+         "price per size and market", status="NOT_AVAILABLE",
+         source=RFQ_DOC + " (firm quote only on order entry; trading API 'not yet "
+         "available to any users', api.md)"),
+    dict(id="last_look_rejects", need="rate of OLP last-look rejections",
+         status="NOT_AVAILABLE", source="trading-via-rfq.md (no public data)"),
+    dict(id="quote_expiry", need="firm quote validity window", status="UNKNOWN",
+         source="not stated in the docs"),
+    dict(id="partial_fills", need="partial-fill behaviour of market orders",
+         status="UNKNOWN", source="order-types.md: limit orders all-or-nothing; market "
+         "orders not stated"),
+    dict(id="public_fills", need="executed trades to validate any model",
+         status="NOT_AVAILABLE", source="no public trades/fills endpoint; only the "
+         "user's own CSV export (trade-and-transfer-history.md)"),
+    dict(id="funding_settlement", need="settled funding per market",
+         status="NOT_AVAILABLE", source="funding history only in the user's own CSV"),
+)
+
+
+def rfq_model_status():
+    """('VERIFIED' | 'BLOCKED', [requirement ids not met])."""
+    gaps = [r["id"] for r in RFQ_FILL_MODEL_REQUIREMENTS if r["status"] != "MET"]
+    return ("BLOCKED" if gaps else "VERIFIED"), gaps
+
+
+def quote_age(record, at):
+    """Seconds between the quotes' updated_at and `at`, or None when not published."""
+    import datetime
+
+    u = (record or {}).get("quotes_updated")
+    if not u:
+        return None
+    try:
+        s = str(u).rstrip("Z")
+        head, _, frac = s.partition(".")
+        t = datetime.datetime.strptime(head, "%Y-%m-%dT%H:%M:%S").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+        t += float("0." + frac) if frac else 0.0
+    except ValueError:
+        return None
+    return at - t

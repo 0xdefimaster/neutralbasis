@@ -60,27 +60,46 @@ def replay(phase4):
                 gate=gates.Gate(prov, dict(wide_paper.WIDE_DEFAULTS)), blob=blob)
 
 
-def all_traces(r):
+def evidence_of(r, cache, venue, asset):
+    """Market-level funding evidence of one leg over the 7-day window (cached)."""
+    k = (venue, asset)
+    if k not in cache:
+        row = r["prov"].rows_by().get(k) or {}
+        pts = r["prov"].settled(venue, asset, r["at"])
+        cache[k] = fe.market_evidence(row.get("exchange_id"), pts, r["at"],
+                                      row.get("interval") or 3600, 7)
+    return cache[k]
+
+
+def all_traces(r, market_evidence=True):
     cfg = dict(wide_paper.WIDE_DEFAULTS)
     rows_by = r["prov"].rows_by()
-    out, at = [], r["at"]
+    out, at, cache = [], r["at"], {}
+
+    def tr(cc, strategy):
+        evid = (dict(long=evidence_of(r, cache, cc["long"], cc["asset"]),
+                     short=evidence_of(r, cache, cc["short"], cc["asset"]))
+                if market_evidence else None)
+        return funnel.trace(cc, r["gate"].evaluate(cc, at, strategy), rows_by,
+                            r["col"].groups, r["sha"], strategy, evidence=evid)
+
     for c in wide_paper.rank(r["rows"], cfg, at):
-        cc = dict(c, strategy="funding")
-        out.append(funnel.trace(cc, r["gate"].evaluate(cc, at, "funding"), rows_by,
-                                r["col"].groups, r["sha"], "funding"))
+        out.append(tr(dict(c, strategy="funding"), "funding"))
     pairs = set()
     for c in wide_paper.rank_spreads(r["rows"], at, cfg):
         for lv, sv in ((c["long"], c["short"]), (c["short"], c["long"])):
-            cc = dict(asset=c["asset"], long=lv, short=sv, strategy="convergence")
             pairs.add((c["asset"], lv, sv))
-            out.append(funnel.trace(cc, r["gate"].evaluate(cc, at, "convergence"), rows_by,
-                                    r["col"].groups, r["sha"], "convergence"))
+            out.append(tr(dict(asset=c["asset"], long=lv, short=sv,
+                               strategy="convergence"), "convergence"))
     for asset, lv, sv in sorted(pairs | {(t["asset"], t["long"], t["short"]) for t in out
                                          if t["strategy"] == "funding"}):
-        cc = dict(asset=asset, long=lv, short=sv)
-        out.append(funnel.trace(cc, r["gate"].evaluate(cc, at, "hybrid"), rows_by,
-                                r["col"].groups, r["sha"], "hybrid"))
+        out.append(tr(dict(asset=asset, long=lv, short=sv), "hybrid"))
     return out
+
+
+def radar_all(r, traces):
+    """The radar for every NOT_EVALUATED pair (research only)."""
+    return funnel.radar_index(traces, lambda v, a: leg_input(r, v, a))
 
 
 def leg_input(r, venue, asset):
@@ -329,6 +348,13 @@ def main():
     r = replay(Path(a.phase4))
     traces = all_traces(r)
     summ = funnel.summary(traces)
+    radar = radar_all(r, traces)
+    (out / "radar_not_evaluated.json").write_text(json.dumps(dict(
+        at=r["at"], snapshot_sha=r["sha"], label=funnel.RADAR_LABEL, entries=radar),
+        indent=1, default=str), encoding="utf-8")
+    summ["radar"] = dict(pairs=len(radar), potential=sum(1 for x in radar
+                                                         if x["label"] == "POTENTIAL"),
+                         traces_covered=sum(len(x["trace_ids"]) for x in radar))
     (out / "funnel.json").write_text(json.dumps(dict(
         at=r["at"], snapshot_sha=r["sha"], label="OBSERVED 05:12 snapshot replay; PAPER",
         summary=summ, traces=traces), indent=1, default=str), encoding="utf-8")

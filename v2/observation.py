@@ -157,7 +157,42 @@ def check(host, method, path, body=None):
                            "(UNKNOWN routes are refused)" % p, "phoenix_perps")
     if h in QFEX_HOSTS:
         return v2np.refuse("qfex: no verified public HTTP route (BLOCKED)", "qfex")
+    if h == v2np.TXFLOW_HOST and m == "POST" and p == "/info":
+        obj = v2np.parse_body(body)
+        if obj is not None and obj.get("type") == USER_FUNDINGS:
+            return check_user_fundings(obj)
     return v2np.check(h, m, p, body)
+
+
+USER_FUNDINGS = "userFundings"
+FUNDING_ADDRESS_ENV = "NB_TXFLOW_FUNDING_ADDRESS"
+ACCOUNT_READ = "ACCOUNT_READ_AUTHORIZED"
+
+
+def authorized_address(environ=None):
+    """The one TxFlow address the owner authorized for read-only funding evidence
+    (NB_TXFLOW_FUNDING_ADDRESS), lower case, or None. Never another account."""
+    env = os.environ if environ is None else environ
+    a = (env.get(FUNDING_ADDRESS_ENV) or "").strip().lower()
+    return a if re.fullmatch(r"0x[0-9a-f]{40}", a) else None
+
+
+def check_user_fundings(obj, environ=None):
+    """TxFlow userFundings (docs.txflow.com/api/info/userFundings.md: 'No auth - the
+    body user is the subject'): allowed in observation_v3 only for the authorized
+    address, with no other account field. It reads payments, it cannot trade."""
+    addr = authorized_address(environ)
+    if addr is None:
+        return v2np.refuse("TxFlow userFundings needs the owner-authorized read-only "
+                           "address (%s unset); other accounts are never read"
+                           % FUNDING_ADDRESS_ENV, "txflow")
+    if str(obj.get("user") or "").lower() != addr:
+        return v2np.refuse("TxFlow userFundings for an address that is not the "
+                           "authorized one", "txflow")
+    rest = {k: v for k, v in obj.items() if k != "user"}
+    if v2np.has_account_key(rest):
+        return v2np.refuse("TxFlow userFundings with another account field", "txflow")
+    return v2np.Decision(True, "txflow", flag=ACCOUNT_READ)
 
 
 def check_route(host, method, path):
@@ -197,8 +232,8 @@ VENUE_MATRIX = {
                   funding_history="MARKET_SETTLEMENT_CONFIRMED", trades="ROUTE_ALLOWED",
                   fees="KNOWN", status="ACTIVE (equities: US session)"),
     "txflow": dict(role="PAPER+OBSERVE", metadata="OK", book="OK (+WS, off by default)",
-                   funding_now="OK", funding_history="RATE_PUBLISHED (userFundings: "
-                   "BLOCKED, no authorized read-only address)", trades="ROUTE_ALLOWED",
+                   funding_now="OK", funding_history="RATE_PUBLISHED; no public market "
+                   "history; userFundings only for NB_TXFLOW_FUNDING_ADDRESS (unset)", trades="ROUTE_ALLOWED",
                    fees="KNOWN", status="ACTIVE (funding unproven)"),
     "variational": dict(role="PAPER+OBSERVE", metadata="OK", book="RFQ_INDICATIVE",
                         funding_now="OK", funding_history="RATE_PUBLISHED (observer: "

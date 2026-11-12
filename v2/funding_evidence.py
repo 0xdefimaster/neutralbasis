@@ -179,3 +179,55 @@ def anomalies(current_hourly, history_hourly, cover=None):
         if d1 is not None and d90 is not None and abs(d1) >= 1e-4                 and abs(d1) >= 5 * abs(d90):
             out.append("REGIME_SHIFT")
     return out
+
+
+# Kinds of funding points (collector / adapters) and the status they prove.
+KIND_STATUS = {
+    "settled_public": MARKET_SETTLEMENT,     # venue history of applied per-market rates
+    "account_payment": ACCOUNT_PAYMENT,      # an authorized account's own payment rows
+    "sampled_at_cutoff": RATE_SAMPLED_AT_CUTOFF,
+    "observed_published": RATE_PUBLISHED,
+    "inferred": SETTLEMENT_INFERRED,
+}
+
+
+def kind_status(kind):
+    return KIND_STATUS.get(kind, MISSING)
+
+
+def market_evidence(exchange_id, points, at, interval_s=3600, window_days=7):
+    """Funding evidence for ONE market over ONE window, from the points actually read
+    (not from what the venue could publish). Returns dict(status, basis, window,
+    coverage, sufficient, confidence, revisions).
+
+      points None   nothing read for this market: RATE_PUBLISHED for a rate-only venue,
+                    otherwise MISSING (basis says why)
+      points [..]   status from the points' kinds (the weakest kind present wins; any
+                    revision -> REVISED); sufficient only for a settled status with FULL
+                    coverage of the window
+    confidence: HIGH (settled, FULL), MEDIUM (settled, PARTIAL), LOW (rate only or
+    sampled or inferred), NONE (missing or revised)."""
+    name = "%dd" % window_days
+    venue = venue_status(exchange_id)
+    if points is None:
+        status = RATE_PUBLISHED if venue == RATE_PUBLISHED else MISSING
+        basis = ("VENUE_PUBLISHES_RATE_ONLY" if venue == RATE_PUBLISHED else
+                 "HISTORY_NOT_READ" if is_settled(venue) else "NO_PUBLIC_SOURCE")
+        return dict(status=status, basis=basis, window=name, coverage=None,
+                    sufficient=False, confidence="LOW" if status == RATE_PUBLISHED
+                    else "NONE", revisions=[])
+    if not points:
+        return dict(status=MISSING, basis="EMPTY_HISTORY", window=name, coverage=None,
+                    sufficient=False, confidence="NONE", revisions=[])
+    statuses = [kind_status(p.get("kind")) for p in points]
+    status = min(statuses, key=lambda x: RANK.get(x, 0))
+    rev = revisions(points)
+    if rev:
+        status = REVISED
+    cov = coverage(points, at, interval_s or 3600, windows=((name, window_days),))[name]
+    settled = is_settled(status)
+    sufficient = settled and cov["status"] == "FULL"
+    conf = ("NONE" if status in (REVISED, MISSING) else "HIGH" if sufficient else
+            "MEDIUM" if settled and cov["status"] == "PARTIAL" else "LOW")
+    return dict(status=status, basis="MARKET_POINTS", window=name, coverage=cov,
+                sufficient=sufficient, confidence=conf, revisions=rev)

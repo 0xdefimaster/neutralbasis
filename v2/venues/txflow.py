@@ -101,3 +101,37 @@ def parse_book(raw):
     t = num(d.get("time"))
     return book([(x["px"], x["sz"]) for x in levels[0]], [(x["px"], x["sz"]) for x in levels[1]],
                 ts=t / 1000 if t else None, source=XID)
+
+
+
+# userFundings (docs.txflow.com/api/info/userFundings.md, read 2026-11-12): body
+# {type, user, coin?, startTimeMs?, endTimeMs?, limit<=2000, offset}; answer
+# {data: {data: [FundingRow], hasMore, total?}}, FundingRow = time (ms), coin, usdc,
+# szi, fundingRate, amount (signed). The unit of fundingRate in these rows (percent vs
+# fraction) is not stated on that page -> kept raw; no rate is derived from it until
+# it is checked against activeAssetCtx samples of the same hours.
+USER_FUNDINGS_RATE_UNIT = "UNKNOWN"
+
+
+def user_fundings_request(address, coin, start_ms, end_ms, limit=2000, offset=0):
+    return ("POST", INFO, {"type": "userFundings", "user": str(address), "coin": str(coin),
+                           "startTimeMs": int(start_ms), "endTimeMs": int(end_ms),
+                           "limit": int(limit), "offset": int(offset)})
+
+
+def parse_user_fundings(raw):
+    """Account payment rows (ACCOUNT_PAYMENT evidence) for the authorized address:
+    [dict(ts, coin, amount, szi, usdc, rate_raw, rate=None, kind="account_payment")],
+    oldest first. `rate` stays None while USER_FUNDINGS_RATE_UNIT is UNKNOWN."""
+    d = (raw or {}).get("data", raw) or {}
+    rows = d.get("data") if isinstance(d, dict) else d
+    out = []
+    for x in rows or []:
+        t = num(x.get("time"))
+        if t is None:
+            continue
+        out.append(dict(ts=t / 1000.0, coin=x.get("coin"), amount=num(x.get("amount")),
+                        szi=num(x.get("szi")), usdc=num(x.get("usdc")),
+                        rate_raw=num(x.get("fundingRate")), rate=None,
+                        kind="account_payment"))
+    return sorted(out, key=lambda r: r["ts"])

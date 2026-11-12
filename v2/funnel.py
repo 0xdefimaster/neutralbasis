@@ -141,16 +141,27 @@ def outcome_of(ev):
     return "FAILED"
 
 
-def trace(c, ev, rows, groups=None, snapshot_sha=None, strategy=None):
-    """One immutable funnel record for candidate `c` and its gate evaluation `ev`."""
+def trace(c, ev, rows, groups=None, snapshot_sha=None, strategy=None, evidence=None):
+    """One immutable funnel record for candidate `c` and its gate evaluation `ev`.
+
+    evidence: optional {"long"/"short": funding_evidence.market_evidence(...)} for the
+    exact markets and window. Without it the leg falls back to what the venue can
+    publish (evidence_basis "VENUE_CAPABILITY") and its confidence is capped at LOW."""
     strategy = strategy or c.get("strategy") or ev.get("strategy")
     asset = c["asset"]
     legs = {}
     for side in ("long", "short"):
         r = rows.get((c[side], asset)) or {}
         xid = r.get("exchange_id") or observation_xid(c[side])
+        me = (evidence or {}).get(side)
         legs[side] = dict(venue=c[side], exchange_id=xid,
-                          evidence=fe.venue_status(xid),
+                          evidence=me["status"] if me else fe.venue_status(xid),
+                          evidence_basis=me["basis"] if me else "VENUE_CAPABILITY",
+                          evidence_window=me["window"] if me else None,
+                          evidence_coverage=(me["coverage"] or {}).get("label") if me
+                          else None,
+                          evidence_sufficient=me["sufficient"] if me else False,
+                          evidence_confidence=me["confidence"] if me else "LOW",
                           paper_venue=observation.is_paper_venue(xid),
                           row_sha=sha(r)[:16] if r else None,
                           hourly=r.get("rate"), mark=r.get("mark"))
@@ -214,18 +225,22 @@ def observation_xid(venue):
     return None
 
 
+ORDER = ("NONE", "LOW", "MEDIUM", "HIGH")
+
+
 def confidence(legs, rej):
-    """HIGH: both legs PAPER venues with settled evidence and no execution doubt;
-    MEDIUM: a leg rests on a published rate only; LOW: observation-only venue, RFQ
-    quote or unverified identity/reference."""
+    """The weakest of: each leg's market-level funding evidence confidence (settled +
+    FULL window = HIGH, settled + PARTIAL = MEDIUM, rate only = LOW, missing or
+    revised = NONE; venue capability alone = LOW), and LOW for an observation-only
+    venue, an RFQ quote or an unverified identity/reference."""
     codes = {r["canonical"] for r in rej}
+    level = min((l.get("evidence_confidence", "LOW") for l in legs.values()),
+                key=ORDER.index)
     if (not all(l["paper_venue"] for l in legs.values())
             or codes & {"EXECUTION_MODEL_UNVERIFIED", "IDENTITY_UNVERIFIED",
                         "RWA_REFERENCE_UNVERIFIED", "CONFIG_EXCLUDED", "CONFLICT"}):
-        return "LOW"
-    if not all(fe.is_settled(l["evidence"]) for l in legs.values()):
-        return "MEDIUM"
-    return "HIGH"
+        level = min(level, "LOW", key=ORDER.index)
+    return level
 
 
 def summary(traces):
@@ -291,10 +306,37 @@ def radar(asset, long, short, size_list=SIZES, horizon_h=24.0, max_breakeven_h=2
                           quotes=[lo["quote"], sh["quote"]]))
     ok = [s for s in sizes if s.get("breakeven_h") is not None
           and s["breakeven_h"] <= max_breakeven_h]
+    gap = None
+    try:
+        gap = 1e4 * (economics.mid(short["book"]) / economics.mid(long["book"]) - 1)
+    except Exception:
+        pass
     return dict(asset=asset, long=long["venue"], short=short["venue"],
                 long_xid=long.get("exchange_id"), short_xid=short.get("exchange_id"),
-                carry_hourly=carry, carry_8h=fe.per_8h(carry),
+                carry_hourly=carry, carry_8h=fe.per_8h(carry), gap_bp=gap,
                 label="POTENTIAL" if ok else "RESEARCH_ONLY", note=RADAR_LABEL,
                 eligible=False, sizes=sizes,
                 paper_venues=all(observation.is_paper_venue(x.get("exchange_id"))
                                  for x in (long, short)))
+
+
+
+def radar_index(traces, leg_input, outcomes=("NOT_EVALUATED",)):
+    """The radar for every distinct pair among traces with these outcomes, each entry
+    listing the trace ids it explains, so no blocked candidate is invisible.
+    leg_input(venue, asset) -> dict(venue, exchange_id, hourly, fee, book)."""
+    pairs = {}
+    for t in traces:
+        if t["outcome"] in outcomes:
+            pairs.setdefault((t["asset"], t["long"], t["short"]), []).append(t["trace_id"])
+    out = []
+    for (asset, lv, sv), ids in sorted(pairs.items()):
+        try:
+            r = radar(asset, leg_input(lv, asset), leg_input(sv, asset))
+        except Exception as ex:                       # a leg without data: still listed
+            r = dict(asset=asset, long=lv, short=sv, label="RESEARCH_ONLY", eligible=False,
+                     sizes=[], carry_hourly=None, carry_8h=None, gap_bp=None,
+                     error="%s: %s" % (type(ex).__name__, str(ex)[:120]))
+        r["trace_ids"] = ids
+        out.append(r)
+    return out
