@@ -59,17 +59,27 @@ def main():
     if PORT == network_guard.LIVE_ENGINE_PORT:
         refuse("port %d belongs to the live engine" % PORT)
     (DATA / "logs").mkdir(parents=True, exist_ok=True)
-    guard = network_guard.install(str(DATA / "logs" / "network-guard.jsonl"))
+    from v2 import policy as v2_policy
+
+    # V2 (NB_V2=1): refuse legacy widening switches before anything is imported, then
+    # the guard runs in the eight-venue scope (v2.network_policy).
+    v2_on = v2_policy.v2_enabled()
+    v2_policy.check_environment()
+    guard = network_guard.install(str(DATA / "logs" / "network-guard.jsonl"), v2=v2_on)
 
     import capabilities
     import wide_markets
 
-    keep = set(capabilities.PERP_DEXES)
-    off = []
-    for v, spec in wide_markets.CATALOG.items():
-        if v not in keep and (spec.get("adapter") or spec.get("scan")):
-            spec["adapter"], spec["scan"] = None, False
-            off.append(v)
+    if v2_on:
+        keep = {n for n in v2_policy.LEGACY_NAME.values() if n}
+        off = v2_policy.restrict_catalog(wide_markets.CATALOG)
+    else:
+        keep = set(capabilities.PERP_DEXES)
+        off = []
+        for v, spec in wide_markets.CATALOG.items():
+            if v not in keep and (spec.get("adapter") or spec.get("scan")):
+                spec["adapter"], spec["scan"] = None, False
+                off.append(v)
 
     import bot
     import retention

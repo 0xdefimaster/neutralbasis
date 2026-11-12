@@ -120,13 +120,28 @@ def parse_request_line(data):
     return None
 
 
+def split_request(data):
+    """(method, path, body bytes or None) of a chunk that starts an HTTP request."""
+    req = parse_request_line(data)
+    if req is None:
+        return None
+    raw = bytes(data)
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    return req[0], req[1], (body if sep and body else None)
+
+
 class Guard:
-    def __init__(self, log_path=None, sleep=time.sleep, clock=time.monotonic):
+    def __init__(self, log_path=None, sleep=time.sleep, clock=time.monotonic, v2=False):
         self.log_path = log_path
         self.sleep, self.clock = sleep, clock
         self.lock = threading.Lock()
         self.last = {}
-        self.stats = dict(allowed=0, refused=0)
+        self.stats = dict(allowed=0, refused=0, broad_metadata=0)
+        # V2 (NB_V2=1): eight-venue scope with payload checks (v2.network_policy).
+        self.v2 = v2
+        # POST requests whose body has not been seen yet, per connection object id.
+        self.pending = {}
+        self.by_venue = {}
 
     def refuse(self, kind, why, detail=None):
         with self.lock:
@@ -145,7 +160,72 @@ class Guard:
         if wait > 0:
             self.sleep(wait)
 
+    def v2_send(self, event, conn, data):
+        """V2: every request is matched to one of the eight venues, POST bodies
+        included. A POST whose body arrives in a later chunk is held until it does; a
+        new request on that connection before the body is refused (fail-closed)."""
+        from v2 import network_policy
+
+        host = str(getattr(conn, "host", None) or "").lower()
+        key = id(conn)
+        req = split_request(data)
+        if req is None:
+            pending = self.pending.pop(key, None)
+            if pending is None:
+                return
+            method, path = pending
+            body = data
+        else:
+            if key in self.pending:
+                self.pending.pop(key, None)
+                self.refuse(event, "previous POST body was never checked", dict(host=host))
+            method, path, body = req
+            if host in LOOPBACK:
+                if method.upper() != "GET":
+                    self.refuse(event, "pilot process makes no non-GET loopback calls")
+                return
+            if method.upper() == "POST" and body is None:
+                # Host and path now; the body is checked when it is sent.
+                d = network_policy.check_route(host, method, path)
+                if not d.allowed:
+                    self.refuse(event, d.reason, dict(method=method, host=host))
+                self.pending[key] = (method, path)
+                return
+        d = network_policy.check(host, method, path, body)
+        if not d.allowed:
+            self.refuse(event, d.reason, dict(method=method, host=host, path=path))
+        with self.lock:
+            self.by_venue[d.exchange_id] = self.by_venue.get(d.exchange_id, 0) + 1
+            if d.flag == network_policy.BROAD:
+                self.stats["broad_metadata"] += 1
+                if self.log_path:
+                    with open(self.log_path, "a", encoding="utf8") as f:
+                        f.write(json.dumps(dict(t=time.time(), kind="audit",
+                                                flag=d.flag, venue=d.exchange_id,
+                                                host=host, path=path)) + "\n")
+        self.pace(host)
+        with self.lock:
+            self.stats["allowed"] += 1
+
     def __call__(self, event, args):
+        if self.v2:
+            if event == "socket.getaddrinfo":
+                from v2 import network_policy
+
+                h = args[0] if args else None
+                if h is not None:
+                    h = (h.decode() if isinstance(h, bytes) else str(h)).strip("[]").lower()
+                    if h not in LOOPBACK and h not in network_policy.allowed_hosts():
+                        self.refuse(event, "host not in the V2 eight-venue allowlist: " + h)
+                return
+            if event == "socket.connect":
+                why = check_connect(args[1] if len(args) > 1 else None)
+                if why:
+                    self.refuse(event, why)
+                return
+            if event == "http.client.send":
+                self.v2_send(event, args[0], args[1] if len(args) > 1 else None)
+            return
         if event == "socket.getaddrinfo":
             why = check_host(args[0] if args else None)
             if why:
@@ -172,12 +252,16 @@ class Guard:
 _GUARD = None
 
 
-def install(log_path=None):
-    """Install the guard once for this process; returns it."""
+def install(log_path=None, v2=None):
+    """Install the guard once for this process; returns it. v2=None follows NB_V2."""
     import sys
 
     global _GUARD
     if _GUARD is None:
-        _GUARD = Guard(log_path)
+        if v2 is None:
+            from v2 import policy
+
+            v2 = policy.v2_enabled()
+        _GUARD = Guard(log_path, v2=v2)
         sys.addaudithook(_GUARD)
     return _GUARD

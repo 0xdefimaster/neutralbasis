@@ -42,9 +42,11 @@ Daha çok işlem değil, daha doğru ve kanıtlanabilir işlem değerlendirmesi.
 
 ## Yeni borsa kapısı (V2-2 öncesi, her borsa için)
 
-"Yeni yedi borsa" listesi **UNKNOWN**; sahip teyit etmeli. Kodda 2026-11-11'de altı borsa
-eklendi: Aster, Pacifica, Nado, Hibachi, ApeX ve tradeXYZ. Variational gözlemci
-tarafında. Hangi yedi borsanın kastedildiğini sahip belirtmeli.
+**Güncelleme 2026-11-12 (sahibin V2 master prompt'u):** borsa listesi artık kesin. Toplam 8 hedef borsa:
+
+`lighter_rh`, `risex`, `arcus`, `txflow`, `variational`, `popdex_perps`, `veranta`, `tradexyz`
+
+Aster, Pacifica, Nado, Hibachi, ApeX, Paradex, Extended, LighterCore, Hyperliquid native ve tüm CEX'ler V2 dışında. Ayrıntı için `00_DECISION_RECORD.md` … `17_ACCEPTANCE_REPORT.md` ve `venues/`.
 
 Bir borsa işlem kararlarına ancak şu koşullar sağlandığında girer:
 
