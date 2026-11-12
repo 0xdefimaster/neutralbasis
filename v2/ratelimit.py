@@ -21,7 +21,12 @@ BUDGETS = {
     "arcus": (60, 60.0),          # doc: 1,500 weight / min; listing calls weigh 20
     "txflow": (40, 1.0),          # doc: /info 50 / s
     "tradexyz": (50, 60.0),       # doc: 1,200 weight / min; info calls weigh 2-20
+    # observation_v3 only: Phoenix limit UNKNOWN -> a deliberately small budget.
+    "phoenix_perps": (10, 60.0),
 }
+# Venues that read the same host share one budget (one client as the venue sees it):
+# Hyperliquid native and the HIP-3 dex "io" go through api.hyperliquid.xyz like xyz.
+SHARED = {"hyperliquid_native": "tradexyz", "entropy_io": "tradexyz"}
 
 
 class Budget:
@@ -72,6 +77,7 @@ _LOCK = threading.Lock()
 
 
 def budget(exchange_id):
+    exchange_id = SHARED.get(exchange_id, exchange_id)
     with _LOCK:
         if exchange_id not in _BUDGETS:
             if exchange_id not in BUDGETS:

@@ -131,14 +131,18 @@ def split_request(data):
 
 
 class Guard:
-    def __init__(self, log_path=None, sleep=time.sleep, clock=time.monotonic, v2=False):
+    def __init__(self, log_path=None, sleep=time.sleep, clock=time.monotonic, v2=False,
+                 mode=None):
         self.log_path = log_path
         self.sleep, self.clock = sleep, clock
         self.lock = threading.Lock()
         self.last = {}
         self.stats = dict(allowed=0, refused=0, broad_metadata=0)
         # V2 (NB_V2=1): eight-venue scope with payload checks (v2.network_policy).
-        self.v2 = v2
+        self.v2 = v2 or mode == "observation_v3"
+        # observation_v3: the eleven-venue READ-ONLY policy (v2.observation); NB_V2 keeps
+        # v2.network_policy unchanged.
+        self.mode = mode or ("v2" if v2 else None)
         # POST requests whose body has not been seen yet, per connection object id.
         self.pending = {}
         self.by_venue = {}
@@ -160,11 +164,20 @@ class Guard:
         if wait > 0:
             self.sleep(wait)
 
+    def policy(self):
+        if self.mode == "observation_v3":
+            from v2 import observation
+
+            return observation
+        from v2 import network_policy
+
+        return network_policy
+
     def v2_send(self, event, conn, data):
         """V2: every request is matched to one of the eight venues, POST bodies
         included. A POST whose body arrives in a later chunk is held until it does; a
         new request on that connection before the body is refused (fail-closed)."""
-        from v2 import network_policy
+        network_policy = self.policy()
 
         host = str(getattr(conn, "host", None) or "").lower()
         key = id(conn)
@@ -210,13 +223,13 @@ class Guard:
     def __call__(self, event, args):
         if self.v2:
             if event == "socket.getaddrinfo":
-                from v2 import network_policy
-
+                network_policy = self.policy()
                 h = args[0] if args else None
                 if h is not None:
                     h = (h.decode() if isinstance(h, bytes) else str(h)).strip("[]").lower()
                     if h not in LOOPBACK and h not in network_policy.allowed_hosts():
-                        self.refuse(event, "host not in the V2 eight-venue allowlist: " + h)
+                        self.refuse(event, "host not in the %s allowlist: %s"
+                                    % (self.mode, h))
                 return
             if event == "socket.connect":
                 why = check_connect(args[1] if len(args) > 1 else None)
@@ -252,8 +265,10 @@ class Guard:
 _GUARD = None
 
 
-def install(log_path=None, v2=None):
-    """Install the guard once for this process; returns it. v2=None follows NB_V2."""
+def install(log_path=None, v2=None, mode=None):
+    """Install the guard once for this process; returns it. v2=None follows NB_V2.
+    mode="observation_v3": the eleven-venue read-only policy (v2.observation); it is
+    refused together with NB_V2=1 (a PAPER process never widens its egress)."""
     import sys
 
     global _GUARD
@@ -262,6 +277,8 @@ def install(log_path=None, v2=None):
             from v2 import policy
 
             v2 = policy.v2_enabled()
-        _GUARD = Guard(log_path, v2=v2)
+        if mode == "observation_v3" and v2:
+            raise RuntimeError("observation_v3 is not allowed in an NB_V2 PAPER process")
+        _GUARD = Guard(log_path, v2=v2, mode=mode)
         sys.addaudithook(_GUARD)
     return _GUARD

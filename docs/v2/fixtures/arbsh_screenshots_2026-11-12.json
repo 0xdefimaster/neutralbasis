@@ -1,0 +1,18 @@
+{
+ "label": "SCREENSHOT_UNVERIFIED: values typed from the owner's arb.sh screenshots (2026-11-12, TR time). Not venue data; used only to test sign conventions and to compare with OBSERVED reads.",
+ "NATGAS": {
+  "source": "arb.sh txflow-vs-trade_xyz",
+  "time_tr": "2026-11-12 06:28",
+  "long": {"venue": "TxFlow", "market": "NATGAS-USDC", "price": 3.6340, "funding_8h_pct": -0.0121},
+  "short": {"venue": "tradeXYZ", "market": "xyz:NATGAS", "price": 3.6484, "funding_8h_pct": 0.3332},
+  "net_8h_pct": 0.3453
+ },
+ "INIT": {
+  "source": "arb.sh variational-vs-hyperliquid",
+  "time_tr": "2026-11-12 06:34-06:37",
+  "long": {"venue": "Variational", "funding_8h_pct": -1.6975, "long_receives_1h_pct": 0.2122},
+  "short": {"venue": "Hyperliquid (native)", "funding_8h_pct": -1.2644, "short_pays_1h_pct": 0.1581},
+  "net_8h_pct": 0.4331,
+  "notes": ["90d tab shows 55 days of data", "thin at this size", "round trip $188-190"]
+ }
+}

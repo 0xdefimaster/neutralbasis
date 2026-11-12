@@ -87,3 +87,15 @@ def quote_book(record, bucket="size_1k"):
     mid = (bid + ask) / 2
     q = size / mid if size else None
     return book([(bid, q)] if q else [], [(ask, q)] if q else [], source=XID + ":rfq:" + bucket)
+
+
+BUCKETS = (("size_1k", 1000.0), ("size_100k", 100000.0), ("size_1m", 1e6))
+
+
+def quote_book_for(record, size_usd):
+    """The indicative quote of the smallest published bucket that covers `size_usd`
+    (5k and 10k use the 100k bucket: wider, conservative). Still RFQ, not a fill."""
+    for name, cap in BUCKETS:
+        if size_usd <= cap and (record.get("quotes") or {}).get(name):
+            return quote_book(record, name)
+    return book([], [], source=XID + ":rfq")

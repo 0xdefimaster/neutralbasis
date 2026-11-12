@@ -18,7 +18,7 @@ Order (first failure wins, all are reported):
   7. the strategy itself (v2.strategies), on the real books at the position size:
      liquidity, fees, spread, funding, basis, reserve, break-even, net.
 """
-from v2 import marketdata
+from v2 import marketdata, observation
 from v2.strategies import COST, DATA, EXECUTION, convergence, funding, hybrid, reason
 from v2.strategies.common import Leg
 
@@ -45,6 +45,15 @@ class Gate:
             if (v, c["asset"]) not in rows:
                 out.append(reason(DATA, "NOT_A_V2_ROW", "%s %s is not a verified V2 row"
                                   % (side, v)))
+        if out:
+            return out
+        for side, v in legs:
+            # Defence in depth: an observation-only row (v2.observation) mixed into the
+            # PAPER rows can never become a leg.
+            xid = rows[(v, c["asset"])].get("exchange_id")
+            if xid is not None and not observation.is_paper_venue(xid):
+                out.append(reason(DATA, "CONFIG_EXCLUDED", "%s %s (%s) is observation "
+                                  "only, not a PAPER venue" % (side, v, xid)))
         if out:
             return out
         for side, v in legs:

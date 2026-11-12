@@ -11,7 +11,7 @@ from unittest import mock
 
 import bot
 import wide_paper
-from v2 import economics, gates, network_policy as npol, normalize, source
+from v2 import economics, gates, network_policy as npol, normalize, policy, source
 from v2.collector import Collector, window
 from v2.identity import Instrument
 from v2.strategies import convergence, funding, hybrid
@@ -29,7 +29,8 @@ def bk(mid, depth=100.0, half=0.01, model="orderbook"):
 def row(venue, asset="BTC", rate=0.0, fee=0.0004, mark=100.0, **kw):
     r = dict(venue=venue, asset=asset, kind="perp", mark=mark, rate=rate, raw_rate=rate,
              interval=3600, next=None, received=0.0, fee=fee, leverage=None,
-             price_type="mark", fine_class="crypto", exchange_id=venue.lower())
+             price_type="mark", fine_class="crypto",
+             exchange_id=policy.FROM_LEGACY.get(venue, venue.lower()))
     r.update(kw)
     return r
 

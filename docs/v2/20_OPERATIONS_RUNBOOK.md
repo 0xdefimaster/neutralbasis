@@ -94,3 +94,34 @@ Doğrulama (kodda):
    - `sha256_manifest`: boş olmayan bir yedek manifesti.
 
    Bu dosya, `14_OPERATION_BACKUP_RUNBOOK.md`'deki yedek alınıp doğrulandıktan sonra elle yazılır.
+
+## 8. Gözlem modu (`observation_v3`) ve adli inceleme aracı
+
+Gözlem modu **salt okunur bir araştırma aracıdır; motor değildir**. PAPER pozisyon açmaz, motoru ve kaydediciyi başlatmaz. `run_pilot.py`, `NB_OBSERVATION_V3=1` görürse çalışmayı reddeder. NB_V2 ağ politikası bu moddan etkilenmez.
+
+1. **Çevrimdışı çalıştırma** (ağ yok): 05:12 kaydı yeniden oynatılır; huni, NATGAS/INIT izleri, radar ve panel üretilir.
+
+   ```
+   python -m tools.v2_forensics --phase4 C:\Users\W10\nb-benchmark\v2-phase4-2026-11-12 --out <C:\...\klasör>
+   ```
+
+2. **Gözlem okuması** (açık onay, yaklaşık 20 kamuya açık istek): Hyperliquid native ve EntropyIO metadata, INIT ve xyz:NATGAS 90 günlük funding geçmişi ile defteri, TxFlow, Variational ve Phoenix snapshot okunur.
+
+   ```
+   python -m tools.v2_forensics --out <klasör> --observe
+   ```
+
+   Ardından 1. adımı aynı klasörle yeniden çalıştırın; `forensics_observed.json` üretilir.
+
+3. **Kontroller:**
+   - `observation_manifest.json` içinde `guard.refused` 0 olmalı;
+   - `by_venue` alanında CEX olmamalı;
+   - `guard-observation.jsonl` boş ya da yalnız denetim kayıtları içermeli.
+
+4. **Çıktılar:** `funnel.json` (tüm izler), `forensics.json`, `forensics_observed.json`, `dashboard_research.html`.
+
+5. **Yasaklar:**
+   - D:/E: yolu: araç reddeder;
+   - `qfex login` ve `qfex agents init`;
+   - TxFlow `userFundings` için yetkisiz adres;
+   - Phoenix'te belgelenmemiş yollar (ağ politikası reddeder).

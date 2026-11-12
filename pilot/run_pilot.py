@@ -64,6 +64,12 @@ def main():
     # V2 (NB_V2=1): refuse legacy widening switches before anything is imported, then
     # the guard runs in the eight-venue scope (v2.network_policy).
     v2_on = v2_policy.v2_enabled()
+    from v2 import observation
+
+    # observation_v3 is a read-only research mode; it never runs inside the PAPER engine.
+    if observation.enabled():
+        refuse("%s=1 is read-only observation; the PAPER pilot does not run in it"
+               % observation.ENV)
     v2_policy.check_environment()
     if v2_on:
         # Phase 7: no live V2 PAPER pilot without a healthy disk, room for 24/7 data
