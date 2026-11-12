@@ -30,7 +30,9 @@ from v2 import funding_evidence as fe  # noqa: E402
 from v2.venues import hyperliquid_obs as hlo  # noqa: E402
 from v2.venues import tradexyz, txflow, variational  # noqa: E402
 
-PILOT_DB = r"C:\Users\W10\nb-pilot-loose\data\paper.sqlite3"
+from v2 import paths as _paths  # noqa: E402
+
+PILOT_DB = str(_paths.pilot_db())
 SIZES = (1000.0, 5000.0, 10000.0)
 
 
@@ -197,8 +199,7 @@ class BurstProvider:
 def closes_db():
     from tools.v2_phase4_eval import pilot_closes
 
-    closes, _ = pilot_closes(PILOT_DB)
-    return closes
+    return _paths.load_closes()
 
 
 PAIRS = (("NATGAS", "TxFlow", "tradeXYZ"), ("NATGAS", "Variational", "tradeXYZ"),
@@ -333,7 +334,7 @@ def lifecycle(bursts):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--phase4", default=r"C:\Users\W10\nb-benchmark\v2-phase4-2026-11-12")
+    ap.add_argument("--phase4", default=str(_paths.bench("v2-phase4-2026-11-12")))
     ap.add_argument("--bursts", nargs="*", default=[])
     a = ap.parse_args()
     out = Path(a.out).resolve()

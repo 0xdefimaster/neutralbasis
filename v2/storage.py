@@ -26,7 +26,7 @@ import os
 from pathlib import Path
 
 ENV = "NB_V2_PAPER_DATA_DIR"
-DEFAULT_ROOT = r"C:\Users\W10\nb-benchmark\v2-paper-data"
+DEFAULT_ROOT = str(__import__("v2.paths").paths.bench("v2-paper-data"))
 E_ROOT = r"E:\nb-v2-phase8"
 E_ACK = "NB_V2_E_WRITE_ACK"
 FORBIDDEN = (r"e:\neutralbasis",)          # unbacked engine data: never written

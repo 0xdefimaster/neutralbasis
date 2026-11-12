@@ -34,7 +34,9 @@ from v2 import gates  # noqa: E402
 from v2.collector import Collector  # noqa: E402
 from v2.venues import base  # noqa: E402
 
-PILOT_DB = r"C:\Users\W10\nb-pilot-loose\data\paper.sqlite3"
+from v2 import paths as _paths  # noqa: E402
+
+PILOT_DB = str(_paths.pilot_db())
 
 
 def key(xid, method, url, body):

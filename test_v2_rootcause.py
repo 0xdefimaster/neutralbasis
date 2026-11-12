@@ -10,12 +10,14 @@ import os
 import unittest
 from pathlib import Path
 
+from v2 import paths
+
 from v2 import funnel, gates, observation, references
 from v2 import funding_evidence as fe
 from v2.venues import txflow, variational
 
-PHASE4 = Path(r"C:\Users\W10\nb-benchmark\v2-phase4-2026-11-12")
-PILOT_DB = Path(r"C:\Users\W10\nb-pilot-loose\data\paper.sqlite3")
+PHASE4 = paths.bench("v2-phase4-2026-11-12")
+PILOT_DB = paths.pilot_db()
 ADDR = "0x" + "ab" * 20
 TX = "rpc.txflow.com"
 

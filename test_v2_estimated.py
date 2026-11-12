@@ -7,6 +7,8 @@ snapshot (skipped when absent).
 import os
 import unittest
 from pathlib import Path
+
+from v2 import paths
 from unittest import mock
 
 from v2 import economics, estimated, gates, opportunity_log, references, rfq_paper
@@ -17,8 +19,8 @@ from v2.venues import txflow
 
 AT = 1_794_458_185.0
 ISO = "2026-11-12T04:36:20.000Z"          # 5.13 s before AT
-PHASE4 = Path(r"C:\Users\W10\nb-benchmark\v2-phase4-2026-11-12")
-PILOT_DB = Path(r"C:\Users\W10\nb-pilot-loose\data\paper.sqlite3")
+PHASE4 = paths.bench("v2-phase4-2026-11-12")
+PILOT_DB = paths.pilot_db()
 
 
 def record(updated=ISO, **quotes):

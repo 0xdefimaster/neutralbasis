@@ -32,7 +32,7 @@ import wide_paper  # noqa: E402
 from v2 import paper_engine, paper_obs, storage  # noqa: E402
 from v2 import paper_ledger as L  # noqa: E402
 
-PILOT_DB = r"C:\Users\W10\nb-pilot-loose\data\paper.sqlite3"
+PILOT_DB = None  # resolved by v2.paths (NB_V2_PILOT_DB / NB_V2_CLOSES_FILE)
 NATGAS_PAIRS = (("NATGAS", "TxFlow", "tradeXYZ"), ("NATGAS", "tradeXYZ", "TxFlow"),
                 ("NATGAS", "Variational", "tradeXYZ"), ("NATGAS", "tradeXYZ", "Variational"),
                 ("NATGAS", "TxFlow", "Variational"), ("NATGAS", "Variational", "TxFlow"))
@@ -42,8 +42,9 @@ INIT_PAIRS = (("INIT", "Variational", "Hyperliquid"), ("INIT", "Hyperliquid", "V
 def closes_db():
     from tools.v2_phase4_eval import pilot_closes
 
-    closes, _ = pilot_closes(PILOT_DB)
-    return closes
+    from v2 import paths
+
+    return paths.load_closes()
 
 
 def load(aligned, streams, closes):

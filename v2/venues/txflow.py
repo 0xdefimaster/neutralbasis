@@ -133,7 +133,8 @@ def parse_user_fundings(raw):
         out.append(dict(ts=t / 1000.0, coin=x.get("coin"), amount=num(x.get("amount")),
                         szi=num(x.get("szi")), usdc=num(x.get("usdc")),
                         rate_raw=num(x.get("fundingRate")), rate=None,
-                        kind="account_payment"))
+                        kind="account_payment", scope="ACCOUNT",
+                        status="ACCOUNT_PAYMENT_UNVERIFIED"))
     return sorted(out, key=lambda r: r["ts"])
 
 
@@ -173,3 +174,72 @@ def apply_rate_unit(rows, unit):
     k = {"FRACTION": 1.0, "PERCENT": 0.01}.get(unit)
     return [dict(r, rate=None if k is None or r.get("rate_raw") is None
                  else r["rate_raw"] * k, rate_unit=unit) for r in rows]
+
+
+# ----------------------------------------------------------------- Phase 10: userFundings
+# Contract (docs.txflow.com/api/info/userFundings + /api/websocket/userFundings, read
+# 2026-11-13): POST /info {"type": "userFundings", "user": ADDRESS, ...}; "No auth - the
+# body user is the subject" (no signature, no key); newest-first pages (limit <= 2000,
+# offset, hasMore); "Served from an index - can briefly lag the latest block"; perp
+# markets only. Row fields: time (ms), coin, usdc, szi, fundingRate, amount.
+#   fundingRate  WS page: "percentage form (e.g. "0.01" means 0.01%)"; REST: NOT STATED
+#   szi          WS page: "Signed position size at settlement time"
+#   usdc         WS page: "Negative = paid, positive = received"
+#   amount       REST page: collected > 0, paid < 0 (equality with usdc NOT STATED)
+#   coin         request: a name ("BTC", "BTC-USDC") or the perpMeta numeric id; the
+#                response form is NOT STATED (example "BTC" on REST, "4" on WS)
+# Mainnet host for this type: NOT STATED on the page (its example is testnet); the same
+# /info endpoint as every other info type is used, and the unit is verified from DATA:
+# until payments agree with size x price x rate the status stays
+# ACCOUNT_PAYMENT_UNVERIFIED and no market yield is derived.
+DOCUMENTED_RATE_FORM = "PERCENT (WS docs); REST page NOT STATED"
+UNVERIFIED, VERIFIED = "ACCOUNT_PAYMENT_UNVERIFIED", "ACCOUNT_PAYMENT_CONFIRMED"
+
+
+def coin_map(meta):
+    """{key: dict(index, name, base, market_id, exchange_id)} where key is the numeric
+    index, the perpMeta name and "BASE-QUOTE"; used to map a userFundings `coin`
+    (name or id) onto the V2 market_id (= the index as a string)."""
+    out = {}
+    for u in ((meta or {}).get("data") or meta or {}).get("universe", []):
+        rec = dict(index=str(u["index"]), name=u.get("name"), base=u.get("baseCurrency"),
+                   market_id=str(u["index"]), exchange_id=XID)
+        keys = {str(u["index"]), str(u.get("name") or ""), str(u.get("baseCurrency") or "")}
+        if u.get("baseCurrency") and u.get("quoteCurrency"):
+            keys.add("%s-%s" % (u["baseCurrency"], u["quoteCurrency"]))
+        for k in keys - {""}:
+            if k in out and out[k]["index"] != rec["index"]:
+                out[k] = dict(index=None, ambiguous=True)      # never guess
+            else:
+                out[k] = rec
+    return out
+
+
+def resolve_coin(cmap, coin):
+    r = cmap.get(str(coin))
+    return None if r is None or r.get("ambiguous") else r
+
+
+def verify_payments(rows, mark_at, min_rows=3, tolerance=0.05):
+    """Payment evidence status for parsed userFundings rows of ONE account:
+    VERIFIED (the unit is proven by the payments themselves: usdc/amount agree, and
+    -usdc / (szi x mark at that time) matches fundingRate in ONE unit for >= min_rows
+    rows) or UNVERIFIED with the reason. `mark_at(ts)` must return venue data or None."""
+    mismatched = [r for r in rows if r.get("usdc") is not None and r.get("amount") is not None
+                  and abs(r["usdc"] - r["amount"]) > 1e-9 * max(1.0, abs(r["usdc"]))]
+    unit, det = infer_rate_unit([dict(r, amount=r["usdc"] if r.get("usdc") is not None
+                                      else r.get("amount")) for r in rows], mark_at,
+                                min_rows, tolerance)
+    status = VERIFIED if unit in ("FRACTION", "PERCENT") and not mismatched else UNVERIFIED
+    return dict(status=status, unit=unit, documented=DOCUMENTED_RATE_FORM,
+                usdc_amount_mismatch=len(mismatched), rows=len(rows),
+                reason=None if status == VERIFIED else
+                "usdc != amount on %d rows" % len(mismatched) if mismatched else
+                "unit not proven by payments (%s)" % det["votes"], details=det)
+
+
+def market_history_from_account(rows):
+    """Refused: one account's payments are not the market's funding history (only the
+    hours that account held a position, at its own size)."""
+    raise ValueError("ACCOUNT_SCOPE_ONLY: userFundings rows describe one account, never "
+                     "the market's complete funding history")

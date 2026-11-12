@@ -14,7 +14,7 @@ from pathlib import Path
 import wide_paper
 from v2 import economics, estimated, funding_scenarios, gates, paper_engine, paper_exec, paper_obs
 from v2 import paper_ledger as L
-from v2 import rfq_paper, storage
+from v2 import paths, rfq_paper, storage
 
 AT = 1_794_456_000.0          # an exact hour (MOCK clock)
 H = 3600.0
@@ -104,6 +104,7 @@ class Tmp(unittest.TestCase):
 
 # ============================================================== storage
 class StorageTests(Tmp):
+    @unittest.skipUnless(os.name == "nt", "D:/E: drive letters exist only on Windows")
     def test_paths(self):
         with self.assertRaises(storage.StorageError):
             storage.check_dir(r"D:\x")
@@ -628,8 +629,8 @@ if __name__ == "__main__":
     unittest.main()
 
 
-RESCUE = Path(r"C:\Users\W10\nb-benchmark\v2-phase8-rescue-2026-11-12")
-BENCH = Path(r"C:\Users\W10\nb-benchmark")
+BENCH = paths.bench()
+RESCUE = BENCH / "v2-phase8-rescue-2026-11-12"
 
 
 @unittest.skipUnless((RESCUE / "stream-2026-11-12-1440" / "stream.jsonl").exists() and

@@ -333,7 +333,7 @@ def research_snapshot(r, summ, stories, obs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--phase4", default=r"C:\Users\W10\nb-benchmark\v2-phase4-2026-11-12")
+    ap.add_argument("--phase4", default=str(__import__("v2.paths").paths.bench("v2-phase4-2026-11-12")))
     ap.add_argument("--out", required=True)
     ap.add_argument("--observe", action="store_true")
     a = ap.parse_args()
