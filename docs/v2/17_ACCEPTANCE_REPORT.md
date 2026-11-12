@@ -73,3 +73,16 @@
 | Dashboard | ✅ `/v2`, `/api/v2/state` |
 | Variational RFQ yürütmesi | ❌ Hâlâ yok; engelli |
 | Canlı V2 pilotu | ⏳ Onay bekliyor |
+
+## Phase 7 güncellemesi (2026-11-12)
+
+- **Testler:** tam paket 908 OK, 2 atlanan, 0 başarısız.
+- **Ayrıntılar:** `22_PHASE7_RELIABILITY_REPORT.md`.
+
+| Kriter | Yeni durum |
+|---|---|
+| Hibrit açık bacak riski | ✅ Açık miktar kaldıkça CLOSED / LEG_RECOVERY yok; `risk()` raporluyor |
+| Funding muhasebesi | ✅ Gerçekleşmiş (borsanın uzlaşma fiyatı) ve tahmin ayrı. RISEx uzlaşma fiyatı canlı veride doğrulandı |
+| Kayıt ve tekrar oynatma bütünlüğü | ✅ Ham yanıtlar, API hataları, kaynak bilgisi; `replay.verify` bozuk ya da eksik segmenti reddediyor |
+| Public trades | ❌ Kaydedilmiyor |
+| Başlatma ön kontrolü | ✅ Kodda zorunlu. Bugün başarısız: alan 12 GB, yedek kanıtı yok |

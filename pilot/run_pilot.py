@@ -65,6 +65,14 @@ def main():
     # the guard runs in the eight-venue scope (v2.network_policy).
     v2_on = v2_policy.v2_enabled()
     v2_policy.check_environment()
+    if v2_on:
+        # Phase 7: no live V2 PAPER pilot without a healthy disk, room for 24/7 data
+        # and evidence of a checked backup (v2.ops.launch_check).
+        from v2 import ops as v2_ops
+
+        ok, findings = v2_ops.launch_check(DATA)
+        if not ok:
+            refuse("V2 launch check failed: " + "; ".join(findings))
     guard = network_guard.install(str(DATA / "logs" / "network-guard.jsonl"), v2=v2_on)
 
     import capabilities

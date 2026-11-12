@@ -81,3 +81,16 @@ Doğrulama (kodda):
 2. `NB_V2_TXFLOW_WS=1` (TxFlow WebSocket'in canlı denenmesi).
 3. `wide_hybrid_enabled=True` (hibrit paper pozisyonları açılması).
 4. Risk ayarlarında değişiklik (24 saat / 1,0).
+
+## 7. Phase 7 eki: başlatma ön kontrolü (kodda zorunlu)
+
+`NB_V2=1` iken `pilot/run_pilot.py`, başka hiçbir şey yapmadan önce `v2.ops.launch_check(<VERİ>)` çalıştırır. Bulgulardan biri bile varsa başlatmayı reddeder.
+
+1. **Disk:** veri klasörü D: veya E: üzerinde olamaz. İkisi de bozuk bloklu aynı TOSHIBA disk.
+2. **Boş alan:** en az **50 GB**. C:'deki ~12 GB yetmez.
+3. **Yedek kanıtı:** `<VERİ>\BACKUP_EVIDENCE.json` dosyası olmalı ve şu alanları içermeli:
+   - `created`: epoch saniye, en çok 7 gün önce;
+   - `destination`: veri diskinden farklı, sağlıklı bir sürücüdeki yol;
+   - `sha256_manifest`: boş olmayan bir yedek manifesti.
+
+   Bu dosya, `14_OPERATION_BACKUP_RUNBOOK.md`'deki yedek alınıp doğrulandıktan sonra elle yazılır.

@@ -39,6 +39,9 @@ class Runtime:
         self.errors = collections.deque(maxlen=50)
         self.rounds = 0
         self.backoff = marketdata.Backoff(5.0, 300.0)
+        if recorder is not None:
+            # Every raw answer and API error of the eight venues, with provenance.
+            collector.sink = recorder.sink
 
     # -- one round ------------------------------------------------------------------------
     def candidates(self, rows, at):
@@ -95,7 +98,10 @@ class Runtime:
                     break
         if self.recorder is not None:
             for r in rows:
-                self.recorder.record("row", r["venue"], r["asset"], r)
+                self.recorder.record("row", r["venue"], r["asset"], r,
+                                     exchange_id=r.get("exchange_id"),
+                                     market_id=r.get("market_id"),
+                                     underlying_id=r.get("underlying_id"))
         snap = dict(at=at, rows=len(rows), safe=safe, safety_findings=findings,
                     strategies={s: summarize(v) for s, v in results.items()},
                     top={s: top(v) for s, v in results.items()},
@@ -139,7 +145,9 @@ class Runtime:
                               if r.get("exchange_id") == "txflow")
                 if want != coins:
                     coins = want
-                    stream = marketdata.TxFlowDepthStream(coins, connect) if coins else None
+                    stream = (marketdata.TxFlowDepthStream(
+                        coins, connect, sink=self.recorder.sink if self.recorder else None)
+                        if coins else None)
                     self.collector.streams.pop("txflow", None)
                     if stream:
                         self.collector.streams["txflow"] = stream

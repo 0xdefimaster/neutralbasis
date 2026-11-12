@@ -77,7 +77,9 @@ class Recorder:
         except Exception:
             pass  # a torn tail from a crash: kept as is, flagged recovered
         final = part.with_name(part.name.replace(".part.jsonl.gz", ".jsonl.gz"))
-        os.replace(part, final)
+        from v2 import ops
+
+        ops.replace_retry(part, final)
         with open(self.root / "manifest.jsonl", "a", encoding="utf-8") as m:
             m.write(json.dumps(dict(file=str(final.relative_to(self.root)),
                                     sha256=hashlib.sha256(data).hexdigest(),
@@ -110,11 +112,30 @@ class Recorder:
         self.stats["gaps"] += 1
 
     # -- write ----------------------------------------------------------------------------
-    def record(self, kind, venue, asset, payload, source_ts=None):
-        """True when written; False when refused (unwanted market or disk guard)."""
+    def record(self, kind, venue, asset, payload, source_ts=None, **ids):
+        """True when written; False when refused (unwanted market or disk guard).
+        `ids`: exchange_id, market_id, underlying_id, seq, source... kept as given."""
         if (venue, asset) not in self.wanted():
             self.stats["refused_unwanted"] += 1
             return False
+        return self._write(dict(schema=SCHEMA, kind=kind, venue=venue, asset=asset,
+                                received=self.clock(), source_ts=source_ts,
+                                payload=payload, **ids))
+
+    def sink(self, kind, exchange_id, payload, source=None, received=None, latency_s=None,
+             **extra):
+        """Venue-level record (raw answers, API errors, stream events) for one of the
+        eight V2 venues only; never for a CEX or out-of-scope host."""
+        from v2 import policy
+
+        if exchange_id not in policy.EXCHANGE_IDS:
+            self.stats["refused_unwanted"] += 1
+            return False
+        return self._write(dict(schema=SCHEMA, kind=kind, exchange_id=exchange_id,
+                                source=source, received=received or self.clock(),
+                                latency_s=latency_s, payload=payload, **extra))
+
+    def _write(self, rec):
         ok, free = self.disk_ok()
         if not ok:
             if not self.stopped_for_disk:
@@ -127,8 +148,6 @@ class Recorder:
         if self.stopped_for_disk:
             self.stopped_for_disk = False
             self.gap(None, None, None, self.clock(), "disk guard released")
-        rec = dict(schema=SCHEMA, kind=kind, venue=venue, asset=asset,
-                   received=self.clock(), source_ts=source_ts, payload=payload)
         line = json.dumps(rec, separators=(",", ":"), default=str) + "\n"
         with self.lock:
             if self.fh is None:

@@ -55,6 +55,7 @@ def evaluate(long, short, size, cfg, at):
                              c["spread"], reserve, cfg["wide_funding_realization"])
     out.update(costs=c, economics=econ, hourly_carry=hourly,
                **economics.net(c, funding=econ["expected_funding"], reserve=reserve))
+    cm.add_stress(out, c, funding=econ["expected_funding"], reserve=reserve)
     why = breakeven_refusal(econ, cfg)
     if why:
         out["reasons"].append(reason(COST, "BREAKEVEN", why))

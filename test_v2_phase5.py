@@ -263,7 +263,8 @@ class HybridDeskTests(unittest.TestCase):
         self.t[0] += 7300
         d.settle(p)
         d.settle(p)
-        self.assertEqual(sum(1 for e in p["ledger"] if e["kind"] == "funding"), 2)
+        # Valued at the entry price: estimates (phase 7), booked once each.
+        self.assertEqual(sum(1 for e in p["ledger"] if e["kind"] == "funding_estimated"), 2)
         # Gap back to baseline AND funding reversed in the same cycle: one close.
         self.pv.books[("Lighter", "BTC")] = Provider.bk(100.0)
         self.pv.rows[("Lighter", "BTC")]["rate"] = -0.001

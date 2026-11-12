@@ -20,6 +20,8 @@ FEE_UNKNOWN = "FEE_UNKNOWN"
 LIQUIDITY = "INSUFFICIENT_LIQUIDITY"
 BOOK_MISSING = "BOOK_MISSING"
 BOOK_BAD = "BOOK_CROSSED_OR_EMPTY"
+RFQ = "EXECUTION_MODEL_UNVERIFIED"
+EXIT_BASIS = "current book (not guaranteed at exit)"
 
 
 def mid(book):
@@ -46,6 +48,9 @@ def leg(book, buy, size_usd, fee, tolerance=FILL_TOLERANCE):
     qty, entry/exit price, fees, spread cost (entry and exit vs mid) or a reason."""
     if not book:
         return dict(reason=BOOK_MISSING)
+    if book.get("model") == "rfq_indicative":
+        # An indicative RFQ quote (Variational) is not an order that can be filled.
+        return dict(reason=RFQ)
     if book.get("empty") or book.get("crossed") or not book.get("bids") or not book.get("asks"):
         return dict(reason=BOOK_BAD)
     if fee is None:
@@ -59,6 +64,8 @@ def leg(book, buy, size_usd, fee, tolerance=FILL_TOLERANCE):
     if entry is None or exit_ is None:
         return dict(reason=LIQUIDITY, qty=qty, mid=m)
     return dict(qty=qty, mid=m, entry=entry, exit=exit_,
+                entry_spread=qty * abs(entry - m), exit_spread=qty * abs(m - exit_),
+                entry_fee=qty * entry * fee, exit_fee=qty * exit_ * fee,
                 spread=qty * (abs(entry - m) + abs(m - exit_)),
                 fees=qty * (entry + exit_) * fee, reason=None)
 
@@ -71,8 +78,11 @@ def round_trip(long_book, short_book, size_usd, fee_long, fee_short):
     for x in (lo, sh):
         if x.get("reason"):
             return None, x["reason"]
+    entry = lo["entry_fee"] + sh["entry_fee"] + lo["entry_spread"] + sh["entry_spread"]
+    exit_ = lo["exit_fee"] + sh["exit_fee"] + lo["exit_spread"] + sh["exit_spread"]
     return dict(long=lo, short=sh, fees=lo["fees"] + sh["fees"],
-                spread=lo["spread"] + sh["spread"],
+                spread=lo["spread"] + sh["spread"], entry_cost=entry, exit_cost=exit_,
+                exit_basis=EXIT_BASIS, notional=size_usd,
                 total=lo["fees"] + sh["fees"] + lo["spread"] + sh["spread"]), None
 
 
@@ -81,3 +91,37 @@ def net(costs, funding=0.0, basis=0.0, reserve=0.0):
     return dict(funding=funding, basis=basis, fees=costs["fees"], spread=costs["spread"],
                 reserve=reserve,
                 net=funding + basis - costs["fees"] - costs["spread"] - reserve)
+
+
+def stress(costs, funding=0.0, basis=0.0, reserve=0.0):
+    """Net under adverse but plausible conditions. The exit priced on today's book is
+    not guaranteed, so its spread is widened; slippage, funding and a half-filled second
+    leg are stressed too. Every scenario is at most the base net.
+      exit_spread_x3          exit spread three times today's
+      slippage_+5bp           5 bp of notional more on each of the four fills
+      funding_-50%            income halved (a cost made 50 % larger)
+      second_leg_half_filled  half the position unwound at once: half the income lost
+                              and a second round trip on that half
+      combined_moderate       exit spread x2, +2 bp per fill, funding -25 % (the gate's
+                              stress check)"""
+    n = costs.get("notional") or 0.0
+    xs = costs["long"]["exit_spread"] + costs["short"]["exit_spread"]
+    base = net(costs, funding, basis, reserve)["net"]
+
+    def f(scale):
+        return funding * scale if funding > 0 else funding * (2 - scale)
+
+    half_rt = 0.5 * (costs["long"]["fees"] + costs["long"]["spread"])
+    out = [
+        dict(name="base", net=base),
+        dict(name="exit_spread_x3", net=base - 2 * xs),
+        dict(name="slippage_+5bp", net=base - 4 * 0.0005 * n),
+        dict(name="funding_-50%", net=base - funding + f(0.5)),
+        dict(name="second_leg_half_filled",
+             net=base - 0.5 * max(funding, 0) - 0.5 * max(basis, 0) - half_rt),
+        dict(name="combined_moderate",
+             net=base - xs - 4 * 0.0002 * n - funding + f(0.75)),
+    ]
+    for x in out:
+        x["net"] = min(x["net"], base)
+    return out

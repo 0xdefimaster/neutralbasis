@@ -124,7 +124,9 @@ class TxFlowDepthStream:
     """One connection, several coins. `connect(url)` returns an object with
     send(opcode, bytes), recv() -> str and close() (extended_rfq.WebSocket in use)."""
 
-    def __init__(self, coins, connect, clock=time.time, sleep=time.sleep, backoff=None):
+    def __init__(self, coins, connect, clock=time.time, sleep=time.sleep, backoff=None,
+                 sink=None):
+        self.sink = sink  # recorder hook for every frame and its integrity result
         self.coins = [str(c) for c in coins]
         self.connect, self.clock, self.sleep = connect, clock, sleep
         self.backoff = backoff or Backoff()
@@ -158,6 +160,11 @@ class TxFlowDepthStream:
             result = self.books[coin].apply(data)
             if result == "ok":
                 self.received[coin] = self.clock()
+        if self.sink:
+            self.sink(kind="l2_snapshot" if data.get("type") == "snapshot" else "l2_delta",
+                      exchange_id="txflow", market_id=coin, seq=data.get("seq"),
+                      prev_seq=data.get("prevSeq"), source_ts=data.get("time"),
+                      integrity=result, payload=data, received=self.clock())
         if result == "resync":
             self.resync(coin)
         return result

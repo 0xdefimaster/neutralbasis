@@ -39,6 +39,7 @@ class Collector:
         # exchange_id -> stream with book(market_id) (e.g. marketdata.TxFlowDepthStream);
         # a fresh, valid stream book is used before a REST read.
         self.streams = {}
+        self.sink = None  # recorder hook: sink(kind=..., exchange_id=..., ...)
 
     # -- cached fetch -----------------------------------------------------------------
     def get(self, key, ttl, fetch):
@@ -52,8 +53,31 @@ class Collector:
         return value
 
     def call(self, xid, req, headers=None):
+        """One public read. With a `sink` (the recorder), every raw answer and every API
+        error is handed over with its provenance: venue, method, URL, body hash,
+        receive time and latency."""
+        import hashlib
+        import json as _json
+
         method, url, body = req
-        return self.transport(xid, method, url, body, headers)
+        started = self.clock()
+        source = dict(method=method, url=url,
+                      body_sha1=hashlib.sha1(_json.dumps(body, sort_keys=True).encode())
+                      .hexdigest()[:16] if body is not None else None,
+                      body=body)
+        sink = getattr(self, "sink", None)
+        try:
+            obj = self.transport(xid, method, url, body, headers)
+        except Exception as ex:
+            if sink:
+                sink(kind="api_error", exchange_id=xid, source=source, received=self.clock(),
+                     latency_s=self.clock() - started,
+                     payload=dict(error=type(ex).__name__, message=str(ex)[:300]))
+            raise
+        if sink:
+            sink(kind="raw", exchange_id=xid, source=source, received=self.clock(),
+                 latency_s=self.clock() - started, payload=obj)
+        return obj
 
     # -- catalog ------------------------------------------------------------------------
     def answers(self):

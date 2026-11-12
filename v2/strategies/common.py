@@ -106,3 +106,16 @@ def costs(long, short, size):
 
 
 __all__ = ["Leg", "COST", "DATA", "EXECUTION", "reason"]
+
+
+def add_stress(out, c, funding=0.0, basis=0.0, reserve=0.0):
+    """Entry and exit costs apart, the stress scenarios, and a COST reason when the
+    combined moderate scenario loses money (the exit is priced on today's book, which
+    does not guarantee tomorrow's liquidity)."""
+    out.update(entry_cost=c["entry_cost"], exit_cost=c["exit_cost"],
+               exit_basis=c["exit_basis"],
+               stress=economics.stress(c, funding, basis, reserve or 0.0))
+    moderate = next(x["net"] for x in out["stress"] if x["name"] == "combined_moderate")
+    if moderate < 0:
+        out["reasons"].append(reason(COST, "STRESS_NEGATIVE",
+                                     "combined moderate stress net %.2f < 0" % moderate))

@@ -40,6 +40,9 @@ def evaluate(long, short, size, cfg, at):
     out.update(**economics.net(c["costs"], funding=funding_cash, basis=c["basis"],
                                reserve=reserve), expected_hold_h=hold)
     out["reasons"] = []
+    from v2.strategies import common as cm
+
+    cm.add_stress(out, c["costs"], funding=funding_cash, basis=c["basis"], reserve=reserve)
     if out["net"] < cfg["wide_min_net"]:
         out["reasons"].append(reason(COST, "NET_BELOW_MIN", "net %.2f < wide_min_net %.2f"
                                      % (out["net"], cfg["wide_min_net"])))
