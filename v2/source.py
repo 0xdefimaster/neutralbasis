@@ -13,7 +13,7 @@ name (stored history and fees use it) and the V2 exchange_id and underlying_id.
 import collections
 import time
 
-from v2 import discovery, fees as v2fees, identity
+from v2 import discovery, fees as v2fees, identity, normalize
 from v2.venues import arcus, lighter_rh, risex, tradexyz, txflow, variational
 
 FEE_UNKNOWN = "FEE_UNKNOWN"
@@ -57,6 +57,25 @@ def catalog_from(answers):
     return out
 
 
+FINE = {"equity": "equity", "equities": "equity", "stock": "equity", "stocks": "equity",
+        "etf": "etf", "index_etf": "etf", "commodity": "commodity",
+        "commodities": "commodity", "index": "index", "indices": "index", "fx": "fx",
+        "crypto": "crypto"}
+
+
+def fine_class(members):
+    """The most specific class the group's venues agree on: crypto, equity, etf,
+    commodity, index, fx; "rwa_mixed" when venues file it differently; "rwa" when no
+    venue is more specific than RWA."""
+    found = {FINE[str(m.asset_class).lower()] for m in members
+             if str(m.asset_class).lower() in FINE}
+    if not found:
+        return "rwa" if any(m.coarse == identity.RWA for m in members) else None
+    if len(found) == 1:
+        return found.pop()
+    return "rwa_mixed"
+
+
 def per_hour(f):
     """Funding as a fraction per hour from a record's funding dict, or None."""
     if not f or f.get("raw") is None or not f.get("interval_s"):
@@ -71,6 +90,8 @@ def build(records, registry=None, at=None):
     at = time.time() if at is None else at
     catalog = {x: [r["instrument"] for r in recs] for x, recs in records.items()}
     groups = discovery.intersect(catalog, registry)
+    group_fine = {uid: fine_class(g["members"]) for uid, g in groups.items()
+                  if g.get("members") and g.get("status") == discovery.MULTI}
     rows, reasons = [], {}
     for xid, recs in records.items():
         c = reasons.setdefault(xid, collections.Counter())
@@ -82,7 +103,7 @@ def build(records, registry=None, at=None):
             if inst.tier != "A":
                 c[TIER_B] += 1
                 continue
-            if inst.multiplier != 1:
+            if not inst.multiplier or inst.multiplier <= 0:
                 c[MULTIPLIER_PENDING] += 1
                 continue
             f = r.get("funding")
@@ -95,7 +116,7 @@ def build(records, registry=None, at=None):
                 continue
             c["ROW"] += 1
             raw = v2fees.to_fraction(f["raw"], f["unit"])
-            rows.append(dict(
+            rows.append(normalize.row(dict(
                 asset=inst.base, venue=r["legacy_venue"], kind="perp",
                 mark=r.get("mark") or inst.price, index=r.get("index"),
                 rate=hourly, raw_rate=raw, interval=f["interval_s"], next=f.get("next_ts"),
@@ -104,7 +125,9 @@ def build(records, registry=None, at=None):
                 funding_kind=f.get("kind"), exchange_id=inst.exchange_id,
                 underlying_id=inst.underlying_id, market_id=inst.market_id,
                 identity_evidence=list(inst.evidence), fee_source=r.get("fee_source"),
-            ))
+                fine_class=group_fine.get(inst.underlying_id), session=inst.session,
+                outside_rth=r.get("outside_rth"), symbol=inst.symbol,
+            ), inst.multiplier))
     return rows, groups, reasons
 
 

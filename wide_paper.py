@@ -2032,9 +2032,19 @@ class WidePaper:
         return raw
 
     def assess(self, c):
-        if c.get("strategy") == "convergence":
-            return self.assess_convergence(c)
-        return self.assess_funding(c)
+        out = (self.assess_convergence(c) if c.get("strategy") == "convergence"
+               else self.assess_funding(c))
+        gate = getattr(self, "v2_gate", None)
+        if gate is not None:
+            # V2 (NB_V2=1): the independent V2 gate must pass too (v2/gates.py).
+            try:
+                extra = gate(c, out)
+            except Exception as ex:
+                extra = ["V2 GATE_ERROR: %s" % str(ex)[:200]]
+            if extra:
+                out["reasons"] = list(dict.fromkeys(list(out.get("reasons") or []) + extra))
+                out["eligible"] = False
+        return out
 
     def realized_carry(self, c, at):
         """This direction's realized funding per $1 notional for each of the last 7

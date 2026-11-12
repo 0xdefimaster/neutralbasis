@@ -5,8 +5,10 @@ Asset class: `category` (live: CRYPTO, EQUITIES, COMMODITIES, INDICES); `type`
 PERPETUAL; `fullAssetName`. Fees in ppm (`effectiveTakerFeePpm`; docs: "100 ppm =
 0.01%"). Funding hourly, `fundingRate` a per-hour fraction (docs formula), positive =
 longs pay; `nextFundingAt` in seconds. L2: GET /v1/l2OrderBook/{market} (timestamp in
-microseconds, lastSequenceId). `fundingRates` history answered HTTP 400 without
-parameters (2026-11-12); its parameters are not read yet.
+microseconds, lastSequenceId). Funding history: GET /v1/fundingRates?market=&from=&to=
+&limit= (from/to epoch MICROseconds, >= 1e14; limit <= 1000; newest first); each entry an
+"Hourly funding rate" with its "Funding payment time" (docs get-market-funding-rates,
+read 2026-11-12).
 """
 from v2.identity import Instrument
 from v2.venues.base import book, funding, num
@@ -22,6 +24,23 @@ def markets_request():
 
 def book_request(market, levels=20):
     return ("GET", API + "l2OrderBook/%s?nLevels=%d" % (market, min(int(levels), 100)), None)
+
+
+def funding_history_request(market, start_s, end_s, limit=1000):
+    return ("GET", API + "fundingRates?market=%s&from=%d&to=%d&limit=%d"
+            % (market, int(start_s * 1e6), int(end_s * 1e6), min(int(limit), 1000)), None)
+
+
+def parse_funding_history(raw):
+    """Hourly payments, oldest first: dict(ts s, rate fraction per hour)."""
+    rows = []
+    for x in raw.get("fundingRates") or []:
+        rate, t = num(x.get("fundingRate")), num(x.get("time"))
+        if rate is None or t is None:
+            continue
+        rows.append(dict(ts=t / 1e6, rate=rate, unit="fraction", interval_s=3600,
+                         kind="settled_public"))
+    return sorted(rows, key=lambda r: r["ts"])
 
 
 def _rows(raw):

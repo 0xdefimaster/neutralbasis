@@ -401,7 +401,16 @@ class DeskHistorySource:
             seen.add(key)
             out.append(key + (interval, ptype))
         rank = {k: i for i, k in enumerate(priority)}
-        return sorted(out, key=lambda m: rank.get(m[:3], len(rank)))
+        out = sorted(out, key=lambda m: rank.get(m[:3], len(rank)))
+        from v2 import policy as v2_policy
+
+        if v2_policy.v2_enabled():
+            # V2: history only for verified multi-venue V2 rows; no single-venue or
+            # out-of-scope market is backfilled.
+            src = getattr(e.wide_paper, "source", None)
+            wanted = src.wanted() if hasattr(src, "wanted") else set()
+            out = [m for m in out if (m[0], m[1]) in wanted]
+        return out
 
     def candles(self, v, a, kind, start, end):
         # Every listed market gets candles: the paper desk evaluates all assets.
@@ -474,6 +483,14 @@ class DeskEngine(RiskEngine):
 
         self.wide = WideMarkets(self.store, self.cfg["symbols"], self.stop_event)
         self.wide_paper = WidePaper(self.store, EngineSource(self))
+        from v2 import policy as v2_policy
+
+        if v2_policy.v2_enabled():
+            # V2: rows and books from the eight venues' adapters (tier-A verified
+            # multi-venue markets only) and the independent V2 entry gate.
+            from v2 import engine_source as v2_engine_source
+
+            v2_engine_source.attach(self, self.wide_paper)
         from history_store import HistoryKeeper
 
         self.history = HistoryKeeper(

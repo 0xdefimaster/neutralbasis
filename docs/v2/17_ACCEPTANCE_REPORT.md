@@ -46,3 +46,16 @@
 - E: veri kurtarma (sağlıklı disk).
 - Push / merge.
 - Herhangi bir motor ya da pilot başlatma.
+
+## Phase 3–4 güncellemesi (2026-11-12)
+
+- **Testler:** tam paket 863 OK, 2 atlanan, 0 başarısız.
+- **Ayrıntılar:** `18_PHASE3_REPORT.md` (adaptörler, kimlik, 119 Tier A varlık) ve `19_PHASE4_REPORT.md` (motor bağlantısı, strateji modülleri, giriş kapısı, aday değerlendirmesi: 0 uygun).
+
+| Kriter | Yeni durum |
+|---|---|
+| Aktif CEX ve legacy veri işçisi sıfır | ✅ Kodda: V2'de Extended / Core / RFQ / fiyat keşfi kaynakta kapalı. Canlı motor çalıştırılmadı |
+| Keşif + 2+ borsa kapısı | ✅ Adaptörler, grup kimliği, talebe bağlı okuma, geçmiş filtresi |
+| Yalnız iki bacağı kanıtlı piyasalar paper'a uygun | ✅ V2 kapısı (`v2/gates.py`) `WidePaper.assess`'e bağlı. Değerlendirmede 0 uygun aday |
+| Hibrit | ⚠️ Değerlendirme modülü var; masada pozisyon tipi yok (yalnız araştırma) |
+| Variational RFQ yürütmesi | ❌ Yok; Variational bacakları engelli |
