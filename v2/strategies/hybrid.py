@@ -6,8 +6,9 @@ horizon), conservative and from SETTLED evidence as in the funding strategy; the
 capture is the convergence's. When funding favours the position but the gap moves the
 wrong way (or the reverse), the components are reported apart and the net shows it.
 
-Evaluation only: the paper desk has no hybrid position type yet (a position with two
-exit rules); a hybrid result is research until that exists (docs/v2/19).
+A passing hybrid can be opened by v2.hybrid_desk.HybridDesk (its own position type and
+state machine); the runtime opens one only when `wide_hybrid_enabled` is set (default
+False, owner decision).
 """
 from v2 import economics
 from v2.strategies import COST, reason
@@ -20,7 +21,8 @@ def evaluate(long, short, size, cfg, at):
     f = funding.evaluate(long, short, size, cfg, at)
     c = convergence.evaluate(long, short, size, cfg, at)
     data = [r for r in f["reasons"] + c["reasons"] if r["category"] != COST]
-    out = dict(strategy=STRATEGY, funding_part=f, convergence_part=c, research_only=True)
+    out = dict(strategy=STRATEGY, funding_part=f, convergence_part=c, research_only=False,
+               baseline=c.get("baseline"), mad=c.get("mad"), deviation=c.get("deviation"))
     if data:
         seen, uniq = set(), []
         for r in data:
@@ -39,6 +41,6 @@ def evaluate(long, short, size, cfg, at):
                                reserve=reserve), expected_hold_h=hold)
     out["reasons"] = []
     if out["net"] < cfg["wide_min_net"]:
-        out["reasons"].append(reason(COST, "NET_NEGATIVE", "net %.2f < %.2f"
+        out["reasons"].append(reason(COST, "NET_BELOW_MIN", "net %.2f < wide_min_net %.2f"
                                      % (out["net"], cfg["wide_min_net"])))
     return out

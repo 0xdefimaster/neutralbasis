@@ -1851,6 +1851,24 @@ def serve(engine, port, host="127.0.0.1", password=None):
                 if expected:
                     return self.challenge()
                 return self.send({"error": "Yerel host gerekli"}, 403)
+            if self.path in ("/api/v2/state", "/v2"):
+                # V2 (NB_V2=1): the runtime's last published snapshot; never computed
+                # on a request thread.
+                runtime = getattr(engine, "v2_runtime", None)
+                if runtime is None:
+                    return self.send({"error": "V2 kapalı (NB_V2=1 değil)"}, 404)
+                snap = runtime.snapshot()
+                if self.path == "/api/v2/state":
+                    return self.send(json.loads(json.dumps(snap, default=str)))
+                from v2 import dashboard
+
+                raw = dashboard.render(snap).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             if self.path == "/api/state":
                 # A dashboard poll reads a published immutable snapshot, never
                 # rebuilds pair histories or scans SQLite on a request thread.

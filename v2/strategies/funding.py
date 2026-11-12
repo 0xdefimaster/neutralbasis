@@ -59,6 +59,6 @@ def evaluate(long, short, size, cfg, at):
     if why:
         out["reasons"].append(reason(COST, "BREAKEVEN", why))
     if out["net"] < cfg["wide_min_net"]:
-        out["reasons"].append(reason(COST, "NET_NEGATIVE", "net %.2f < %.2f"
+        out["reasons"].append(reason(COST, "NET_BELOW_MIN", "net %.2f < wide_min_net %.2f"
                                      % (out["net"], cfg["wide_min_net"])))
     return out

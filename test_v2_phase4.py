@@ -132,7 +132,7 @@ class StrategyTests(unittest.TestCase):
     def test_hybrid_counts_costs_and_reserve_once_and_is_research(self):
         lo, sh = self.legs(0.0, 0.0005, wiggle=0.002, short_shift=1.0)
         ev = hybrid.evaluate(lo, sh, 1000.0, CFG, AT)
-        self.assertTrue(ev["research_only"])
+        self.assertFalse(ev["research_only"])  # HybridDesk exists (phase 5)
         if "net" in ev:
             c = ev["convergence_part"]["costs"]
             self.assertAlmostEqual(ev["fees"], c["fees"])

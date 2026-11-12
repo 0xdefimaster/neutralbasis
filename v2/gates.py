@@ -14,9 +14,11 @@ Order (first failure wins, all are reported):
   5. funding and hybrid: both legs need settled public payments; TxFlow and Variational
      publish a rate only -> SETTLEMENT_EVIDENCE_MISSING (published and settled kept
      apart)
-  6. the strategy itself (v2.strategies), on the real books at the position size:
+  6. books fresh: older than the venue's limit (v2.marketdata.MAX_AGE) -> BOOK_STALE
+  7. the strategy itself (v2.strategies), on the real books at the position size:
      liquidity, fees, spread, funding, basis, reserve, break-even, net.
 """
+from v2 import marketdata
 from v2.strategies import COST, DATA, EXECUTION, convergence, funding, hybrid, reason
 from v2.strategies.common import Leg
 
@@ -89,6 +91,13 @@ class Gate:
         if reasons:
             return dict(strategy=strategy, reasons=reasons, eligible=False)
         long, short = self.legs(c, rows, at)
+        stale = [reason(DATA, "BOOK_STALE", "%s %s book older than its limit"
+                        % (side, leg.row.get("venue")))
+                 for side, leg in (("long", long), ("short", short))
+                 if leg.book is not None and marketdata.stale(
+                     leg.book, leg.row.get("exchange_id"), at)]
+        if stale:
+            return dict(strategy=strategy, reasons=stale, eligible=False)
         size = self.size or self.cfg["wide_size"]
         ev = STRATEGIES[strategy].evaluate(long, short, size, self.cfg, at)
         ev["eligible"] = not ev["reasons"] and not ev.get("research_only")

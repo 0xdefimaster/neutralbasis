@@ -59,3 +59,17 @@
 | Yalnız iki bacağı kanıtlı piyasalar paper'a uygun | ✅ V2 kapısı (`v2/gates.py`) `WidePaper.assess`'e bağlı. Değerlendirmede 0 uygun aday |
 | Hibrit | ⚠️ Değerlendirme modülü var; masada pozisyon tipi yok (yalnız araştırma) |
 | Variational RFQ yürütmesi | ❌ Yok; Variational bacakları engelli |
+
+## Phase 5–6 güncellemesi (2026-11-12)
+
+- **Testler:** tam paket 886 OK, 2 atlanan, 0 başarısız.
+- **Ayrıntılar:** `21_PHASE5_6_REPORT.md`; başlatma için `20_OPERATIONS_RUNBOOK.md` (onaya sunulur).
+
+| Kriter | Yeni durum |
+|---|---|
+| Hibrit | ✅ Kendi pozisyon tipi ve durum makinesi (`v2/hybrid_desk.py`); açılış onaya bağlı (`wide_hybrid_enabled`, varsayılan kapalı) |
+| Seçici 7/24 kaydedici | ✅ Kod ve testler (`v2/recorder.py`); **başlatılmadı** |
+| Veri bütünlüğü ve yeniden bağlanma | ✅ `v2/marketdata.py`. TxFlow WS varsayılan kapalı; diğer borsalarda REST (WS formatları okunmadı) |
+| Dashboard | ✅ `/v2`, `/api/v2/state` |
+| Variational RFQ yürütmesi | ❌ Hâlâ yok; engelli |
+| Canlı V2 pilotu | ⏳ Onay bekliyor |

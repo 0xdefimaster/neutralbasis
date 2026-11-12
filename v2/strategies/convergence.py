@@ -80,6 +80,6 @@ def evaluate(long, short, size, cfg, at, k_entry=2.0):
     out.update(costs=c, capture_share=share, expected_hold_h=hold, carry_estimated=carry,
                **economics.net(c, funding=carry, basis=capture, reserve=reserve))
     if out["net"] < cfg["wide_min_net"]:
-        out["reasons"].append(reason(COST, "NET_NEGATIVE", "net %.2f < %.2f"
+        out["reasons"].append(reason(COST, "NET_BELOW_MIN", "net %.2f < wide_min_net %.2f"
                                      % (out["net"], cfg["wide_min_net"])))
     return out

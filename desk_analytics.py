@@ -490,7 +490,12 @@ class DeskEngine(RiskEngine):
             # multi-venue markets only) and the independent V2 entry gate.
             from v2 import engine_source as v2_engine_source
 
-            v2_engine_source.attach(self, self.wide_paper)
+            import os
+
+            # The V2 runtime keeps its files next to this engine's database (never E:).
+            db_file = self.store.db.execute("pragma database_list").fetchone()[2]
+            v2_engine_source.attach(self, self.wide_paper,
+                                    data_dir=os.path.dirname(db_file) if db_file else None)
         from history_store import HistoryKeeper
 
         self.history = HistoryKeeper(
@@ -962,6 +967,13 @@ class DeskEngine(RiskEngine):
         # Pruning old multi-GB audit blobs contends with every feed/decision write.
         # During PAPER operation monitor size only; maintenance is an offline action.
         self.retention.start(monitor_only=True)
+        runtime = getattr(self, "v2_runtime", None)
+        if runtime is not None:
+            # V2: real-time evaluation, hybrid desk and selective recorder; started only
+            # with the engine loop (never at construction or in tests/--once).
+            threading.Thread(target=runtime.run, args=(self.stop_event,), daemon=True,
+                             name="v2-runtime").start()
+            runtime.start_txflow_stream(self.stop_event)  # off unless NB_V2_TXFLOW_WS=1
         return super().loop()
 
     def update_config(self, changes):

@@ -85,9 +85,26 @@ class V2EngineSource:
         return self.collector.wanted()
 
 
-def attach(engine, desk):
-    """Wire V2 into a desk: V2 source and the V2 gate. Returns the source."""
+def attach(engine, desk, data_dir=None):
+    """Wire V2 into a desk: V2 source, the V2 gate and (with a data folder) the V2
+    runtime with its hybrid desk and selective recorder. Nothing starts here; the
+    engine loop starts the runtime thread. Returns the source."""
     src = V2EngineSource(engine)
     desk.source = src
     desk.v2_gate = gates.Gate(src, desk.cfg)
+    if data_dir:
+        from pathlib import Path
+
+        from v2 import ops
+        from v2.hybrid_desk import HybridDesk
+        from v2.recorder import Recorder
+        from v2.runtime import Runtime
+
+        root = ops.not_on_e(data_dir)
+        (root / "v2").mkdir(parents=True, exist_ok=True)
+        hybrid = HybridDesk(root / "v2" / "hybrid_positions.json", src, desk.cfg)
+        recorder = Recorder(root / "v2" / "recorder", src.wanted)
+        engine.v2_runtime = Runtime(src.collector, desk.v2_gate, desk.cfg, desk=hybrid,
+                                    recorder=recorder, data_dir=str(root),
+                                    db_path=str(Path(root) / "paper.sqlite3"))
     return src

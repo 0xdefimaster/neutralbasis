@@ -36,6 +36,9 @@ class Collector:
         self.records = {}
         self.rows, self.groups, self.reasons = [], {}, {}
         self.by_key = {}
+        # exchange_id -> stream with book(market_id) (e.g. marketdata.TxFlowDepthStream);
+        # a fresh, valid stream book is used before a REST read.
+        self.streams = {}
 
     # -- cached fetch -----------------------------------------------------------------
     def get(self, key, ttl, fetch):
@@ -126,6 +129,13 @@ class Collector:
     def book(self, v, a):
         r = self.row(v, a)
         xid, mid = r["exchange_id"], r["market_id"]
+        stream = self.streams.get(xid)
+        if stream is not None:
+            from v2 import marketdata
+
+            sb = stream.book(mid)
+            if sb is not None and not marketdata.stale(sb, xid, self.clock()):
+                return normalize.book(sb, r.get("multiplier") or 1.0)
         if xid == "variational":
             rec = next((x for x in self.records.get("variational", [])
                         if x["instrument"].market_id == mid), None)
