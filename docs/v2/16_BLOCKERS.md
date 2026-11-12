@@ -14,3 +14,16 @@
 | B10 | **Lighter RH Standard 60 istek/dk** | Ağır REST taraması imkânsız | WS (`/stream?readonly=true`) ya da daha yüksek kademe; WS sözleşmesi doğrulanmalı | Mühendislik |
 | B11 | **HIP-3 funding işareti ve formülü** okunan sayfalarda yok; Hyperliquid rate-limit ağırlıkları okunmadı | tradexyz funding kanıtı kısmi | Hyperliquid funding ve rate-limit sayfalarını okumak; eski pilotun saatlik xyz geçmişiyle karşılaştırmak | Mühendislik |
 | B12 | **Risk ayarları:** 24 saat / 1,0 korunuyor; alternatifler onay bekliyor | İşlem sayısı çok düşük | `09_FUNDING_MODEL.md` seçenekleri | Sahip |
+
+## Phase 3 güncellemesi (2026-11-12)
+
+| # | Yeni durum |
+|---|---|
+| B4 | **Çözüldü (kod):** `v2/ratelimit` süreç geneli bütçe + paylaşılan önbellek + `retry_after_seconds`. Canlıda tek isteğe bile 429 geldi ("Service is busy"; global limit), bu yüzden 429 tamamen önlenemez; yeniden deneme ve önbellek bunu karşılıyor |
+| B5 | **Büyük ölçüde çözüldü:** TxFlow `marketTags`, tradeXYZ `perpCategories`, Lighter RH `funding_premium_multiplier` ve Variational belge tablosu çapa olarak kullanılıyor. Tier A 119 varlık. Kalan: Tier B (80) için bağımsız ikinci kaynak |
+| B6 | **Çözüldü:** V2'de Extended ve Core istekleri kaynakta kesildi (`bot.base_feed_venues`, `select_rfq_books`, `scan_price_discovery`, Core yardımcıları, `connections.test`) |
+| B7 | **Çözüldü:** `XyzClient` motora bağlı (`wide_markets.client`) |
+| B11 | **Çözüldü (belge):** Hyperliquid funding sayfası: saatlik, pozitifse long öder, oracle fiyatı, HIP-3 için de geçerli |
+| B13 (yeni) | Vadeli kontrata dayalı RWA'larda (CL, BZ, NATGAS, COPPER) borsalar farklı kontrat ayı referans alabilir; fiyat yakınsamasında baz riski |
+| B14 (yeni) | 1000x / 1M kontratlar için birim normalizasyonu yok (2 pazar) |
+| B15 (yeni) | Arcus `fundingRates` geçmişi parametre istiyor (HTTP 400); belge parametreleri okunmadı |

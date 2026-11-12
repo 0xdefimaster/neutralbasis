@@ -831,7 +831,12 @@ class DeskEngine(RiskEngine):
                 ))
 
     def select_rfq_books(self, at=None):
-        """The Extended RFQ markets whose real book is streamed this cycle."""
+        """The Extended RFQ markets whose real book is streamed this cycle (none under
+        V2: Extended is out of scope, so no RFQ socket is ever opened)."""
+        from v2 import policy as v2_policy
+
+        if v2_policy.v2_enabled():
+            return {}
         from extended_rfq import choose_streams
 
         at = now() if at is None else at

@@ -199,9 +199,10 @@ class GuardV2Tests(unittest.TestCase):
         g("socket.getaddrinfo", ("api.starknet.extended.exchange", 443))
 
 
-def inst(xid, symbol, cls="crypto", **kw):
+def inst(xid, symbol, cls="crypto", price=100.0, **kw):
+    # MOCK price: the group identity check needs one per market.
     return Instrument(exchange_id=xid, market_id=symbol, symbol=symbol, asset_class=cls,
-                      **kw)
+                      price=price, class_source=None if cls == "unknown" else "mock", **kw)
 
 
 class IdentityTests(unittest.TestCase):
@@ -266,7 +267,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_single_venue_markets_get_no_streams_or_pairs(self):
         g = discovery.intersect(self.catalog())
         self.assertEqual(g["crypto:BTC"]["status"], discovery.MULTI)
-        self.assertEqual(g["crypto:ETH"]["status"], discovery.SINGLE)
+        self.assertEqual(g["unverified:txflow:ETH"]["status"], discovery.SINGLE)
         s = discovery.summary(g)
         self.assertEqual((s["MULTI_VENUE"], s["venue_pairs"]), (1, 1))
         m = discovery.SubscriptionManager()

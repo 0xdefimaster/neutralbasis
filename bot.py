@@ -55,6 +55,19 @@ L = "https://mainnet.zklighter.elliot.ai/api/v1/"
 E = "https://api.starknet.extended.exchange/api/v1/"
 
 
+def base_feed_venues():
+    """Venues the base feed reads. Under V2 (NB_V2=1) only "Lighter", and only when it
+    points at Lighter RH (risk_scan.FiveFeed sets L to the RH host): Extended and
+    Lighter Core are out of the V2 scope and are never requested."""
+    from v2 import policy
+
+    if not policy.v2_enabled():
+        return ("Lighter", "Extended")
+    if "api.rh.lighter.xyz" not in L:
+        raise policy.PolicyError("V2: the base feed's Lighter host is not Lighter RH: " + L)
+    return ("Lighter",)
+
+
 def now():
     return time.time()
 
@@ -391,7 +404,7 @@ class Feed:
 
         result = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            fs = {pool.submit(fetch, v): v for v in ("Lighter", "Extended")}
+            fs = {pool.submit(fetch, v): v for v in base_feed_venues()}
             for f, v in fs.items():
                 try:
                     key, value = f.result()

@@ -61,20 +61,32 @@ class LightweightDiscovery:
 
 
 def intersect(catalog, registry=None):
-    """{underlying_id or 'unverified:<xid>:<market>': dict(status, venues, members)}."""
-    groups, out = {}, {}
-    for xid, rows in sorted(catalog.items()):
-        for inst in rows:
-            identity.resolve(inst, registry)
-            if inst.status != identity.VERIFIED:
-                out["unverified:%s:%s" % (xid, inst.market_id)] = dict(
-                    status=UNVERIFIED, venues=[xid], members=[inst])
-                continue
-            groups.setdefault(inst.underlying_id, []).append(inst)
-    for uid, members in groups.items():
-        venues = sorted({m.exchange_id for m in members})
-        out[uid] = dict(status=MULTI if len(venues) >= 2 else SINGLE, venues=venues,
-                        members=members)
+    """{underlying_id or 'unverified:<xid>:<market>': dict(status, venues, members,
+    reason)} through the group identity check (v2.identity.verify). A market outside a
+    verified group keeps the first reason it was left out (identity.REASONS)."""
+    every = [inst for _, rows in sorted(catalog.items()) for inst in rows]
+    out = {uid: dict(g, reason=None) for uid, g in identity.verify(every, registry).items()}
+    for inst in every:
+        if inst.status != identity.VERIFIED:
+            out["unverified:%s:%s" % (inst.exchange_id, inst.market_id)] = dict(
+                status=SINGLE if inst.reason == identity.SINGLE_VENUE else UNVERIFIED,
+                venues=[inst.exchange_id], members=[inst], reason=inst.reason)
+    return out
+
+
+def reasons(catalog):
+    """{exchange_id: Counter(reason or 'MULTI_VENUE')} after intersect()."""
+    import collections
+
+    out = {}
+    for xid, rows in catalog.items():
+        c = collections.Counter()
+        for i in rows:
+            if i.status == identity.VERIFIED and i.reason is None:
+                c[MULTI] += 1
+            else:
+                c[i.reason or UNVERIFIED] += 1
+        out[xid] = c
     return out
 
 

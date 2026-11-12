@@ -119,9 +119,12 @@ def txflow_round():
 
 def variational_round():
     import variational_public as vp
+    from v2.venues import variational as v2_variational
 
     received = time.time()
-    obj = get(VARIATIONAL_STATS)
+    # One shared Variational budget and cached answer for the whole process (10 / 10 s
+    # per IP; HTTP 429 retry_after_seconds honoured), never a direct request.
+    obj = v2_variational.stats()[0]
     parsed, skipped = vp.parse(obj, received)
     rows = []
     for a, r in parsed.items():

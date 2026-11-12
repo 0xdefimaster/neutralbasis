@@ -132,15 +132,34 @@ class Connections:
     def test(self, venue):
         if venue not in CATALOG:
             raise ValueError("Bilinmeyen platform")
+        from v2 import policy as v2_policy
+
+        v2_on = v2_policy.v2_enabled()
+        if v2_on and v2_policy.exchange_id(venue) is None:
+            # Out of the V2 scope: no request at all.
+            result = dict(ok=False, ts=time.time(),
+                          message="V2 kapsamı dışında; bağlantı testi yapılmadı.")
+            self.results[venue] = result
+            self.store.put("connection_results", self.results)
+            return result
         try:
-            o, code = self.request(
-                CATALOG[venue]["url"],
-                (
-                    {"type": "perpMeta", "exchangeId": "all"}
-                    if venue == "TxFlow"
-                    else None
-                ),
-            )
+            if v2_on and venue == "Variational":
+                # Shared budget and cached answer (v2.venues.variational.stats).
+                from v2.venues import variational as v2_variational
+
+                o, code = v2_variational.stats()[0], 200
+            else:
+                url = CATALOG[venue]["url"]
+                if v2_on and venue == "Lighter":
+                    url = "https://api.rh.lighter.xyz/api/v1/orderBookDetails"
+                o, code = self.request(
+                    url,
+                    (
+                        {"type": "perpMeta", "exchangeId": "all"}
+                        if venue == "TxFlow"
+                        else None
+                    ),
+                )
             if venue == "Lighter":
                 rows = o["order_book_details"]
             elif venue == "Extended":

@@ -206,6 +206,15 @@ def settled_interval(rows):
     return None
 
 
+def v2_out_of_scope(venue):
+    """Raise before any network call when V2 (NB_V2=1) is on and `venue` is not one of
+    its eight venues (e.g. Lighter Core)."""
+    from v2 import policy as v2_policy
+
+    if v2_policy.v2_enabled() and v2_policy.exchange_id(venue) is None:
+        raise ValueError("V2: %s is out of scope; not requested" % venue)
+
+
 def finite(x):
     try:
         n = float(x)
@@ -389,6 +398,7 @@ class WideMarkets:
         lighter adapter has no mark price and no ticker bid/ask, so its rows fell back to
         a last trade (refused by ranking) or no price at all. Reuses the price-discovery
         snapshot when fresh, else one listing call (cached 60 s)."""
+        v2_out_of_scope("LighterCore")
         rows = [r for r in self.price_discovery_rows
                 if r.get("venue") == "LighterCore" and at - r["received"] <= PRICE_DISCOVERY_MAX_AGE]
         if rows:
@@ -413,6 +423,7 @@ class WideMarkets:
         """The last settled payment of one Lighter Core market from the native API
         (cached until the next settlement is due; new requests limited per scan).
         None when unknown, stale or without a provable interval."""
+        v2_out_of_scope("LighterCore")
         with self.lock:
             cached = self.lighter_core_settled.get(market_id)
         # A new settlement is due at ts + interval; the venue published it within 12 s at
@@ -451,6 +462,7 @@ class WideMarkets:
     def lighter_core_history(self, market_id, start):
         """Settled hourly payments of a Lighter Core market since `start` from the
         native API (at most 750 per call, as the venue documents); oldest first."""
+        v2_out_of_scope("LighterCore")
         rows, cursor, end = [], int(start), int(now()) + 60
         for _ in range(4):
             url = LIGHTER_CORE_API + "fundings?" + urllib.parse.urlencode(
@@ -505,21 +517,33 @@ class WideMarkets:
             return self.clients[key]
         spec = CATALOG[v]
         adapter = SPOT_ADAPTERS.get(v) if spot else spec["adapter"]
-        if not adapter or not ccxt or not hasattr(ccxt, adapter):
+        from v2 import policy as v2_policy
+
+        v2_xyz = v == "tradeXYZ" and not spot and v2_policy.v2_enabled()
+        if v2_xyz:
+            # V2: CCXT's loader asks spotMeta (outside the xyz scope); a client built
+            # only on xyz-scoped info queries answers the same calls.
+            from v2.venues.tradexyz_client import XyzClient
+
+            ex = XyzClient()
+        elif not adapter or not ccxt or not hasattr(ccxt, adapter):
             raise ValueError("Public adaptör bulunmuyor")
-        ex = getattr(ccxt, adapter)(
-            {
-                "enableRateLimit": True,
-                "timeout": 6000,
-                "options": {"defaultType": "spot" if spot else "swap"},
-            }
-        )
-        if v == "Hyperliquid":
+        else:
+            ex = getattr(ccxt, adapter)(
+                {
+                    "enableRateLimit": True,
+                    "timeout": 6000,
+                    "options": {"defaultType": "spot" if spot else "swap"},
+                }
+            )
+        if v2_xyz:
+            pass
+        elif v == "Hyperliquid":
             # HIP-3 deployments are distinct venues, not native Hyperliquid perps.
             # Their unnormalized tickers cannot match this venue's candidates, and
             # reloading all deployments on each ticker scan delayed native quotes.
             ex.options["fetchMarkets"] = {"types": ["swap", "spot"]}
-        if v == "tradeXYZ":
+        if v == "tradeXYZ" and not v2_xyz:
             ex.options["fetchMarkets"] = {"types": ["hip3"], "hip3": {"dexes": [XYZ_DEX]}}
             ex.neutralbasis_dex = XYZ_DEX
             loader = ex.load_markets
@@ -1040,7 +1064,17 @@ class WideMarkets:
         This universe is separate from selected paper symbols and execution eligibility.
         One public market-list request per venue replaces per-symbol polling; stale rows
         never form a displayed spread.
+        Under V2 both venues are out of scope: nothing is requested.
         """
+        from v2 import policy as v2_policy
+
+        if v2_policy.v2_enabled():
+            with self.lock:
+                self.price_discovery_rows = []
+                self.price_discovery_status = {
+                    v: dict(ok=False, message="V2: kapsam dışı; istenmedi")
+                    for v in ("Extended", "LighterCore")}
+            return
         requests = {
             "Extended": EXTENDED_MARKETS_URL,
             "LighterCore": LIGHTER_CORE_MARKETS_URL,
@@ -1217,6 +1251,12 @@ class WideMarkets:
                 self.scan_price_discovery()
                 self.stop.wait(PRICE_DISCOVERY_INTERVAL)
 
+        from v2 import policy as v2_policy
+
+        if v2_policy.v2_enabled():
+            # Extended and Lighter Core only: out of the V2 scope, no thread at all.
+            self.price_discovery_thread = None
+            return
         self.price_discovery_thread = threading.Thread(
             target=price_discovery_loop,
             daemon=True,

@@ -47,6 +47,8 @@ GET_ROUTES = {
     "arcus": ("api.arcus.xyz", [
         r"/v1/(markets|feetiers|fundingRates|prices|mids|candles|trades)",
         r"/v1/markets/feeSchedules",
+        # docs: get-l2-orderbook-snapshot / get-best-bid-offer-bbo (read 2026-11-12)
+        r"/v1/(l2OrderBook|bbo)/[A-Za-z0-9._-]+",
         r"/health",
     ]),
     "variational": ("omni-client-api.prod.ap-northeast-1.variational.io", [
@@ -56,7 +58,11 @@ GET_ROUTES = {
 }
 TXFLOW_HOST = "rpc.txflow.com"
 TXFLOW_TYPES = ("perpMeta", "perpMetaDetail", "activeAssetCtx", "marketTicker", "l2Book",
-                "trades", "candleSnapshot", "feeTierInfo", "feeTierRates")
+                "trades", "candleSnapshot", "feeTierInfo", "feeTierRates", "tags",
+                "marketTags")
+# Hyperliquid types that answer for every dex at once (no dex field documented); only
+# the xyz rows may be consumed, and each call is written to the audit log.
+XYZ_BROAD_TYPES = ("perpDexs", "perpCategories")
 XYZ_DEX_TYPES = ("meta", "metaAndAssetCtxs")
 XYZ_COIN_TYPES = ("l2Book", "fundingHistory")
 
@@ -117,7 +123,9 @@ def check_xyz(obj):
             return refuse("Hyperliquid candleSnapshot coin %r is not an xyz: market"
                           % coin, "tradexyz")
         return Decision(True, "tradexyz")
-    if t == "perpDexs":
+    if t in XYZ_BROAD_TYPES:
+        if len(obj) != 1:
+            return refuse("Hyperliquid %s takes no other field" % t, "tradexyz")
         return Decision(True, "tradexyz", flag=BROAD)
     return refuse("Hyperliquid info type %r is outside the HIP-3 xyz scope" % t,
                   "tradexyz")
