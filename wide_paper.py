@@ -95,6 +95,16 @@ WIDE_DEFAULTS = dict(
     # checked against payments). Only those funding-evidence blocks are lifted; fees,
     # data, price history and every deep-check gate still apply. Off by default.
     wide_txflow_paper=False,
+    # V2 2026-11-12, PAPER: a funding entry must pay back entering, leaving and its
+    # risk reserve from its own expected funding within this many hours (dynamic
+    # break-even). The default equals the default horizon: no entry that the horizon
+    # check would refuse is admitted; it only stops funding entries that lean on price
+    # capture to clear their costs.
+    wide_max_breakeven_hours=24.0,
+    # Share of a funding forecast to count as income (<= 1, never raises it). 1.0
+    # until the replay benchmark measures what forecasts really delivered and the
+    # owner sets it.
+    wide_funding_realization=1.0,
 )
 # Reasons a TxFlow leg is held that need realized TxFlow payments, which no public
 # endpoint gives; lifted only with wide_txflow_paper.
@@ -167,6 +177,8 @@ LIMITS = dict(
     wide_max_spread_sd_bps=(1, 500),
     wide_weak_minutes=(0, 1440),
     wide_rwa_max_gap_bps=(1, 200),
+    wide_max_breakeven_hours=(1, 168),
+    wide_funding_realization=(0.05, 1),
 )
 # A single leg's adverse move over the hold may use at most this share of its own
 # liquidation distance; the other venue's profit does not protect it.
@@ -252,6 +264,144 @@ def joint_net(price_capture, funding, entry_fee, exit_fee, execution_drag, risk_
         - execution_drag
         - risk_reserve
     )
+
+
+# What kind of result a closed trade is. Only a trade whose two legs both filled says
+# anything about the strategy. A trade whose second leg never filled is LEG_RECOVERY,
+# even with a profit: its result is an unhedged price move, not an arbitrage (pilot
+# 2026-11-11, UNI: +$0.90 in 16 seconds on one Extended leg).
+OUTCOME_STRATEGY = "STRATEGY_EXIT"
+OUTCOME_RISK = "RISK_EXIT"
+OUTCOME_MANUAL = "MANUAL_CLOSE"
+OUTCOME_LEG_RECOVERY = "LEG_RECOVERY"
+OUTCOMES = (OUTCOME_STRATEGY, OUTCOME_RISK, OUTCOME_MANUAL, OUTCOME_LEG_RECOVERY)
+MANUAL_CLOSE_REASON = "Kullanıcı paper kapatma talebi"
+LEG_RECOVERY_PREFIX = "Bacak kurtarma"
+RISK_EXIT_PREFIXES = (
+    "Pozisyon kayıp limiti",
+    "Günlük kayıp limiti",
+    "Spread stres bütçesi",
+    "Bacak marjin riski",
+    "Borsa teminatı riski",
+    "Fiyat uyumu bozuldu",
+    "Fark geçmiş en büyük",
+)
+
+
+def trade_outcome(reason, legs_filled):
+    """The outcome class of a closed trade from its close reason and how many legs
+    ever filled."""
+    reason = str(reason or "")
+    if legs_filled < 2 or reason.startswith(LEG_RECOVERY_PREFIX):
+        return OUTCOME_LEG_RECOVERY
+    if reason == MANUAL_CLOSE_REASON:
+        return OUTCOME_MANUAL
+    if reason.startswith(RISK_EXIT_PREFIXES):
+        return OUTCOME_RISK
+    return OUTCOME_STRATEGY
+
+
+def outcome_of(x):
+    """A trade-log entry's outcome; entries kept before outcomes existed are classified
+    from their close reason and the venues that filled."""
+    if x.get("outcome") in OUTCOMES:
+        return x["outcome"]
+    legs = x.get("venues")
+    if legs is None:
+        legs = [v for v in (x.get("long"), x.get("short")) if v]
+    return trade_outcome(x.get("reason", x.get("close_reason")), len(legs))
+
+
+def is_win(x):
+    """A winning trade: positive net from a trade whose two legs both filled."""
+    return x["net"] > 0 and outcome_of(x) != OUTCOME_LEG_RECOVERY
+
+
+def funding_economics(
+    expected_funding,
+    horizon_hours,
+    entry_fee,
+    exit_fee,
+    execution_drag,
+    risk_reserve,
+    realization=1.0,
+):
+    """Economics of a funding entry over its own expected cash flow (USD, one position).
+
+    expected_funding is the conservative funding the pair should earn over
+    `horizon_hours`; `realization` (<= 1) is the share of a forecast that past
+    forecasts actually delivered (benchmark), so it only ever lowers the income.
+    The break-even hold is dynamic: the hours this pair's own hourly cash flow needs
+    to pay for entering, leaving (fees and crossing both books) and the risk reserve.
+    None when the expected funding is no income: such an entry never breaks even."""
+    income = expected_funding * min(1.0, max(0.0, realization))
+    hourly = income / horizon_hours if horizon_hours > 0 else 0.0
+    round_trip = entry_fee + exit_fee + execution_drag
+    hurdle = round_trip + risk_reserve
+    return dict(
+        expected_funding=income,
+        realization=realization,
+        hourly_cashflow=hourly,
+        entry_cost=entry_fee + execution_drag / 2,
+        exit_cost=exit_fee + execution_drag / 2,
+        round_trip_cost=round_trip,
+        risk_reserve=risk_reserve,
+        expected_net_cashflow=income - hurdle,
+        breakeven_hours=hurdle / hourly if hourly > 0 else None,
+        horizon_hours=horizon_hours,
+    )
+
+
+def breakeven_refusal(economics, cfg):
+    """Why a funding entry does not pay back its costs and reserve in time, or None."""
+    hours = economics["breakeven_hours"]
+    if hours is None:
+        return (
+            "Beklenen funding gelir değil; giriş ve çıkış maliyeti hiç karşılanmaz · "
+            "%s" % usd(economics["expected_funding"])
+        )
+    if hours > cfg["wide_max_breakeven_hours"]:
+        return (
+            "Başa baş tutma süresi sınırı aşıyor · %.1f saat > %.0f saat "
+            "(maliyet %s + risk payı %s, saatlik funding %s)"
+            % (
+                hours,
+                cfg["wide_max_breakeven_hours"],
+                usd(economics["round_trip_cost"]),
+                usd(economics["risk_reserve"]),
+                usd(economics["hourly_cashflow"]),
+            )
+        )
+    return None
+
+
+# Entry-time estimates a closed trade keeps, so its result can be checked against them.
+ENTRY_ECONOMICS_FIELDS = (
+    "net",
+    "size",
+    "conservative_funding",
+    "funding_day1",
+    "funding_day3",
+    "entry_fee",
+    "exit_fee",
+    "execution_drag",
+    "risk_reserve",
+    "price_capture",
+    "stress_loss",
+    "expected_hours",
+    "max_hold_hours",
+)
+
+
+def entry_economics(c, horizon):
+    """The estimates a decision was taken on, kept with the position."""
+    out = {k: c.get(k) for k in ENTRY_ECONOMICS_FIELDS if c.get(k) is not None}
+    out["horizon_hours"] = c.get("expected_hours") or horizon
+    if c.get("economics"):
+        out["economics"] = dict(c["economics"])
+    if c.get("entry_funding_refresh"):
+        out["entry_funding_refresh"] = dict(c["entry_funding_refresh"])
+    return out
 
 
 def expected_price_capture(size, entry_gap, target_gap, baseline, widest, tiers):
@@ -446,6 +596,7 @@ def trades_csv(trades):
             "fill_ratio",
             "slippage_usd",
             "unverified_risk_usd",
+            "outcome",
         ]
     )
     for x in trades:
@@ -471,6 +622,7 @@ def trades_csv(trades):
                 x.get("fill_ratio", 1.0),
                 x.get("slippage"),
                 x.get("unverified_risk"),
+                outcome_of(x),
             ]
         )
     return out.getvalue()
@@ -620,7 +772,8 @@ def scorecard(trades):
                 trades=len(xs),
                 net=sum(nets),
                 average=sum(nets) / len(xs),
-                wins=sum(n > 0 for n in nets),
+                wins=sum(is_win(x) for x in xs),
+                leg_recovery=sum(outcome_of(x) == OUTCOME_LEG_RECOVERY for x in xs),
                 worst=min(nets),
                 worst_price=min(x["price_pnl"] for x in xs),
                 fees=sum(x["fees"] for x in xs),
@@ -2030,9 +2183,19 @@ class WidePaper:
                 q["execution_drag"],
                 risk_reserve,
             )
+            economics = funding_economics(
+                funding,
+                cfg["wide_horizon"],
+                q["entry_fee"],
+                q["exit_fee"],
+                q["execution_drag"],
+                risk_reserve,
+                cfg["wide_funding_realization"],
+            )
             week, three = sum(days), sum(days[:3])
             out.update(
                 q,
+                economics=economics,
                 conservative_funding=funding,
                 funding_day1=day1,
                 funding_day3=day3,
@@ -2114,6 +2277,9 @@ class WidePaper:
                     "Birleşik getiri ücret, kayma ve risk payını karşılamıyor · "
                     "net %s < $%.2f" % (usd(net), cfg["wide_min_net"])
                 )
+            breakeven_reason = breakeven_refusal(economics, cfg)
+            if breakeven_reason:
+                out["reasons"].append(breakeven_reason)
             worst = self.worst_loss(q)
             if worst > q["budget"] + 1e-6:
                 out["reasons"].append(
@@ -2463,6 +2629,21 @@ class WidePaper:
         c["entry_funding_refresh"] = dict(cash=cash, net=net, at=at)
         if net < self.cfg["wide_min_net"]:
             return "Girişte funding yenilendi: net hedefin altına düştü"
+        e = c.get("economics")
+        if c.get("strategy") != "convergence" and e:
+            fresh = funding_economics(
+                min(c["conservative_funding"], cash),
+                e["horizon_hours"],
+                c["entry_fee"],
+                c["exit_fee"],
+                c["execution_drag"],
+                e["risk_reserve"],
+                e["realization"],
+            )
+            c["entry_funding_refresh"]["economics"] = fresh
+            why = breakeven_refusal(fresh, self.cfg)
+            if why:
+                return "Girişte funding yenilendi: " + why
         return None
 
     def book(self, v, a):
@@ -2546,6 +2727,7 @@ class WidePaper:
             close_reason=None,
             strategy=c.get("strategy", "funding"),
             entry_reason=c.get("entry_reason"),
+            entry_economics=entry_economics(c, self.cfg["wide_horizon"]),
         )
         self.positions.append(p)
         self.persist()
@@ -3119,6 +3301,7 @@ class WidePaper:
         p["status"] = "CLOSED"
         p["closed_at"] = now()
         p["net"] = p["price_pnl"] + p["funding"] - p["fees"]
+        p["outcome"] = trade_outcome(p.get("close_reason"), len(p["legs"]))
         self.positions.remove(p)
         self.closed.append(p)
         self.manual_close.discard(p["id"])
@@ -3260,25 +3443,44 @@ class WidePaper:
         return None
 
     def report(self):
-        """Paper results per strategy; unverified and estimated funding kept apart."""
+        """Paper results per strategy; unverified and estimated funding kept apart.
+
+        net is every settled trade's cash. wins count only trades whose two legs both
+        filled: a leg recovery is reported apart (leg_recovery), never as a win. The
+        components are kept apart: price PnL (slippage included; slippage is also
+        shown alone), SETTLED funding, funding valued on an estimated price, fees."""
         out = {}
         # Every trade of the period, not only the last 500 kept in full.
         trades = self.period_trades()
         for key in ("funding", "convergence"):
             done = [p for p in trades if p["strategy"] == key]
             settled = [p for p in done if not p["pending"]]
+            outcomes = {}
+            for p in settled:
+                o = outcomes.setdefault(outcome_of(p), dict(trades=0, net=0.0))
+                o["trades"] += 1
+                o["net"] += p["net"]
+            recovery = outcomes.get(OUTCOME_LEG_RECOVERY, dict(trades=0, net=0.0))
+            slips = [p["slippage"] for p in settled if p.get("slippage") is not None]
             out[key] = dict(
                 open=sum(p.get("strategy", "funding") == key for p in self.positions),
                 trades=len(done),
                 settled=len(settled),
-                wins=sum(p["net"] > 0 for p in settled),
+                wins=sum(is_win(p) for p in settled),
                 net=sum(p["net"] for p in settled),
                 price_pnl=sum(p["price_pnl"] for p in settled),
                 funding=sum(p["funding"] for p in settled),
+                settled_funding=sum(
+                    p["funding"] - p["estimated_funding"] for p in settled
+                ),
                 estimated_funding=sum(p["estimated_funding"] for p in settled),
                 fees=sum(p["fees"] for p in settled),
+                slippage=sum(slips) if slips else None,
                 unverified_payments=sum(p["unverified"] for p in done),
                 pending=len(done) - len(settled),
+                outcomes=outcomes,
+                leg_recovery=recovery,
+                two_leg_net=sum(p["net"] for p in settled) - recovery["net"],
             )
         return out
 
@@ -3742,6 +3944,9 @@ class WidePaper:
             realized_pnl=WidePaper.accounting(p)["realized_pnl"],
             fill_ratio=p.get("fill_ratio", 1.0),
             slippage=p.get("slippage"),
+            outcome=p.get("outcome")
+            or trade_outcome(p.get("close_reason"), len(p["legs"])),
+            entry_economics=p.get("entry_economics"),
         )
 
     def record_close(self, p):
@@ -3870,7 +4075,11 @@ class WidePaper:
             open_net=open_net,
             trades=len(done),
             settled=len(settled),
-            wins=sum(x > 0 for x in nets),
+            wins=sum(is_win(p) for p in settled),
+            leg_recovery=sum(outcome_of(p) == OUTCOME_LEG_RECOVERY for p in settled),
+            leg_recovery_net=sum(
+                p["net"] for p in settled if outcome_of(p) == OUTCOME_LEG_RECOVERY
+            ),
             net=total,
             profit_factor=None if pf in (None, math.inf) else pf,
             top3_share=top3,
