@@ -198,7 +198,10 @@ def paper_positions(bench):
                               assumptions=(s.get("expected") or {}).get("assumptions")),
                 fills=fills, funding_evidence=ev, pnl=pnl,
                 reliability=s.get("reliability"),
-                valuation_reliable=not problems, valuation_problems=problems,
+                # no fill = nothing to value: null (not applicable), never "reliable"
+                valuation_reliable=None if not fills else not problems,
+                valuation_problems=problems if fills else
+                ["no fill: rejected or never opened (nothing to value)"],
                 label="ESTIMATED_PAPER: simulated on observed public data; not an exchange "
                       "position; fills are estimates, not real fills",
                 data_source="ESTIMATED"))
@@ -347,7 +350,9 @@ def build(now=None, bench=None, out=None):
                                "strict_paper_eligible")),
         paper_positions=dict(total=len(positions),
                              open=sum(1 for p in positions if p["state"] != "CLOSED"),
-                             reliable=sum(1 for p in positions if p["valuation_reliable"])),
+                             reliable=sum(1 for p in positions if p["valuation_reliable"]),
+                             never_filled=sum(1 for p in positions
+                                              if p["valuation_reliable"] is None)),
         funding_persistence=dict(status=fp["status"]),
         doctor_sections=doc["sections"],
         data_kinds=dict(live="not available: recorder not running" if not live else

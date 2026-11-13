@@ -345,6 +345,11 @@ class ReadModelObservedTests(unittest.TestCase):
                 self.assertFalse(p["valuation_reliable"])
         rfq = [p for p in ps if p["short"] == "Variational" and not p["scenario_only"]]
         self.assertTrue(rfq and not rfq[0]["valuation_reliable"])
+        for p in ps:                      # a position without fills is never "reliable"
+            if not p["fills"]:
+                self.assertIsNone(p["valuation_reliable"])
+        ov = self.docs["overview"]["paper_positions"]
+        self.assertEqual(ov["reliable"], sum(1 for p in ps if p["valuation_reliable"]))
 
     def test_served_end_to_end_offline(self):
         srv = server.ControlServer("127.0.0.1", 0, folder=self.tmp, heartbeat=False)

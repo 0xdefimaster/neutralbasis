@@ -185,7 +185,7 @@ async function vHome() {
     " stress-positive, " + ((ov.opportunities || {}).strict_eligible ?? "UNKNOWN") + " STRICT eligible."));
   oc.appendChild(link("#/opps", "All opportunities →"));
   const pp = ov.paper_positions || {};
-  const pc = card("PAPER positions (simulated)", kv([["positions", pp.total], ["open", pp.open], ["reliably valued", pp.reliable]]),
+  const pc = card("PAPER positions (simulated)", kv([["positions", pp.total], ["open", pp.open], ["reliably valued", pp.reliable], ["never filled", pp.never_filled]]),
     note("Fills are ESTIMATED from observed public data; none is a real fill."), link("#/paper", "Positions →"));
   const sec = ov.doctor_sections || {};
   const dl = grid("flex flex-wrap gap-1.5");
@@ -338,7 +338,8 @@ async function vPaper() {
     const c = card(null);
     const t = grid("flex flex-wrap items-center gap-1.5");
     add(t, el("span", "mr-auto text-sm font-semibold text-slate-100", p.asset + " · " + p.strategy), chip(p.state),
-        p.valuation_reliable ? chip("OK", "valuation reliable") : chip("UNVERIFIED", "valuation not reliable"),
+        p.valuation_reliable === null ? chip("NOT_TESTED", "never filled: nothing to value") :
+          p.valuation_reliable ? chip("OK", "valuation reliable") : chip("UNVERIFIED", "valuation not reliable"),
         p.scenario_only ? el("span", "chip chip-na", "SCENARIO " + p.scenario) : null);
     add(c, t, el("p", "muted mt-1", "long " + p.long + " / short " + p.short + " · $" + p.size_usd + " · " + p.id));
     const pnl = p.pnl || {};
