@@ -228,3 +228,50 @@ python -m tools.v2_ws_probe --owner-approved --seconds 300 --out C:\Users\W10\nb
 | Lighter RH BTC | ✅ connection, data, nonce integrity, REST agreement (4/5); ❌ source-time latency (unit unknown) |
 
 A second ≤ 300 s probe would confirm fixes 1–3 live. It needs the owner's approval.
+
+### 8.6 Second approved probe (fixes verified live)
+
+- **Run:** 04:53:42–04:58:42, 300 s, same 4 legs and limits.
+- **Output:** `C:\Users\W10\nb-benchmark\v2-paper-data\ws-probe-20261113-2\ws_probe_report.json` (15.5 KB).
+- **Guard:** 21 allowed / 0 refused; 0 refused frames; no D:/E: write; no push of `300af53` (not approved).
+- **Clock:** still NOT synchronized: W32Time is Stopped, the session has no admin rights.
+  - Offset measured just before the run: +0.278 … +0.299 s (local behind NTP). It drifted ~0.02 s in 23 min.
+  - A re-measurement after the run did not answer within 60 s.
+  - **All timing figures below are offset-corrected estimates, NOT reliable timing.** Connection, subscription, count, integrity and price-agreement results do not depend on the clock.
+
+| Venue / market | Connected | Subscription accepted | Messages | Interval (median) | Data age, corrected (median), NOT RELIABLE | REST vs WS | Integrity | Reconnects / errors / 429 | Source timestamp |
+|---|---|---|---|---|---|---|---|---|---|
+| TxFlow NATGAS `l2BookDepth` | ✅ | ✅ snapshot frames (`prevSeq: null` as documented; 11 snapshots in 300 s) | 213 (+ 11 snapshots counted as acks) | ~1.4 s (book only) | ~0.20 s | ✅ 3 CONSISTENT (0.0 bp, 0.17–0.40 s apart), 2 NOT_COMPARABLE (> 2 s) | ✅ 0 gaps, 0 resync, 0 duplicates, 0 stale | 0 / 0 / 0 | ✅ `time` ms; the book's `coin` = "NATGAS-USDC", `id` = 119 (fix 1 confirmed) |
+| TxFlow NATGAS `activeAssetCtx` | ✅ | ✅ | 99 | 3.0 s | ~0.45 s | — | — | 0 / 0 / 0 | ✅ `blockTime` |
+| Hyperliquid INIT | ✅ | ✅ `subscriptionResponse` (`fast: false`) | 30 | 10.26 s | ~0.45 s | 2 CONSISTENT (one on the identical book time), 3 NOT_COMPARABLE | ✅ 0 stale/dup/resync | 0 / 0 / 0 | ✅ |
+| tradeXYZ NATGAS | ✅ | ✅ | 30 | 10.26 s | ~0.45 s | 0 CONSISTENT, 5 NOT_COMPARABLE | ✅ | 0 / 0 / 0 | ✅ |
+| Lighter RH BTC | ✅ | ✅ `subscribed/order_book` snapshot now counted (fix 2 confirmed) | 4,754 | 0.051 s | not measured | ✅ 5/5 CONSISTENT (≤ 0.11 bp, WS timed by receive time) | ✅ nonce continuity, 0 resync | 0 / 0 / 0 | ⚠️ `last_updated_at` = 1794534826596857: by magnitude epoch **microseconds** (observed, NOT STATED in the docs) |
+
+**New finding: the Hyperliquid WS can lag REST.**
+- On 8 of 10 comparisons, the REST book's own `time` was 2.7–11.4 s NEWER than the last WS `l2Book` push.
+- Pushes came every ~10.26 s for both coins, at identical block times, in both runs.
+- The subscription was acknowledged with `"fast": false`. The docs say only "5 levels if fast, 20 levels if slow" and give no cadence.
+- So for these thin books the WS is not fresher than REST polling at ≤ 10 s.
+- Trying `fast: true` needs the allowlist widened by one field and another approved probe. Not done.
+
+**Freshness, WS vs the earlier REST method.** Ages are corrected estimates, not reliable timing.
+
+| Leg | REST, 20 s polling (Phase 8): average / worst age | WS: average / worst age | Change |
+|---|---|---|---|
+| TxFlow NATGAS book | ~0.9 + 10 ≈ 10.9 s / ~21 s | ~0.2 + 0.7 ≈ **0.9 s** / ~3.2 s | about 10× fresher |
+| TxFlow NATGAS funding/mark (ctx) | ~0.4 + 10 s / ~21 s | ~0.45 + 1.5 ≈ **2 s** / ~3.5 s | about 5× fresher |
+| tradeXYZ NATGAS book | ~0.8 + 10 ≈ 10.8 s / ~21 s | ~0.45 + 5.1 ≈ **5.6 s** / ~12 s | about 2× vs 20 s polling; worse than ≤ 10 s REST polling |
+| Hyperliquid INIT book | same as above | ~5.6 s / ~12 s | same |
+| Variational INIT / NATGAS quote | REST only: quote age median 10–20 s | no WS exists | none |
+
+- **NATGAS TxFlow/tradeXYZ:** the TxFlow leg is now ~1 s fresh; the tradeXYZ leg is limited by the HL push cadence (~10 s). The pair was already inside its 36 s limit.
+- **INIT:** **still blocked.** HL is up to ~12 s old between pushes, and Variational's quote (REST, 10–20 s median age) remains the binding leg against the 2 s limit.
+
+**Verdict after the second probe (live, read-only):**
+
+| Venue | Connection | Subscription | Data | Integrity | REST agreement | Timing |
+|---|---|---|---|---|---|---|
+| TxFlow NATGAS | ✅ | ✅ | ✅ | ✅ | ✅ | not reliable (clock) |
+| Hyperliquid INIT | ✅ | ✅ | ✅ | ✅ | ✅ partial: 2 consistent; most samples not comparable | not reliable; WS can lag REST |
+| tradeXYZ NATGAS | ✅ | ✅ | ✅ | ✅ | ❌ not shown: 0 comparable samples | not reliable; WS can lag REST |
+| Lighter RH BTC | ✅ | ✅ | ✅ | ✅ | ✅ | source-time unit undocumented |
