@@ -236,7 +236,7 @@ A second ≤ 300 s probe would confirm fixes 1–3 live. It needs the owner's ap
 - **Guard:** 21 allowed / 0 refused; 0 refused frames; no D:/E: write; no push of `300af53` (not approved).
 - **Clock:** still NOT synchronized: W32Time is Stopped, the session has no admin rights.
   - Offset measured just before the run: +0.278 … +0.299 s (local behind NTP). It drifted ~0.02 s in 23 min.
-  - A re-measurement after the run did not answer within 60 s.
+  - After the run (it answered late, at 05:00:50): +0.283 … +0.288 s, consistent with the earlier measurements.
   - **All timing figures below are offset-corrected estimates, NOT reliable timing.** Connection, subscription, count, integrity and price-agreement results do not depend on the clock.
 
 | Venue / market | Connected | Subscription accepted | Messages | Interval (median) | Data age, corrected (median), NOT RELIABLE | REST vs WS | Integrity | Reconnects / errors / 429 | Source timestamp |
