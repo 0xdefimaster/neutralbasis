@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 import wide_paper  # noqa: E402
 from v2 import economics, estimated, gates, opportunity_log, rfq_paper  # noqa: E402
 from v2 import funding_evidence as fe  # noqa: E402
+from v2 import funding_semantics as fs  # noqa: E402
 from v2.venues import hyperliquid_obs as hlo  # noqa: E402
 from v2.venues import tradexyz, txflow, variational  # noqa: E402
 
@@ -118,7 +119,7 @@ class BurstProvider:
             f = tr["funding"]
             self.rows[("TxFlow", "NATGAS")] = dict(
                 base, venue="TxFlow", asset="NATGAS", exchange_id="txflow", market_id=idx,
-                rate=fe.per_hour(f["raw"] / 100.0, f["interval_s"] or 3600),
+                rate=fs.hourly(f, "txflow"),  # one unit path (Phase 15 P0-A)
                 fee=tr["fee_taker"], mark=tr["mark"], fine_class="commodity")
             self.books["TxFlow", "NATGAS"] = dict(
                 txflow.parse_book(A["txflow_book_NATGAS"]["data"]), received=self.at)

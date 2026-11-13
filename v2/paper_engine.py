@@ -468,7 +468,10 @@ class PaperEngine:
         price = ((prev or {}).get("marks") or {}).get(side) or \
             (obs.rows.get((leg["venue"], p["asset"])) or {}).get("mark")
         if settled is not None:
-            rate = settled["rate"]             # per hour (Hyperliquid history)
+            # A settled point's rate is per PAYMENT PERIOD; `amount` below multiplies an
+            # hourly rate by the period, so convert once (identical for hourly venues;
+            # Phase 15 P0-C, latent gap G5).
+            rate = settled["rate"] / ((settled.get("interval_s") or iv) / HOUR)
             evidence, basis = "SETTLED_PUBLIC_RATE", "public settled rate x observed mark " \
                 "(venue price basis not in history: value estimated)"
         elif has_history:

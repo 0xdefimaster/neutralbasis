@@ -22,6 +22,7 @@ from pathlib import Path
 
 from v2 import estimated, opportunity_log, rfq_paper
 from v2 import funding_evidence as fe
+from v2 import funding_semantics as fs
 from v2.venues import hyperliquid_obs as hlo
 from v2.venues import tradexyz, txflow, variational
 
@@ -103,8 +104,7 @@ class Observation:
                         "nextFundingTime")
                     self.rows[("TxFlow", "NATGAS")] = dict(
                         base, venue="TxFlow", asset="NATGAS", exchange_id="txflow",
-                        market_id=idx, rate=fe.per_hour(f["raw"] / 100.0,
-                                                        f["interval_s"] or 3600),
+                        market_id=idx, rate=fs.hourly(f, "txflow"),  # one unit path (P0-A)
                         fee=tr["fee_taker"], mark=tr["mark"],
                         next_funding=nf / 1000.0 if nf else None, fine_class="commodity")
                     bt, _ = src("txflow_book_NATGAS")
