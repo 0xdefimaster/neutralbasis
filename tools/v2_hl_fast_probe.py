@@ -138,6 +138,19 @@ def summarize(mode, rest):
                 duplicates=mode["duplicates"], resyncs=mode["resyncs"], coins=out)
 
 
+CLASS_B = ("age_s", "share_age_le_2s")
+
+
+def withhold_class_b(modes):
+    """Remove the measures that depend on the local clock (data age, the 2 s share)."""
+    for m in modes.values():
+        for c in (m.get("coins") or {}).values():
+            for k in CLASS_B:
+                if k in c:
+                    c[k] = "WITHHELD: local clock not verified"
+    return modes
+
+
 def rest_loop(stop, http_json, every, out, clock=time.time):
     from v2.venues import hyperliquid_obs as hlo
     from v2.venues import tradexyz
@@ -169,11 +182,14 @@ def main():
     ap.add_argument("--rest-every", type=float, default=10.0)
     ap.add_argument("--owner-approved", action="store_true")
     ap.add_argument("--clock-verified", action="store_true")
+    ap.add_argument("--class-a-only", action="store_true",
+                    help="local clock NOT verified: report only clock-independent "
+                         "measures; data age and the 2 s share are withheld")
     a = ap.parse_args()
-    if not (a.owner_approved and a.clock_verified) or \
+    if not a.owner_approved or not (a.clock_verified or a.class_a_only) or \
             (os.environ.get(ws_readonly.ENV) or "") != "1":
-        raise SystemExit("refused: needs --owner-approved, --clock-verified and %s=1"
-                         % ws_readonly.ENV)
+        raise SystemExit("refused: needs --owner-approved, (--clock-verified or "
+                         "--class-a-only) and %s=1" % ws_readonly.ENV)
     out = storage.check_dir(a.out)
     out.mkdir(parents=True, exist_ok=True)
     from pilot import network_guard
@@ -201,10 +217,15 @@ def main():
         t.join(MAX_PER_MODE_S + 60)
     stop.set()
     rt.join(30)
+    modes = {("fast" if k else "slow"): (summarize(v, rest) if "obs" in v else v)
+             for k, v in res.items()}
+    if a.class_a_only:
+        modes = withhold_class_b(modes)
     rep = dict(created=time.time(), clock_offset_s=a.clock_offset,
+               measurement_class="A only (clock not verified)" if a.class_a_only
+               else "A and B (clock verified)",
                per_mode_seconds=min(a.seconds, MAX_PER_MODE_S), rest_errors=rest_errs,
-               modes={("fast" if k else "slow"): (summarize(v, rest) if "obs" in v else v)
-                      for k, v in res.items()},
+               modes=modes,
                guard=dict(guard.stats), by_venue=dict(guard.by_venue))
     (out / "hl_fast_report.json").write_text(json.dumps(rep, indent=1, default=str),
                                              encoding="utf-8")

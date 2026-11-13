@@ -157,3 +157,15 @@ class PairSnapshotTests(unittest.TestCase):
         self.assertTrue(all("not a verified trade" in s["label"] for s in r["part4_simulated"]))
         self.assertTrue(all(s["status"] != "STRICT_ELIGIBLE" for s in r["part4_simulated"]))
         self.assertIn("RWA_REFERENCE_UNVERIFIED", r["part4_simulated"][0]["strict_reasons"])
+
+
+class ClassATests(unittest.TestCase):
+    def test_class_b_measures_are_withheld(self):
+        from tools import v2_hl_fast_probe as hp
+
+        modes = {"fast": {"coins": {"INIT": {"age_s": {"median": 1.0}, "share_age_le_2s": 0.9,
+                                             "interval_s": {"median": 0.5}}}}}
+        out = hp.withhold_class_b(modes)["fast"]["coins"]["INIT"]
+        self.assertTrue(str(out["age_s"]).startswith("WITHHELD"))
+        self.assertTrue(str(out["share_age_le_2s"]).startswith("WITHHELD"))
+        self.assertEqual(out["interval_s"], {"median": 0.5})       # class A kept

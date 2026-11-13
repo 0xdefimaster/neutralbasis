@@ -85,7 +85,8 @@ def snapshot(o):
                 dict(asset=ASSET, long=lv, short=sv, strategy="funding"), o.at, "funding")
             sim.append(dict(
                 long=lv, short=sv, size=size, status=r["status"], first=r.get("first"),
-                expected_net=r.get("net"),
+                expected_net=r.get("net"), entry_cost=r.get("entry_cost"),
+                exit_cost=r.get("exit_cost"),
                 entry_stress_estimate=(r.get("uncertainty") or {}).get("net_min"),
                 carry_8h=r.get("carry_8h"), breakeven_h=r.get("breakeven_h"),
                 components=r.get("components"),

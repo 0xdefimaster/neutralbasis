@@ -303,6 +303,8 @@ class EstimatedEvaluator:
                     assumptions=self.assumptions(codes, ref),
                     carry_hourly=carry, carry_8h=fe.per_8h(carry), net=n["net"],
                     funding=econ["expected_funding"], fees=fees, spread=spread,
+                    entry_cost=sum(legs[s_]["entry_cost"] for s_ in legs),
+                    exit_cost=sum(legs[s_]["exit_cost"] for s_ in legs),
                     reserve=reserve, reserve_basis=reserve_basis,
                     breakeven_h=econ.get("breakeven_hours"),
                     legs={s: dict(label=legs[s]["label"], tier=legs[s].get("tier"),
@@ -349,6 +351,8 @@ class EstimatedEvaluator:
                     assumptions=self.assumptions(out["strict_reasons"], ref), net=net,
                     baseline=ev.get("baseline"), mad=ev.get("mad"),
                     deviation=ev.get("deviation"), expected_hold_h=ev.get("expected_hold_h"),
+                    entry_cost=(ev.get("costs") or {}).get("entry_cost"),
+                    exit_cost=(ev.get("costs") or {}).get("exit_cost"),
                     components=None if net is None else dict(
                         funding=ev.get("funding"), convergence=ev.get("basis"),
                         shared_costs=dict(fees=ev.get("fees"), spread=ev.get("spread"),
@@ -405,6 +409,7 @@ class EstimatedEvaluator:
         return dict(out, status=ENTERED if not reasons else REJECTED,
                     first=reasons[0] if reasons else None, reasons=reasons,
                     estimated=True, assumptions=a, net=n["net"], carry_hourly=carry,
+                    entry_cost=costs.get("entry_cost"), exit_cost=costs.get("exit_cost"),
                     carry_8h=fe.per_8h(carry), expected_hold_h=hold,
                     baseline=cv["baseline"], mad=cv["mad"], deviation=cv["deviation"],
                     components=dict(
