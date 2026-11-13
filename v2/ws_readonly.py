@@ -120,6 +120,11 @@ def check_frame(venue, obj, environ=None):
         if "user" in sub:
             return "account field 'user' on a public channel"
         allowed = {"type", "coin", "nSigFigs", "mantissa"}
+        if venue == "hyperliquid" and t == "l2Book":
+            # docs: optional `fast` (boolean; "5 levels if fast, 20 levels if slow")
+            allowed = allowed | {"fast"}
+            if "fast" in sub and not isinstance(sub["fast"], bool):
+                return "fast must be a boolean"
         if set(sub) - allowed:
             return "unexpected subscription fields %s" % sorted(set(sub) - allowed)
         if not isinstance(sub.get("coin"), str) or not sub["coin"]:
