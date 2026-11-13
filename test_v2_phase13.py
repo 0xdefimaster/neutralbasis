@@ -92,14 +92,16 @@ class FundingMathTests(unittest.TestCase):
     def test_sign_inversion_and_open_at_payment(self):
         from v2 import funding_math as fm
 
-        t0 = 0.0
-        neg = dict(rate_per_period=-0.0002, interval_s=self.H, next_ts=t0 + self.H)
-        self.assertAlmostEqual(fm.leg_cash("long", neg, 1000, t0, t0 + 2.5 * self.H)["total"],
+        t0 = 10.0                                           # opened between payments
+        neg = dict(rate_per_period=-0.0002, interval_s=self.H, next_ts=self.H)
+        self.assertAlmostEqual(fm.leg_cash("long", neg, 1000, t0, 2.5 * self.H)["total"],
                                +0.4)                               # long RECEIVES at r < 0
-        self.assertAlmostEqual(fm.leg_cash("short", neg, 1000, t0, t0 + 2.5 * self.H)["total"],
+        self.assertAlmostEqual(fm.leg_cash("short", neg, 1000, t0, 2.5 * self.H)["total"],
                                -0.4)
-        # closed exactly at the payment instant: not paid (conservative)
-        self.assertEqual(fm.leg_cash("long", neg, 1000, t0, t0 + self.H)["payments"], [])
+        # closed exactly at the payment instant: uncertain -> no certain payment, a band
+        r = fm.leg_cash("long", neg, 1000, t0, self.H)
+        self.assertEqual((r["payments"], r["phase"], r["total"]), ([], "BOUNDARY", None))
+        self.assertEqual(r["band"], (0.0, 0.2))
 
     def test_unknown_phase_gives_a_band_not_a_number(self):
         from v2 import funding_math as fm
@@ -208,6 +210,112 @@ class VariationalPollerTests(unittest.TestCase):
         self.assertLess(r["RFQ_STRESS"], r["NET_AFTER_COSTS"])
         self.assertTrue(r["EXECUTABLE_PROOF"].startswith("NOT_VERIFIED"))
         self.assertIsNone(vp.pnl_levels(q, other, True, 1000.0, 40.0)["AGE_ADJUSTED"])
+
+
+
+class Phase14AuditTests(unittest.TestCase):
+    """Phase 14 slice A: independent audit of funding_math and the Variational poller."""
+    H = 3600.0
+
+    def test_open_exactly_at_a_payment_is_uncertain_both_ways(self):
+        from v2 import funding_math as fm
+
+        pay = dict(rate_per_period=0.001, interval_s=self.H, next_ts=self.H)
+        r = fm.leg_cash("long", pay, 1000, self.H, 3.5 * self.H)    # opens AT a payment
+        self.assertEqual(r["phase"], "BOUNDARY")
+        self.assertEqual(len(r["payments"]), 2)                     # 2h, 3h certain
+        self.assertAlmostEqual(r["certain_total"], -2.0)
+        self.assertAlmostEqual(r["band"][0], -3.0)                  # paying leg: worse case
+        self.assertAlmostEqual(r["band"][1], -2.0)                  # included in the band
+
+    def test_unknown_phase_counts_on_integer_boundaries(self):
+        from v2 import funding_math as fm
+
+        self.assertEqual(fm.possible_counts(2 * self.H, self.H), (1, 2))   # not (2, 3)
+        self.assertEqual(fm.possible_counts(2.5 * self.H, self.H), (2, 3))
+        self.assertEqual(fm.possible_counts(0.5 * self.H, self.H), (0, 1))
+        self.assertEqual(fm.possible_counts(8 * self.H, 8 * self.H), (0, 1))
+        # brute force: every phase on a fine grid gives a count inside the band
+        for hold in (0.7, 1.0, 2.0, 2.3, 7.99, 8.0):
+            lo, hi = fm.possible_counts(hold * self.H, self.H)
+            seen = set()
+            for k in range(0, 3600, 7):
+                phase = k + 0.5
+                n = sum(1 for j in range(-2, 20)
+                        if 0 < phase + j * self.H < hold * self.H)
+                seen.add(n)
+            self.assertTrue(seen <= set(range(lo, hi + 1)), (hold, seen, lo, hi))
+
+    def test_schedule_shift_and_close_just_before_payment(self):
+        from v2 import funding_math as fm
+
+        a = dict(rate_per_period=0.0001, interval_s=self.H, next_ts=self.H)
+        b = dict(a, next_ts=self.H + 1800)                          # schedule moved 30 min
+        n_a = len(fm.leg_cash("short", a, 1000, 10, 3 * self.H - 1)["payments"])
+        n_b = len(fm.leg_cash("short", b, 1000, 10, 3 * self.H - 1)["payments"])
+        self.assertEqual((n_a, n_b), (2, 3))
+        self.assertEqual(fm.leg_cash("short", a, 1000, 10, self.H - 1)["payments"], [])
+
+    def test_poller_cadence_is_per_listing(self):
+        from v2 import variational_poller as vp
+
+        now = [0.0]
+        p = vp.AdaptivePoller(clock=lambda: now[0])
+        # two listings refreshing every 60 s, offset by 30 s: merged they would look
+        # like a 30 s cadence; per listing it is 60 s
+        for k in range(6):
+            now[0] = k * 100.0
+            p.next_at = 0
+            self.assertTrue(p.acquire())
+            p.on_answer({"A": 1000.0 + 60 * k, "B": 1030.0 + 60 * k})
+        self.assertEqual(p.cadence(), {"A": 60.0, "B": 60.0})
+        self.assertEqual(p.interval, 60.0)
+
+    def test_poller_repeat_needs_quote_and_funding_unchanged(self):
+        from v2 import variational_poller as vp
+
+        now = [0.0]
+        p = vp.AdaptivePoller(clock=lambda: now[0])
+        p.acquire()
+        p.on_answer({"A": dict(updated_at=100.0, funding=dict(rate="0.0001"))})
+        now[0] = 31
+        p.acquire()
+        p.on_answer({"A": dict(updated_at=100.0, funding=dict(rate="0.0002"))})
+        self.assertEqual(p.stats["repeats"], 0)                     # funding changed
+        now[0] = 62
+        p.acquire()
+        p.on_answer({"A": dict(updated_at=100.0, funding=dict(rate="0.0002"))})
+        self.assertEqual(p.stats["repeats"], 1)
+        now[0] = 200
+        p.acquire()
+        p.on_answer({"A": None, "B": 5.0})                          # missing quote: no crash
+        self.assertNotIn(None, p.per_listing.get("A", []))
+
+    def test_poller_never_faster_than_documented_limits(self):
+        from v2 import variational_poller as vp
+
+        self.assertGreaterEqual(vp.MIN_S, 10.0 / 10.0 * 10)         # <= 1 per 10 s per IP
+        now = [0.0]
+        p = vp.AdaptivePoller(clock=lambda: now[0])
+        p.acquire()
+        p.on_429(retry_after=-5)                                    # nonsense header
+        self.assertGreaterEqual(p.next_at - now[0], vp.MIN_S)
+
+
+
+class IdentityPairingTests(unittest.TestCase):
+    def test_same_ticker_different_underlying_never_pairs(self):
+        from tools import v2_opportunity_scan as sc
+
+        rows = {("A", "GOLD"): dict(underlying_id="commodity:XAU"),
+                ("B", "GOLD"): dict(underlying_id="crypto:GOLDTOKEN"),
+                ("A", "BTC"): dict(underlying_id="crypto:BTC"),
+                ("B", "BTC"): dict(underlying_id="crypto:BTC"),
+                ("C", "ETH"): dict(underlying_id=None),
+                ("D", "ETH"): dict(underlying_id=None)}
+        m = sc.pairable(rows)
+        self.assertEqual(set(m), {"BTC"})
+        self.assertEqual(sorted(m["BTC"]), ["A", "B"])
 
 
 if __name__ == "__main__":

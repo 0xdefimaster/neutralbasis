@@ -53,6 +53,18 @@ def evidence_weight(xl, xs):
     return {2: 1.0, 1: 0.5}.get(n, 0.25 if all(s != fe.MISSING for s in st) else 0.0), st
 
 
+def pairable(rows, assets=None):
+    """{asset: [venues]} grouped by the VERIFIED underlying (v2.identity), never by the
+    ticker alone: a symbol carried by two different underlyings is left out entirely,
+    and a row without an underlying_id never pairs."""
+    by_u = collections.defaultdict(list)
+    for (v, a), row in rows.items():
+        by_u[(row.get("underlying_id"), a)].append(v)
+    conflicts = collections.Counter(a for (u, a) in by_u)
+    return {a: vs for (u, a), vs in by_u.items() if u and len(vs) >= 2
+            and conflicts[a] == 1 and (assets is None or a in assets)}
+
+
 def scan(r, size=1000.0, assets=None):
     prov, at, gate = r["prov"], r["at"], r["gate"]
     rows = prov.rows_by()
@@ -63,11 +75,7 @@ def scan(r, size=1000.0, assets=None):
         return recs.get(row.get("market_id")) if row.get("exchange_id") == "variational" \
             else None
 
-    by_asset = collections.defaultdict(list)
-    for (v, a) in rows:
-        by_asset[a].append(v)
-    matched = {a: vs for a, vs in by_asset.items() if len(vs) >= 2
-               and (assets is None or a in assets)}
+    matched = pairable(rows, assets)
     cfg = dict(wide_paper.WIDE_DEFAULTS, wide_size=size)
     ev = estimated.EstimatedEvaluator(gate, cfg, rfq_record)
     out = []
@@ -158,6 +166,20 @@ def scan(r, size=1000.0, assets=None):
 
 def report(rows, matched):
     disc = [x for x in rows if x["edge_positive"]]
+    counts = dict(
+        unique_instruments=sum(len(v) for v in matched.values()),
+        unique_reference_assets=len(matched),
+        unique_venue_pairs=len({frozenset((x["long"], x["short"])) for x in rows}),
+        strategy_direction_rows=len(rows),
+        raw_positive_edge=len(disc),
+        expected_net_positive=sum(1 for x in disc if (x["expected_net"] or 0) > 0),
+        stress_positive=sum(1 for x in disc if (x["stress_net"] or 0) > 0),
+        estimated_paper_candidates=sum(1 for x in disc
+                                       if x["label"] == "ESTIMATED_PAPER_CANDIDATE"),
+        simulated_paper_positions=None,
+        simulated_paper_positions_note="the scanner never simulates; positions live in "
+                                       "the ESTIMATED ledger (v2.paper_ledger)",
+        strict_paper_eligible=sum(1 for x in disc if x["strict_eligible"]))
     econ = [x for x in disc if (x["expected_net"] or 0) > 0]
     stress = [x for x in disc if (x["stress_net"] or 0) > 0]
     strict = [x for x in disc if x["strict_eligible"]]
@@ -175,6 +197,7 @@ def report(rows, matched):
     ranked = sorted([x for x in disc if x["risk_adjusted_score"] is not None],
                     key=lambda x: -x["risk_adjusted_score"])[:15]
     return dict(
+        counts=counts,
         instruments_matched=sum(len(v) for v in matched.values()),
         assets_on_2plus_venues=len(matched),
         rows=len(rows),

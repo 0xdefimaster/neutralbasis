@@ -54,9 +54,28 @@ def payment_times(next_ts, interval_s, open_at, close_at):
     return out
 
 
+def possible_counts(hold_s, interval_s):
+    """(min, max) payment instants of period `interval_s` strictly inside an open
+    interval of length `hold_s` when the phase is unknown. With q = hold / interval:
+    q not an integer -> floor(q) or floor(q)+1; q an integer k -> k-1 (phase aligned
+    with both ends, which are excluded) or k."""
+    if hold_s <= 0:
+        return 0, 0
+    q = hold_s / interval_s
+    k = round(q)
+    if abs(q - k) < 1e-9:
+        return max(k - 1, 0), k
+    return math.floor(q), math.floor(q) + 1
+
+
 def leg_cash(side, leg, notional, open_at, close_at):
-    """dict(payments [(T, cash)], total, band (min, max), phase KNOWN / UNKNOWN).
-    leg: dict(rate_per_period, interval_s, next_ts or None)."""
+    """dict(payments [(T, cash)], total, band (min, max), phase KNOWN / UNKNOWN /
+    BOUNDARY). leg: dict(rate_per_period, interval_s, next_ts or None).
+
+    A payment exactly at open_at or close_at is UNCERTAIN (whether a position opened or
+    closed at that instant is paid depends on venue timing we cannot observe): it is
+    left out of `total` and the band covers both cases, so the band is conservative for
+    a paying leg as well as for a receiving one."""
     sign = -1.0 if side == "long" else 1.0
     r, iv = leg.get("rate_per_period"), leg.get("interval_s")
     if r is None or not iv:
@@ -64,12 +83,20 @@ def leg_cash(side, leg, notional, open_at, close_at):
     per = sign * r * notional
     ts = payment_times(leg.get("next_ts"), iv, open_at, close_at)
     if ts is None:
-        n = math.floor((close_at - open_at) / iv)
-        lo, hi = sorted((per * n, per * (n + 1)))
+        n_lo, n_hi = possible_counts(close_at - open_at, iv)
+        lo, hi = sorted((per * n_lo, per * n_hi))
         return dict(payments=[], total=None, band=(lo, hi), phase="UNKNOWN",
-                    payments_possible=(n, n + 1))
+                    payments_possible=(n_lo, n_hi))
     pays = [(t, per) for t in ts]
     tot = sum(c for _, c in pays)
+    # payments landing exactly on the open or close instant
+    edge = [t for t in payment_times(leg["next_ts"], iv, open_at - 1e-6, close_at + 1e-6)
+            if abs(t - open_at) < 1e-6 or abs(t - close_at) < 1e-6]
+    if edge:
+        extra = per * len(edge)
+        band = (tot + min(0.0, extra), tot + max(0.0, extra))
+        return dict(payments=pays, total=None, band=band, phase="BOUNDARY",
+                    certain_total=tot, boundary_payments=edge)
     return dict(payments=pays, total=tot, band=(tot, tot), phase="KNOWN")
 
 
@@ -110,7 +137,7 @@ def min_hold_to_breakeven(long_leg, short_leg, notional, open_at, round_trip_cos
                 candidates.add(open_at + k * leg["interval_s"])
                 k += 1
     for t in sorted(candidates):
-        res = pair_cash(long_leg, short_leg, notional, open_at, t + 1e-6)
+        res = pair_cash(long_leg, short_leg, notional, open_at, t + 1.0)
         low = res["band"][0]
         if low is not None and low >= round_trip_cost:
             return (t - open_at) / HOUR

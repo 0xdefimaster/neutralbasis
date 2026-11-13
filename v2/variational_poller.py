@@ -30,6 +30,12 @@ import threading
 import time
 
 MIN_S, MAX_S, START_S = 30.0, 60.0, 30.0
+
+
+def json_key(x):
+    import json
+
+    return None if x is None else json.dumps(x, sort_keys=True, default=str)
 DEFAULT_RETRY_S = 10.0
 
 
@@ -39,7 +45,7 @@ class AdaptivePoller:
         self.interval = START_S
         self.next_at = 0.0
         self.last_quotes = None
-        self.seen = []                  # distinct updated_at values (epoch s)
+        self.per_listing = {}           # ticker -> distinct updated_at values (epoch s)
         self.in_flight = False
         self.lock = threading.Lock()
         self.stats = dict(requests=0, repeats=0, http_429=0, refused_in_flight=0)
@@ -59,24 +65,53 @@ class AdaptivePoller:
             self.stats["requests"] += 1
             return True
 
-    def on_answer(self, updated_at):
-        """updated_at: the answer's quotes.updated_at values {ticker: epoch s}."""
+    def on_answer(self, listings):
+        """listings: {ticker: updated_at epoch s (or None when the quote is missing)}
+        or {ticker: dict(updated_at=..., funding=<any comparable funding state>)}.
+
+        Cadence is learned PER LISTING (each listing's own distinct updated_at values;
+        never one merged list, which would make the venue look faster than it is), and
+        the request interval is the median of the listings' median refresh, clamped to
+        [30, 60] s. Only differences of the venue's own timestamps are used, so a local
+        clock offset does not bias it. The answer is a cached REPEAT only if every
+        listing's quote time AND funding state are unchanged."""
         with self.lock:
             self.in_flight = False
-            key = tuple(sorted((updated_at or {}).items()))
+            norm = {}
+            for tk, v in (listings or {}).items():
+                if isinstance(v, dict):
+                    norm[tk] = (v.get("updated_at"), json_key(v.get("funding")))
+                else:
+                    norm[tk] = (v, None)
+            key = tuple(sorted(norm.items(), key=lambda kv: kv[0]))
             if key == self.last_quotes:
                 self.stats["repeats"] += 1
                 self.interval = min(MAX_S, self.interval * 1.5)
             else:
-                for u in sorted(set((updated_at or {}).values())):
-                    if not self.seen or u > self.seen[-1]:
-                        self.seen.append(u)
-                del self.seen[:-50]
-                gaps = [b - a for a, b in zip(self.seen, self.seen[1:]) if b > a]
-                if len(gaps) >= 3:
-                    self.interval = min(MAX_S, max(MIN_S, statistics.median(gaps)))
+                for tk, (u, _) in norm.items():
+                    if u is None:
+                        continue                     # missing quote: no cadence sample
+                    s = self.per_listing.setdefault(tk, [])
+                    if not s or u > s[-1]:
+                        s.append(u)
+                    del s[:-50]
+                meds = []
+                for s in self.per_listing.values():
+                    gaps = [b - a for a, b in zip(s, s[1:]) if b > a]
+                    if len(gaps) >= 3:
+                        meds.append(statistics.median(gaps))
+                if meds:
+                    self.interval = min(MAX_S, max(MIN_S, statistics.median(meds)))
             self.last_quotes = key
             self.next_at = self.clock() + self.interval
+
+    def cadence(self):
+        """{ticker: median refresh s} from each listing's own updated_at history."""
+        out = {}
+        for tk, s in self.per_listing.items():
+            gaps = [b - a for a, b in zip(s, s[1:]) if b > a]
+            out[tk] = statistics.median(gaps) if gaps else None
+        return out
 
     def on_429(self, retry_after=None):
         with self.lock:
