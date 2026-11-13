@@ -93,12 +93,17 @@ def main():
     if str(d).lower().startswith("e:"):
         raise SystemExit("fixtures must not be on E:")
     records = source.catalog_from(answers_from(d))
-    rows, groups, reasons = source.build(records)
+    # saved fixtures carry no fetch times: this IDENTITY report builds rows under the
+    # legacy basis (labelled); the rows are never used for a time-sensitive decision
+    from v2 import marketdata
+    with marketdata.use_basis(marketdata.LEGACY):
+        rows, groups, reasons = source.build(records)
     if a.fetch_rh_fundings:
         got, wanted = fetch_rh_fundings(d, records)
         print("Lighter RH fundings fetched: %d (wanted %d)" % (got, wanted))
         records = source.catalog_from(answers_from(d))
-        rows, groups, reasons = source.build(records)
+        with marketdata.use_basis(marketdata.LEGACY):
+            rows, groups, reasons = source.build(records)
     table = source.venue_table(records, rows, groups, reasons)
     multi = {uid: g["venues"] for uid, g in groups.items() if g.get("status") == "MULTI_VENUE"}
     multi_a = {uid: g["venues_a"] for uid, g in groups.items()

@@ -344,7 +344,8 @@ class SourceRowsTests(unittest.TestCase):
                                 0.501, 0.0, 0.0, name="Cardano")],
         }
         records["txflow"].append(rec("txflow", "TxFlow", "ADA", "crypto", 0.5, 0.0, 0.00045))
-        rows, groups, reasons = source.build(records, at=1000.0)
+        rows, groups, reasons = source.build(records, at=1000.0,
+                                             received=dict.fromkeys(records, 1000.0))
         self.assertEqual(sorted((r["venue"], r["asset"]) for r in rows),
                          [("Arcus", "BTC"), ("TxFlow", "BTC")])
         self.assertEqual(reasons["risex"][source.FEE_UNKNOWN], 1)

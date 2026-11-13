@@ -177,7 +177,9 @@ class Collector:
         its verified multi-venue markets (demand-driven)."""
         answers = self.answers()
         records = source.catalog_from(answers)
-        rows, groups, reasons = source.build(records, registry, at=self.clock())
+        rows, groups, reasons = source.build(records, registry, at=self.clock(),
+                                             received=self.venue_received(),
+                                             times=self.answer_times)
         rh_wanted = [r["instrument"].market_id for r in records.get("lighter_rh", [])
                      if r["instrument"].reason is None]
         fundings = {}

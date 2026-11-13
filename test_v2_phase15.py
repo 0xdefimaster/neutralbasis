@@ -5,6 +5,7 @@ Every rate below is MOCK data unless a test says OBSERVED; OBSERVED-data tests s
 the saved artifacts are absent.
 """
 import unittest
+import unittest.mock
 
 from v2 import funding_evidence as fe
 from v2 import funding_semantics as fs
@@ -483,21 +484,22 @@ class ContractV2Tests(unittest.TestCase):
         ok = {"arcus": [rec("arcus", "Arcus", "PEPE-USD", 0.000012)],
               "txflow": [rec("txflow", "TxFlow", "1000PEPE", 0.012)],
               "risex": [rec("risex", "RISEx", "PEPE-USD", 0.0000121)]}
-        rows, _, _ = source.build(ok, at=0.0)
+        rows, _, _ = source.build(ok, at=0.0, received=dict.fromkeys(ok, 0.0))
         self.assertEqual(len(rows), 3)
         bad = {"arcus": [rec("arcus", "Arcus", "PEPE-USD", 0.000012)],
                "risex": [rec("risex", "RISEx", "PEPE-USD", 0.0000121)],
                "txflow": [rec("txflow", "TxFlow", "1000PEPE", 0.12)]}       # 10x off
-        rows, _, reasons = source.build(bad, at=0.0)
+        rows, _, reasons = source.build(bad, at=0.0, received=dict.fromkeys(bad, 0.0))
         self.assertNotIn("TxFlow", {r["venue"] for r in rows})
         self.assertIn("PRICE_MISMATCH", reasons["txflow"])
         unk = {"arcus": [rec("arcus", "Arcus", "X-USD", 1.0)],
                "risex": [rec("risex", "RISEx", "X-USD", 1.0)],
                "txflow": [rec("txflow", "TxFlow", "5000X", 5000.0)]}         # no multiplier
-        rows, _, reasons = source.build(unk, at=0.0)
+        rows, _, reasons = source.build(unk, at=0.0, received=dict.fromkeys(unk, 0.0))
         self.assertEqual({r["venue"] for r in rows}, {"Arcus", "RISEx"})
         self.assertEqual(dict(reasons["txflow"]), {"MULTIPLIER_UNKNOWN": 1})
 
+    @unittest.mock.patch("v2.marketdata.TIME_BASIS", "legacy")   # documents legacy
     def test_collector_never_restamps_a_cached_answer(self):
         """P1: a book served from the 5 s cache keeps its fetch time in
         `answer_received`; rows carry the oldest fetch time of their venue's answers.

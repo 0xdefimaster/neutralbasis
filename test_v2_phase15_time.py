@@ -19,8 +19,9 @@ def book(received, answer=None, ts=None, with_key=True):
 
 
 class TimeBasisTests(unittest.TestCase):
-    def test_default_is_legacy(self):
-        self.assertEqual(marketdata.TIME_BASIS, marketdata.LEGACY)
+    def test_default_is_answer(self):
+        # owner-approved switch 2026-11-14 (docs/v2/51)
+        self.assertEqual(marketdata.TIME_BASIS, marketdata.ANSWER)
 
     def test_answer_basis_is_never_less_strict(self):
         """Property over a grid: a fetch precedes its read, so every book stale under
@@ -63,6 +64,7 @@ class GateShadowTests(unittest.TestCase):
                  ("Lighter", "BTC"): book(AT - 1, AT - 2)}
         return gates.Gate(FakeProvider(rows, books), CFG)
 
+    @mock.patch.object(marketdata, "TIME_BASIS", marketdata.LEGACY)   # legacy decision
     def test_shadow_reports_without_changing_the_strict_decision(self):
         g = self.gate(book(AT - 1, AT - 20))           # cache hit 19 s older than read
         ev = g.evaluate(dict(asset="BTC", long="Arcus", short="Lighter"), AT, "convergence")
@@ -97,7 +99,8 @@ class CollectorSwitchTests(unittest.TestCase):
                         return_value=dict(bids=[(1.0, 1.0)], asks=[(2.0, 1.0)])):
             col.book("Arcus", "BTC")
             now[0] = 1004.0
-            legacy = col.book("Arcus", "BTC")
+            with marketdata.use_basis(marketdata.LEGACY):
+                legacy = col.book("Arcus", "BTC")
             with mock.patch.object(marketdata, "TIME_BASIS", marketdata.ANSWER):
                 honest = col.book("Arcus", "BTC")
         self.assertEqual(legacy["received"], 1004.0)     # unchanged default
@@ -133,7 +136,8 @@ class CollectorSwitchTests(unittest.TestCase):
         src = V2EngineSource.__new__(V2EngineSource)
         src.collector, src.clock, src.last, src.refresh_every = col, lambda: 20.0, 19.0, 60.0
         src.excluded = {}
-        src.current_funding("TxFlow", "NATGAS")             # legacy: no forced re-read
+        with marketdata.use_basis(marketdata.LEGACY):
+            src.current_funding("TxFlow", "NATGAS")         # legacy: no forced re-read
         col.invalidate_rate.assert_not_called()
         col.refresh.assert_not_called()
         with mock.patch.object(marketdata, "TIME_BASIS", marketdata.ANSWER):

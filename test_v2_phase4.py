@@ -70,7 +70,7 @@ class NormalizeTests(unittest.TestCase):
 
         recs = {"arcus": [rec("arcus", "Arcus", "PEPE-USD", 0.000012)],
                 "txflow": [rec("txflow", "TxFlow", "1000PEPE", 0.012)]}
-        rows, groups, reasons = source.build(recs, at=0.0)
+        rows, groups, reasons = source.build(recs, at=0.0, received=dict.fromkeys(recs, 0.0))
         marks = {r["venue"]: r["mark"] for r in rows}
         self.assertAlmostEqual(marks["TxFlow"], marks["Arcus"])
         self.assertEqual({r["asset"] for r in rows}, {"PEPE"})

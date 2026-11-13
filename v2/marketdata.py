@@ -55,7 +55,19 @@ class Backoff:
 # The answer basis is never less strict than legacy (a fetch precedes its read).
 # Switching TIME_BASIS is an owner decision; until then `answer` runs as a SHADOW.
 LEGACY, ANSWER = "legacy", "answer"
-TIME_BASIS = LEGACY
+TIME_BASIS = ANSWER     # owner-approved 2026-11-14 (docs/v2/51); LEGACY kept for comparison
+
+
+@__import__("contextlib").contextmanager
+def use_basis(basis):
+    """Run a block under one time basis (offline tools without fetch times, and tests
+    that document the legacy behaviour). Restores the previous basis."""
+    global TIME_BASIS
+    old, TIME_BASIS = TIME_BASIS, basis
+    try:
+        yield
+    finally:
+        TIME_BASIS = old
 
 
 def book_time(book, basis=None):
