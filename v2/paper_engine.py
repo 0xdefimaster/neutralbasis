@@ -53,7 +53,7 @@ evaluation records `alt_gate_blocks` either way.
 """
 import math
 
-from v2 import economics, estimated, gates, paper_exec, rfq_paper
+from v2 import economics, estimated, gates, marketdata, paper_exec, rfq_paper
 from v2 import paper_ledger as L
 
 SIZES = (1000.0, 2500.0, 5000.0, 10000.0)
@@ -236,6 +236,40 @@ class PaperEngine:
                     market_id=row.get("market_id"), model=model, fee_rate=row.get("fee"),
                     interval=row.get("interval"))
 
+    # Phase 15 P6: every simulated fill goes through one guard. Entry evaluation already
+    # refuses stale books, but retries, unwinds and closes of an open position used the
+    # observation's book as is: a crossed, stale or wrongly scaled book would have been
+    # filled. A refused fill is "not filled" (the position stays at risk, visibly).
+    MAX_FILL_DEVIATION = 0.25
+
+    def fill_guard(self, p, side, obs, book=None, price=None):
+        """Reason a fill must not be booked, or None."""
+        leg = p["legs"][side]
+        if book is not None and leg["model"] == "CLOB":
+            if book.get("crossed") or (book.get("bids") and book.get("asks") and
+                                       book["bids"][0][0] >= book["asks"][0][0]):
+                return "BOOK_CROSSED"
+            if marketdata.stale(book, leg.get("exchange_id"), obs.at):
+                return "BOOK_STALE"
+        if price is not None:
+            ref = self.reference_price(p, side, obs)
+            if ref and abs(price / ref - 1) > self.MAX_FILL_DEVIATION:
+                return "PRICE_SCALE_SUSPECT (%.6g vs reference %.6g)" % (price, ref)
+        return None
+
+    def reference_price(self, p, side, obs):
+        """This leg's average fill price so far, else the other leg's fill average, else
+        the other leg's current mid (same underlying, per-unit prices)."""
+        for s in (side, "short" if side == "long" else "long"):
+            fl = [f for f in p["legs"][s]["fills"] if f.get("price") and f.get("qty")]
+            if fl:
+                return sum(f["price"] * f["qty"] for f in fl) / sum(f["qty"] for f in fl)
+        other = p["legs"]["short" if side == "long" else "long"]
+        b = obs.book(other["venue"], p["asset"])
+        if b and b.get("bids") and b.get("asks") and not b.get("crossed"):
+            return economics.mid(b)
+        return None
+
     def sim_fill(self, p, side, obs, action, qty=None, size_usd=None):
         """One simulated fill; books a `fill` event when anything filled."""
         leg = p["legs"][side]
@@ -243,6 +277,12 @@ class PaperEngine:
         v, a = leg["venue"], p["asset"]
         n = sum(1 for f in leg["fills"] if f["action"] == action)
         times = obs.times.get((v, a)) or []
+        if leg["model"] == "CLOB":
+            why = self.fill_guard(p, side, obs, book=obs.book(v, a))
+            if why:
+                self.ledger.emit("reliability", pos=p["id"], note="%s %s %s not filled at "
+                                 "%.0f: FILL_GUARD %s" % (action, side, v, obs.at, why))
+                return 0.0
         if leg["model"] == "RFQ":
             rec = obs.rfq_record(v, a)
             if self.last_look(p["id"], side, action, n):
@@ -260,6 +300,11 @@ class PaperEngine:
         if f.get("filled", 0.0) <= L.EPS:
             self.ledger.emit("reliability", pos=p["id"], note="%s %s %s not filled at %.0f: %s"
                              % (action, side, v, obs.at, f.get("reason")))
+            return 0.0
+        why = self.fill_guard(p, side, obs, price=f.get("price"))
+        if why:
+            self.ledger.emit("reliability", pos=p["id"], note="%s %s %s not filled at %.0f: "
+                             "FILL_GUARD %s" % (action, side, v, obs.at, why))
             return 0.0
         self.ledger.emit("fill", pos=p["id"], side=side, at=obs.at, action=action,
                          qty=f["filled"], price=f["price"], fee=f["fee"], label=f["label"],

@@ -67,10 +67,15 @@ def book_time(book, basis=None):
     return book.get("received")
 
 
+FUTURE_TOLERANCE_S = 5.0   # a time further ahead is a clock or unit error (e.g. ms)
+
+
 def stale(book, venue, now, basis=None):
     t = book_time(book, basis)
     if t is None:
         return True                      # UNKNOWN time is never fresh
+    if t - now > FUTURE_TOLERANCE_S:
+        return True                      # P6: a future time is UNKNOWN, never fresh
     return now - t > MAX_AGE.get(venue, 15.0)
 
 
