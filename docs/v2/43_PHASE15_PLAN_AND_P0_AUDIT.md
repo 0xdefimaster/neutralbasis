@@ -245,3 +245,19 @@ Per-answer receive time:
 
 The scanner output is byte-identical before and after P1 (replay clock), and STRICT
 is unchanged. The full suite is 1169 OK.
+
+## 6. Re-assessment of P2–P6 after P0 / P1
+
+| priority | what P0 / P1 showed | what exists | recommendation |
+|---|---|---|---|
+| P4 data quality | `v2/ws_readonly.Books.record` swallows `on_record` errors with no counter (the data path survives, but errors vanish silently). Telemetry (`v2/control/telemetry.py`) bounds each key's buckets, but not the NUMBER of (venue, market, channel) keys; `Books.per_market` is the same. `contract.sequence_check` now exists (gaps are a suspicion). | bounded deques, rotated history file, heartbeat | **Next (first).** Small and isolated. (a) A callback error counter, the last error and a Doctor warning. (b) A key cap with LRU eviction and an eviction counter. (c) Recorder / JSONL corruption detection and restart after an incomplete write, offline fixtures only. |
+| P2 rate coordinator | Variational: 14 of 90 Phase 8 answers failed (global 429) with ONE process. `ratelimit.BUDGETS` are per process, so two tools at once could double the share. | per-process sliding window, a 429 pause, single-flight cache per process | **Second.** A file-locked token bucket per (venue, endpoint class, IP) on C:, plus a cross-process single-flight cache, Retry-After, jittered backoff, a circuit breaker and telemetry. Offline / MOCK with several processes; behind a switch, default off. The global Variational limit is shared with other clients and stays a risk. |
+| P6 replay acceptance | Already covered by P0 / P1 tests: sign inversion, wrong multiplier, wrong unit, sequence gap / duplicate / out of order, stale next payment. | `tools/v2_paper_replay.py`, fixtures | **Third.** One fixture harness with the remaining scenarios: REST timeout, 429, WS disconnect / reconnect, snapshot loss, duplicate funding payment, clock drift, stale quote, a slow venue, recorder crash, queue overflow, full disk, corrupted JSONL, restart after an incomplete write. |
+| P3 channel scheduler | WS probes: 0 resync over 2 x 300 s (TxFlow, HL, Lighter). REST polling repeats the same data where WS exists. | `marketdata.PollWorker`, `TxFlowDepthStream`, `ws_readonly` | **After P2.** It needs the shared budget to schedule against. WS-first with REST fallback and recovery. Publication rate is kept apart from request rate (Variational: values change about every 298 s, so polling every 20 s mostly re-reads). |
+| P5 Doctor | the funding semantics matrix is already in the read model / panel | Doctor, read model, telemetry | **Incrementally,** with each of P2 / P3 / P4: budget use, throttling, queue depth, checkpoint age, recorder lag, funding evidence coverage. A refresh never calls a venue. |
+
+Owner decisions collected so far (none taken here):
+1. Whether the ESTIMATED entry rule should require a positive persistence-adjusted net.
+2. Whether the engines' age gates should read `answer_received` (stricter, honest)
+   instead of the legacy `received`.
+3. Approval of any live plan in docs/v2/44 (L1 first).
