@@ -243,3 +243,72 @@ def market_history_from_account(rows):
     hours that account held a position, at its own size)."""
     raise ValueError("ACCOUNT_SCOPE_ONLY: userFundings rows describe one account, never "
                      "the market's complete funding history")
+
+
+MAX_PAGE = 2000          # docs: "max 2000 (export); values above 2000 clamped"
+MAX_OFFSET = 200000      # docs: offset "Max 200000"
+
+
+def fetch_user_fundings(fetch, address, coin, start_ms, end_ms, limit=MAX_PAGE,
+                        max_pages=50):
+    """All rows of one authorized account in [start_ms, end_ms], paged newest-first by
+    offset until hasMore is false. `fetch(body) -> answer` (the caller's guarded read).
+    Pages must move strictly back in time; an overlap or a page that does not move is
+    reported, rows are de-duplicated on (time, coin, usdc, szi, fundingRate), and the
+    result says whether it is COMPLETE, TRUNCATED (max_pages / max offset) or
+    INCONSISTENT. It never queries an address by itself (observation.check_user_fundings
+    refuses any address but the authorized one)."""
+    limit = max(1, min(int(limit), MAX_PAGE))
+    rows, seen, notes = [], set(), []
+    offset, pages, status, oldest = 0, 0, "COMPLETE", None
+    while True:
+        if pages >= max_pages or offset > MAX_OFFSET:
+            status = "TRUNCATED"
+            break
+        _, _, body = user_fundings_request(address, coin, start_ms, end_ms, limit, offset)
+        ans = fetch(body)
+        d = (ans or {}).get("data", ans) or {}
+        page = d.get("data") if isinstance(d, dict) else d
+        page = page or []
+        pages += 1
+        times = [num(x.get("time")) for x in page if num(x.get("time")) is not None]
+        if times and times != sorted(times, reverse=True):
+            status = "INCONSISTENT"
+            notes.append("page %d is not newest-first" % pages)
+        if times and oldest is not None and max(times) > oldest:
+            status = "INCONSISTENT"
+            notes.append("page %d overlaps the previous page" % pages)
+        for x in page:
+            k = (x.get("time"), x.get("coin"), x.get("usdc"), x.get("szi"),
+                 x.get("fundingRate"))
+            if k in seen:
+                continue
+            seen.add(k)
+            rows.append(x)
+        if times:
+            oldest = min(times) if oldest is None else min(oldest, min(times))
+        if not page or not (d.get("hasMore") if isinstance(d, dict) else False):
+            break
+        offset += limit
+    return dict(rows=parse_user_fundings({"data": {"data": rows}}), pages=pages,
+                status=status, notes=notes, dedup=len(seen))
+
+
+def parse_ws_user_funding(msg):
+    """WS `userFundings` push (docs: channel userFundings, data {time, coin, usdc, szi,
+    fundingRate}) -> rows like parse_user_fundings. Differences from REST: no `amount`
+    field (None here), `coin` shown as an id ("4") in the docs' example, empty strings
+    possible; an empty field stays None, never 0."""
+    d = (msg or {}).get("data")
+    items = d if isinstance(d, list) else [d] if isinstance(d, dict) else []
+    out = []
+    for x in items:
+        t = num(x.get("time"))
+        if t is None:
+            continue
+        out.append(dict(ts=t / 1000.0, coin=x.get("coin"), amount=None,
+                        szi=num(x.get("szi")), usdc=num(x.get("usdc")),
+                        rate_raw=num(x.get("fundingRate")), rate=None,
+                        kind="account_payment", scope="ACCOUNT", source="ws",
+                        status=UNVERIFIED))
+    return out

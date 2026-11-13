@@ -50,10 +50,41 @@ def pack(out):
                 zip_bytes=Path(out).stat().st_size)
 
 
+def verify(zip_path):
+    """Re-hash every file in a pack against its MANIFEST.json. Returns dict(status OK /
+    FAILED, files, bad [...], missing [...], extra [...]). Read-only."""
+    with zipfile.ZipFile(zip_path) as z:
+        names = set(z.namelist())
+        man = json.loads(z.read("nb-benchmark/MANIFEST.json"))
+        bad, missing = [], []
+        for rel, meta in sorted(man.items()):
+            n = "nb-benchmark/" + rel
+            if n not in names:
+                missing.append(rel)
+                continue
+            b = z.read(n)
+            if len(b) != meta["bytes"] or hashlib.sha256(b).hexdigest() != meta["sha256"]:
+                bad.append(rel)
+        extra = sorted(n for n in names - {"nb-benchmark/" + r for r in man}
+                       if n != "nb-benchmark/MANIFEST.json")
+    return dict(status="OK" if not (bad or missing or extra) else "FAILED",
+                files=len(man), bad=bad, missing=missing, extra=extra,
+                note="a working-data pack, NOT a backup of the 29.6 GB engine database "
+                     "(paper.sqlite3 26.5 GB + WAL 3.1 GB on the failing E:)")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True)
-    print(json.dumps(pack(ap.parse_args().out), indent=1))
+    ap.add_argument("--out")
+    ap.add_argument("--verify")
+    a = ap.parse_args()
+    if a.verify:
+        r = verify(a.verify)
+        print(json.dumps(r, indent=1))
+        raise SystemExit(0 if r["status"] == "OK" else 1)
+    if not a.out:
+        raise SystemExit("--out or --verify is required")
+    print(json.dumps(pack(a.out), indent=1))
 
 
 if __name__ == "__main__":

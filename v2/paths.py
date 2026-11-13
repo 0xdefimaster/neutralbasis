@@ -16,8 +16,12 @@ import json
 import os
 from pathlib import Path
 
-DEFAULT_BENCH = r"C:\Users\W10\nb-benchmark"
-DEFAULT_PILOT_DB = r"C:\Users\W10\nb-pilot-loose\data\paper.sqlite3"
+if os.name == "nt":
+    DEFAULT_BENCH = r"C:\Users\W10\nb-benchmark"
+    DEFAULT_PILOT_DB = r"C:\Users\W10\nb-pilot-loose\data\paper.sqlite3"
+else:   # Linux / macOS: home-relative defaults (override with the variables above)
+    DEFAULT_BENCH = str(Path.home() / "nb-benchmark")
+    DEFAULT_PILOT_DB = str(Path.home() / "nb-pilot-loose" / "data" / "paper.sqlite3")
 
 
 def bench(*parts, environ=None):

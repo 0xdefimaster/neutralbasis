@@ -149,13 +149,30 @@ class Books:
         self.records = []
         self.ctx = {}
 
+    LATENCY_BASIS = ("APPARENT: receive time - source time; includes the offset between "
+                     "the local clock and the venue clock (local sync UNKNOWN)")
+
     def record(self, **r):
         r.setdefault("recv_ts", self.clock())
         st = r.get("source_ts")
         r["latency_s"] = None if st is None else r["recv_ts"] - st
+        if r["latency_s"] is not None:
+            r["latency_basis"] = self.LATENCY_BASIS
+            r["source_ahead_of_local"] = r["latency_s"] < 0
         self.records.append(r)
         del self.records[:-5000]
         return r
+
+    def latency_stats(self, venue):
+        """Apparent latency per venue. Its minimum bounds the clock offset: when the
+        local clock is not synchronized, no single value is a true network delay."""
+        xs = sorted(r["latency_s"] for r in self.records
+                    if r.get("venue") == venue and r.get("latency_s") is not None
+                    and r.get("status") in ("ok", "duplicate", "stale"))
+        if not xs:
+            return dict(n=0)
+        return dict(n=len(xs), min=xs[0], median=xs[len(xs) // 2], max=xs[-1],
+                    negative=sum(1 for x in xs if x < 0), basis=self.LATENCY_BASIS)
 
     def handle(self, venue, text):
         msg = json.loads(text)
@@ -184,6 +201,12 @@ class Books:
             if self.dedupe(("txflow", ch, coin, d.get("seq"), d.get("type"))):
                 return self.record(venue="txflow", channel=ch, market=coin, seq=d.get("seq"),
                                    source_ts=st, status="duplicate")
+            cur = self.seq.get(coin)
+            if (d.get("type") == "snapshot" and cur is not None and cur.valid and
+                    cur.ts is not None and d.get("time") is not None and d["time"] < cur.ts):
+                # an older snapshot never replaces a newer valid book
+                return self.record(venue="txflow", channel=ch, market=coin, seq=d.get("seq"),
+                                   source_ts=st, status="stale", kind="snapshot")
             res = self.seq.setdefault(coin, SeqBook()).apply(d)
             return self.record(venue="txflow", channel=ch, market=coin, seq=d.get("seq"),
                                prev_seq=d.get("prevSeq"), kind=d.get("type"), source_ts=st,
@@ -297,6 +320,43 @@ class Books:
         return max(b["bids"]), min(b["asks"]), None
 
 
+# ----------------------------------------------------------------- heartbeat socket
+POLL_S = 1.0
+SILENT_S = 30.0
+
+
+def heartbeat_class():
+    """extended_rfq.WebSocket with recv_or_tick(): wait for the FIRST byte of the next
+    frame for at most the socket's poll timeout and return None if none came (the caller
+    then pings); once a frame has started it is read to the end. A wake-up therefore
+    never cuts a frame (extended_rfq's `cancelled` hook could, mid-frame)."""
+    import socket as _socket
+
+    from extended_rfq import WebSocket
+
+    class HeartbeatWebSocket(WebSocket):
+        def recv_or_tick(self):
+            self.check_owner()
+            if not self.buffer:
+                try:
+                    chunk = self.sock.recv(65536)
+                except _socket.timeout:
+                    if time.monotonic() - self.last_data >= self.silent_after:
+                        raise ConnectionError("WebSocket silent for %.0f s" % self.silent_after)
+                    return None
+                if not chunk:
+                    raise ConnectionError("WebSocket closed")
+                self.last_data = time.monotonic()
+                self.buffer += chunk
+            return self.recv()
+
+    return HeartbeatWebSocket
+
+
+def heartbeat_socket(url, poll=POLL_S, silent=SILENT_S):
+    return heartbeat_class()(url, timeout=silent, poll=poll)
+
+
 # ----------------------------------------------------------------- client
 class ReadOnlyWS:
     """One venue, several subscriptions. `connect(url)` returns an object with
@@ -318,9 +378,7 @@ class ReadOnlyWS:
             if not allow_live or (env.get(ENV) or "").strip() != "1":
                 raise LiveDisabled("live WebSocket needs %s=1 and allow_live=True (owner "
                                    "decision)" % ENV)
-            from extended_rfq import WebSocket
-
-            connect = WebSocket
+            connect = heartbeat_socket
         self.venue, self.subs, self.connect = venue, list(subscriptions), connect
         self.clock, self.sleep = clock, sleep
         self.backoff = backoff or Backoff(1.0, 60.0)
@@ -359,7 +417,16 @@ class ReadOnlyWS:
             if self.clock() - self.last_ping >= VENUES[self.venue]["ping_s"]:
                 self.send(VENUES[self.venue]["ping"])
                 self.last_ping = self.clock()
-            text = self.conn.recv()
+            # The read must not block past the next ping: a connection that only waits
+            # for data goes silent and the gateway closes it (TxFlow: ~16 s). recv_or_tick
+            # returns None when nothing arrived within the poll interval (frame boundary
+            # only, so no frame is ever cut).
+            if hasattr(self.conn, "recv_or_tick"):
+                text = self.conn.recv_or_tick()
+                if text is None:
+                    return dict(venue=self.venue, status="tick")
+            else:
+                text = self.conn.recv()
             if text is None:
                 raise ConnectionError("socket closed")
             self.stats["frames"] += 1
