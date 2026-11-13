@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 from v2 import paths, storage
+from v2 import funding_semantics as fs
 from v2.control import capability, doctor, model, telemetry
 
 SCHEMA = 1
@@ -218,10 +219,14 @@ def paper_positions(bench):
 
 def funding_persistence(bench):
     f = Path(bench) / "v2-paper-data" / "phase14-funding-persistence" / "report.json"
+    # Phase 15 P0: what each venue's funding field means (registry, no market data)
+    sem = fs.matrix()
     if not f.exists():
-        return dict(status="NOT_RUN", reason="run tools/v2_funding_persistence.py")
+        return dict(status="NOT_RUN", reason="run tools/v2_funding_persistence.py",
+                    semantics=sem)
     r = json.loads(f.read_text(encoding="utf-8"))
     return dict(status="OK", label=r.get("label"), snapshot_at=r.get("snapshot_at"),
+                semantics=sem,
                 by_venue=r.get("by_venue"),
                 long_history={k: dict(confidence=v["confidence"],
                                       metrics={x: v["metrics"].get(x) for x in (

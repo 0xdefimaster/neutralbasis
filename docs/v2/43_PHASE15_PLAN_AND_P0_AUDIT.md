@@ -140,3 +140,42 @@ UI smoke: 44 checks (10 views plus the NATGAS detail, at 360 / 390 / 768 / 1280 
 
 Owner decision, not taken here: whether the ESTIMATED entry rule should require a
 positive persistence-adjusted net. Today it is reported only; STRICT is unchanged.
+
+### P0-C: sign and unit verification
+
+**Tests (MOCK fixtures, end to end).** A positive published rate makes the LONG pay
+on every PAPER adapter: Arcus, RISEx, TxFlow (percent), Variational (per 4 h), tradeXYZ,
+HL native and Lighter RH (`direction`). Lighter's `short` gives a negative rate, and an
+unknown direction is dropped. A TxFlow percent value read as a fraction would invent a
+99x carry; the single unit path makes that impossible.
+
+**Recorded data** (`tools/v2_funding_semantics_check.py`, report in
+`v2-paper-data/phase15-funding-semantics/`, 0 network attempts).
+- Boundary convergence. tradeXYZ NATGAS: 0.0048 % from the 12:00 UTC settlement
+  (11 s before). HL native INIT: 0.25 % (10 s before). Both CONVERGE. TxFlow has no
+  settled history (48 distinct values in 62 samples).
+- Variational. `last` == `next` in 152 / 152 listings; the value changes about every
+  298 s; `next_timestamp` was in the past in 28 reads (max 285 s).
+- Cross-venue settled histories (05:12 snapshot: 66 assets on 2 or more venues, 102
+  venue pairs). 0 sign-inversion or scale suspicions.
+
+  | venue pair | pairs | median sign agreement | median abs. ratio |
+  |---|---|---|---|
+  | arcus / lighter_rh | 43 | 0.86 | 1.14 |
+  | arcus / tradexyz | 33 | 0.79 | 0.82 |
+  | lighter_rh / tradexyz | 26 | 0.93 | 0.64 |
+
+  This supports Lighter's engine-convention sign and its percent unit, but does not
+  verify them. RISEx, TxFlow and Variational were not in the comparison (no settled
+  history in the snapshot).
+
+**Registry.** `sign_cross_check` was added to `v2/funding_semantics`. The Control
+Center funding view shows what each venue's field means. UI smoke: 44 checks, 0
+problems.
+
+**What only external evidence can settle.**
+- The TxFlow and Variational payment rate needs account payments (an authorized
+  address) or the venue's formula documentation.
+- The Arcus and RISEx current-rate semantics need an intra-period recording, which
+  is in the live test plan.
+- Lighter's `direction` needs the docs or an account payment.

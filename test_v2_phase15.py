@@ -303,5 +303,99 @@ class ModelReportingTests(unittest.TestCase):
         self.assertEqual(r["baseline_only_positive"], 1)
 
 
+class SignAndUnitTests(unittest.TestCase):
+    """P0-C: a POSITIVE published rate must make the LONG pay on every adapter, end to
+    end (adapter -> contract observation -> leg cash flow). Fixtures are MOCK answers
+    shaped like the venues' documented / observed public answers (test_v2_phase3)."""
+
+    def assert_long_pays(self, xid, rec_or_funding, per_hour):
+        f = rec_or_funding.get("funding", rec_or_funding)
+        o = fs.observation(xid, "m", f, observed_at=T0)
+        self.assertAlmostEqual(o["rate_per_hour"], per_hour, places=12)
+        self.assertEqual(o["positive_pays"], "long")
+        self.assertLess(fe.leg_cashflow("long", o["rate_per_hour"]), 0)
+        self.assertGreater(fe.leg_cashflow("short", o["rate_per_hour"]), 0)
+
+    def test_every_paper_adapter_positive_means_long_pays(self):
+        from v2.venues import arcus, hyperliquid_obs, lighter_rh, risex, tradexyz, txflow,             variational
+        a = arcus.parse_markets({"markets": [{
+            "marketDisplayName": "BTC-USD", "baseAsset": "BTC", "category": "CRYPTO",
+            "type": "PERPETUAL", "status": "ONLINE", "markPrice": "70000",
+            "fundingRate": "0.0000125", "nextFundingAt": T0 + 3600}]})[0]
+        self.assert_long_pays("arcus", a, 1.25e-5)
+        r = risex.parse_markets({"data": {"markets": [{
+            "market_id": "1", "config": {"name": "BTC/USDC"}, "category": "crypto",
+            "mark_price": "70000", "current_funding_rate": "0.0000048",
+            "funding_interval": "3600000000000",
+            "next_funding_time": "%d" % int((T0 + 3600) * 1e9)}]}})[0]
+        self.assert_long_pays("risex", r, 4.8e-6)
+        meta = {"data": {"universe": [{"index": 1, "baseCurrency": "BTC"}]}}
+        ctxs = {"1": {"data": {"nodeCtx": {"funding": "0.00125", "markPx": "70000",
+                                           "prevFundingTime": T0 * 1000,
+                                           "nextFundingTime": (T0 + 3600) * 1000}}}}
+        x = txflow.parse_markets(meta, None, ctxs)[0]
+        self.assert_long_pays("txflow", x, 1.25e-5)          # percent -> fraction once
+        v = variational.parse_markets({"listings": [{
+            "ticker": "NATGAS-PERP", "contract_type": "perpetual", "mark_price": "3",
+            "funding": {"last": {"interval_rate": "0.00288"}, "interval_seconds": 14400,
+                        "next_timestamp": T0 + 14400}}]})[0]
+        self.assert_long_pays("variational", v, 0.00072)     # per 4 h -> per hour
+        ans = [{"universe": [{"name": "xyz:NATGAS"}]}, [{"funding": "0.000736",
+                                                          "markPx": "3"}]]
+        self.assert_long_pays("tradexyz", tradexyz.parse_markets(ans)[0], 7.36e-4)
+        nat = [{"universe": [{"name": "INIT"}]}, [{"funding": "0.0000125", "markPx": "1"}]]
+        self.assert_long_pays("hyperliquid_native",
+                              hyperliquid_obs.parse_markets("hyperliquid_native", nat)[0],
+                              1.25e-5)
+        rows = lighter_rh.parse_fundings({"fundings": [
+            {"timestamp": T0, "rate": "0.0012", "direction": "long"}]})
+        self.assert_long_pays("lighter_rh", lighter_rh.current_funding(rows), 1.2e-5)
+
+    def test_lighter_short_direction_is_negative(self):
+        from v2.venues import lighter_rh
+        rows = lighter_rh.parse_fundings({"fundings": [
+            {"timestamp": T0, "rate": "0.0030", "direction": "short"},
+            {"timestamp": T0 + 3600, "rate": "0.0030", "direction": "sideways"}]})
+        self.assertEqual(len(rows), 1)                        # unknown direction dropped
+        self.assertAlmostEqual(rows[0]["rate"], -3e-5)
+
+    def test_unit_mistake_would_be_a_fake_carry_and_cannot_happen(self):
+        """MOCK: TxFlow 0.00125 % vs tradeXYZ 1.25e-5 fraction are the SAME rate; read
+        as a fraction the TxFlow value would invent a 99x carry."""
+        tx = fs.observation("txflow", "1", dict(raw=0.00125, unit="percent",
+                                                interval_s=3600), observed_at=T0)
+        xy = fs.observation("tradexyz", "xyz:X", dict(raw=1.25e-5, unit="fraction",
+                                                      interval_s=3600), observed_at=T0)
+        self.assertAlmostEqual(fe.pair_carry(tx["rate_per_hour"], xy["rate_per_hour"]), 0.0)
+        wrong = fe.pair_carry(0.00125, 1.25e-5)              # the mistake, for scale
+        self.assertLess(wrong, -1e-3)
+
+    def test_cross_venue_check_flags_inversion_and_scale(self):
+        from tools import v2_funding_semantics_check as ck
+        base = {T0 + h * 3600.0: 1e-5 * (1 + (h % 7)) * (1 if h % 11 else -1)
+                for h in range(100)}                          # MOCK settled series
+        self.assertEqual(ck.compare(base, dict(base))["flags"], [])
+        inv = {t: -r for t, r in base.items()}
+        self.assertIn("SIGN_INVERSION_SUSPECT", ck.compare(base, inv)["flags"])
+        x100 = {t: r * 100 for t, r in base.items()}
+        self.assertIn("SCALE_SUSPECT", ck.compare(x100, base)["flags"])
+        self.assertIsNone(ck.compare(base, {T0: 1e-5}))      # too few common hours
+
+    @unittest.skipUnless(HAVE_STREAM, "saved artifacts absent")
+    def test_observed_boundary_convergence(self):
+        from tools import v2_funding_semantics_check as ck
+        from v2.control import netguard
+        with netguard.offline() as g:
+            rows = ck.boundary_convergence(paths.bench())
+            var = ck.variational_fields(paths.bench())
+        self.assertEqual(len(g), 0)
+        verdict = {r["venue"]: r["verdict"] for r in rows}
+        self.assertEqual(verdict.get("tradexyz"), "CONVERGES")
+        self.assertEqual(verdict.get("hyperliquid_native"), "CONVERGES")
+        self.assertEqual(verdict.get("txflow"), "NO_SETTLED_HISTORY")
+        self.assertEqual(var["last_ne_next"], 0)
+        self.assertGreater(var["next_timestamp_past_reads"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

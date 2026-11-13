@@ -149,13 +149,24 @@ VENUES = {
         formula=EV_UNKNOWN,
         settled="markets/id/{id}/funding-rate-history", account="UNVERIFIED (no address)"),
 }
+# Cross-venue consistency of SETTLED history (tools/v2_funding_semantics_check.py,
+# 05:12 snapshot 2026-11-12, 7-day histories, 66 assets on >= 2 venues, 102 venue
+# pairs): no sign-inversion or scale suspicion. Median sign agreement / median |a|/|b|:
+# arcus-lighter_rh 0.86 / 1.14, arcus-tradexyz 0.79 / 0.82, lighter_rh-tradexyz
+# 0.93 / 0.64. Supports (does not verify) Lighter's engine-convention sign and percent
+# unit. OBSERVED evidence; the sign itself stays at its documented level.
+_CROSS = "CONSISTENT: 0 of 102 venue pairs flagged (snapshot 2026-11-12 02:12 UTC)"
+for _x in VENUES:
+    VENUES[_x]["sign_cross_check"] = (_CROSS if _x in ("arcus", "lighter_rh", "tradexyz")
+                                      else "NOT_CHECKED (no settled history in the snapshot)")
 for _x in ("popdex_perps", "veranta", "phoenix_perps", "qfex"):
     VENUES[_x] = dict(
         published=dict(field=None, unit=None, period_basis=None, rate_kind=UNKNOWN,
                        rate_kind_evidence=EV_UNKNOWN, rate_kind_ref="no verified public API"),
         interval_s=None, interval_evidence=EV_UNKNOWN, interval_ref=None,
         next_payment="UNKNOWN", positive_pays=None, sign_evidence=EV_UNKNOWN,
-        sign_ref=None, price_basis=None, formula=EV_UNKNOWN, settled=None, account=None)
+        sign_ref=None, price_basis=None, formula=EV_UNKNOWN, settled=None, account=None,
+        sign_cross_check="NOT_CHECKED (no public data)")
 
 
 def venue(exchange_id):
@@ -295,7 +306,8 @@ def matrix():
                         payment_relation_known=payment_relation_known(xid),
                         interval_s=v["interval_s"], interval_evidence=v["interval_evidence"],
                         next_payment=v["next_payment"], positive_pays=v["positive_pays"],
-                        sign_evidence=v["sign_evidence"], price_basis=v["price_basis"],
+                        sign_evidence=v["sign_evidence"],
+                        sign_cross_check=v.get("sign_cross_check"), price_basis=v["price_basis"],
                         formula=v["formula"], settled_history=v["settled"],
                         account_payments=v["account"]))
     return out

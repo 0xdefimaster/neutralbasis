@@ -402,6 +402,24 @@ async function vFunding() {
   const d = await api("/api/funding/persistence");
   const out = el("div");
   add(out, el("h1", "h1", "Funding persistence"), note(d.label || d.reason || ""));
+  if (d.semantics && d.semantics.length) {
+    // Phase 15 P0: a published rate is valid for its current period only
+    const KIND = { CURRENT_PERIOD_RUNNING_CONVERGES: "running, ends at payment",
+      CURRENT_PERIOD_RUNNING_PAYMENT_UNKNOWN: "running, payment UNKNOWN",
+      LAST_SETTLED_PROJECTION: "last settlement reused",
+      PUBLISHED_SEMANTICS_UNVERIFIED: "UNVERIFIED", UNKNOWN: "UNKNOWN" };
+    const st = el("table", "tbl");
+    add(st, add(el("thead"), add(el("tr"), el("th", null, "venue"), el("th", null, "published value"), el("th", "hidden sm:table-cell", "sign"), el("th", "hidden sm:table-cell", "settled history"))));
+    const sb = el("tbody");
+    for (const r of d.semantics) {
+      add(sb, add(el("tr"), el("td", "text-xs", r.exchange_id),
+        add(el("td", "text-xs"), el("span", null, (KIND[r.rate_kind] || "UNKNOWN") + " (" + (r.rate_kind_evidence || "UNKNOWN") + ")")),
+        el("td", "hidden text-xs sm:table-cell", (r.positive_pays ? "+ = " + r.positive_pays + " pays" : "UNKNOWN") + " (" + (r.sign_evidence || "UNKNOWN") + ")"),
+        el("td", "hidden text-xs sm:table-cell", r.settled_history ? "yes" : "none")));
+    }
+    add(out, grid("mt-3", card("What each venue's funding field means", grid("overflow-x-auto", add(st, sb)),
+      note("A published value is valid for its current funding period only; later hours are models (ESTIMATED)."))));
+  }
   if (d.status !== "OK") return add(out, card(null, chip(d.status), note(d.reason || "")));
   const c = d.natgas_case || {};
   const ref = c.reference || {};
