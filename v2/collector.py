@@ -27,13 +27,13 @@ LEGACY_TO_ID = {"Lighter": "lighter_rh", "RISEx": "risex", "Arcus": "arcus",
 
 
 class Collector:
-    def __init__(self, transport=None, clock=time.time):
+    def __init__(self, transport=None, clock=time.time, mono=time.monotonic):
         # transport(exchange_id, method, url, body, headers) -> json
         self.transport = transport or (lambda x, m, u, b, h=None: base.http_json(x, m, u, b, h))
         # Only a live collector shares the process-wide Variational answer; a replay or
         # recording transport keeps its own (v2.venues.variational.stats).
         self.source = variational.LIVE if transport is None else "transport:%d" % id(transport)
-        self.clock = clock
+        self.clock, self.mono = clock, mono
         self.lock = threading.Lock()
         self.cache = {}
         self.records = {}
@@ -52,8 +52,34 @@ class Collector:
                 return hit[1]
         value = fetch()
         with self.lock:
-            self.cache[key] = (self.clock(), value)
+            self.cache[key] = (self.clock(), value, self.mono())
         return value
+
+    def fetched_at(self, key):
+        """(wall, monotonic) time `key` was fetched, or (None, None) (Phase 15 P1:
+        a cached answer keeps its own receive time; it is never re-stamped)."""
+        with self.lock:
+            hit = self.cache.get(key)
+        return (hit[0], hit[2]) if hit else (None, None)
+
+    def venue_received(self):
+        """{exchange_id: OLDEST fetch time of the answers its records come from}
+        (conservative: a row is as old as its oldest input)."""
+        with self.lock:
+            items = list(self.cache.items())
+        prefix = dict(tradexyz=("xyz:meta",), risex=("risex:markets",),
+                      arcus=("arcus:markets",), lighter_rh=("rh:markets", "rh:fund:"),
+                      txflow=("tx:ctx:",))
+        out = {}
+        for xid, pre in prefix.items():
+            ts = [v[0] for k, v in items if any(k == p or (p.endswith(":") and
+                                                           k.startswith(p)) for p in pre)]
+            if ts:
+                out[xid] = min(ts)
+        age = variational.stats_age(source=self.source)
+        if age is not None:
+            out["variational"] = self.clock() - age
+        return out
 
     def call(self, xid, req, headers=None):
         """One public read. With a `sink` (the recorder), every raw answer and every API
@@ -135,7 +161,8 @@ class Collector:
                 continue
         answers["lighter_rh"]["fundings"] = fundings
         records = source.catalog_from(answers)
-        rows, groups, reasons = source.build(records, registry, at=self.clock())
+        rows, groups, reasons = source.build(records, registry, at=self.clock(),
+                                             received=self.venue_received())
         with self.lock:
             self.records, self.rows, self.groups, self.reasons = records, rows, groups, reasons
             self.by_key = {(r["venue"], r["asset"]): r for r in rows}
@@ -169,6 +196,8 @@ class Collector:
                         if x["instrument"].market_id == mid), None)
             b = variational.quote_book(rec) if rec else base.book([], [])
             b["model"] = "rfq_indicative"
+            fetched = self.venue_received().get("variational")
+            mono = None
         else:
             req, parse = {
                 "lighter_rh": (lambda: lighter_rh.book_request(mid), lighter_rh.parse_book),
@@ -182,11 +211,17 @@ class Collector:
                                  source="tradexyz")),
             }[xid]
             headers = txflow.HEADERS if xid == "txflow" else None
-            raw = self.get("book:%s:%s" % (xid, mid), TTL["book"],
-                           lambda: self.call(xid, req(), headers))
+            key = "book:%s:%s" % (xid, mid)
+            raw = self.get(key, TTL["book"], lambda: self.call(xid, req(), headers))
             b = dict(parse(raw), model="orderbook")
+            fetched, mono = self.fetched_at(key)
         b = normalize.book(b, r.get("multiplier") or 1.0)
+        # `received` keeps its legacy meaning (read time; the STRICT BOOK_STALE gate uses
+        # it, unchanged). `answer_received` is the answer's own fetch time (P1): a
+        # cached book is up to TTL["book"] older than `received` says.
         b["received"] = self.clock()
+        b["answer_received"] = fetched
+        b["received_mono"] = mono
         b["audit_id"] = None
         return b
 

@@ -60,6 +60,13 @@ def stats(fetch=None, source=None):
     return _CACHE.get((STATS_URL, source), get)
 
 
+def stats_age(fetch=None, source=None):
+    """Seconds since the shared stats answer of this source was fetched, or None."""
+    if source is None:
+        source = LIVE if fetch is None else "fetch:%d" % id(fetch)
+    return _CACHE.age((STATS_URL, source))
+
+
 def stats_request():
     return ("GET", STATS_URL, None)
 

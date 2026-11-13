@@ -84,10 +84,15 @@ def per_hour(f):
     return raw / (f["interval_s"] / 3600.0)
 
 
-def build(records, registry=None, at=None):
+def build(records, registry=None, at=None, received=None):
     """(rows, groups, reasons): strategy rows, verified groups, and
-    {exchange_id: Counter(reason)} for every market (one reason each)."""
+    {exchange_id: Counter(reason)} for every market (one reason each).
+    `received` {exchange_id: fetch time of the answers the venue's records came from}
+    (Phase 15 P1) is carried as `answer_received` (None when unknown). The row's
+    `received` keeps its legacy meaning (the build time `at`), because the engines'
+    age gates read it; moving the gates to answer times is an owner decision."""
     at = time.time() if at is None else at
+    received = received or {}
     catalog = {x: [r["instrument"] for r in recs] for x, recs in records.items()}
     groups = discovery.intersect(catalog, registry)
     group_fine = {uid: fine_class(g["members"]) for uid, g in groups.items()
@@ -120,7 +125,8 @@ def build(records, registry=None, at=None):
                 asset=inst.base, venue=r["legacy_venue"], kind="perp",
                 mark=r.get("mark") or inst.price, index=r.get("index"),
                 rate=hourly, raw_rate=raw, interval=f["interval_s"], next=f.get("next_ts"),
-                received=at, fee=r["fee_taker"], leverage=None, price_type="mark",
+                received=at, answer_received=received.get(xid), fee=r["fee_taker"],
+                leverage=None, price_type="mark",
                 category="RWA" if inst.coarse == identity.RWA else None,
                 funding_kind=f.get("kind"), exchange_id=inst.exchange_id,
                 underlying_id=inst.underlying_id, market_id=inst.market_id,

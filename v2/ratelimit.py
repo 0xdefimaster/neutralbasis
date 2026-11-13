@@ -116,3 +116,9 @@ class SharedCache:
                         self.items.pop(k, None)
                         self.key_locks.pop(k, None)
             return value, False
+
+    def age(self, key):
+        """Seconds since `key` was fetched (this cache's clock), or None."""
+        with self.lock:
+            hit = self.items.get(key)
+        return None if hit is None else self.clock() - hit[0]

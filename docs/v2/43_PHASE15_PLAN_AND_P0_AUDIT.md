@@ -179,3 +179,69 @@ problems.
 - The Arcus and RISEx current-rate semantics need an intra-period recording, which
   is in the live test plan.
 - Lighter's `direction` needs the docs or an account payment.
+
+### P1: multi-venue data contract v2
+
+`v2/control/contract.py` -> `md-contract/2`. This is backward-compatible: the 13 v1
+fields keep their meaning. Nine fields are added:
+
+- `schema_version`
+- `canonical_underlying_id`
+- `channel`
+- `monotonic_receive_ts`
+- `integrity`
+- `funding_evidence`
+- `quote_type`
+- `execution_model`
+- `multiplier`
+
+New functions:
+- `normalize_market` (adapter records with their funding evidence);
+- `normalize_book`;
+- `validate` (reports problems, never repairs);
+- `sequence_check` (duplicates, regressions, gaps as a SUSPICION only, out-of-order
+  source times);
+- `coverage`.
+
+Per-answer receive time:
+- The collector keeps each answer's own fetch time (wall clock and monotonic).
+- A cached book used to be re-stamped "now", so its age was understated by up to the
+  5 s cache TTL. Rows were stamped with the refresh time while their ctx answers can be
+  up to 60 s old.
+- The honest time is now carried as `answer_received` (for a row: the oldest input of
+  the venue) and in the contract's `received_ts`.
+- The legacy `received`, which the engines' age gates read (STRICT BOOK_STALE, the
+  legacy desk's 120 s funding age), is **unchanged**. Moving those gates to the answer
+  time would make them stricter, so it is an owner decision.
+- WS records carry `recv_mono`.
+
+**Audit** (`tools/v2_contract_audit.py`, `v2-paper-data/phase15-contract-audit/`,
+0 network attempts):
+- 1195 snapshot markets mapped and validated: 0 problems.
+- 630 Phase 8 stream answers: 0 problems. Receive-minus-source is positive everywhere
+  (median 0.35–0.52 s, minimum 0.10 s); this is apparent latency, clock unverified.
+  Variational had 14 failed answers (HTTP 429).
+- What each venue's funding row can say:
+
+  | venue | rate kind | funding rate known | underlying id |
+  |---|---|---|---|
+  | arcus | UNVERIFIED | 100 % | 85 % |
+  | lighter_rh | LAST_SETTLED | 82 % | 86 % |
+  | risex | UNVERIFIED | 100 % | 98 % |
+  | tradexyz | RUNNING_CONVERGES (next payment UNKNOWN in the answer) | 100 % | 57 % |
+  | txflow | RUNNING_PAYMENT_UNKNOWN | 97 % | 81 % |
+  | variational | RUNNING_PAYMENT_UNKNOWN | 97 % | 30 % |
+
+  The underlying id is set only for identity-verified markets.
+
+**Fake-signal guards:**
+- Identity refused 3 MULTIPLIER_UNKNOWN and 1 PRICE_MISMATCH market (Variational),
+  plus single-venue, conflict and inactive markets. None of them can become a row.
+- Over 194 verified multi-venue groups, the per-unit price max/min has a median of
+  1.0020 and a maximum of 1.0129; 0 groups exceed 1.5x.
+- MOCK tests: a 10x price gives PRICE_MISMATCH and no row; an unknown multiplier
+  ("5000X") gives MULTIPLIER_UNKNOWN; a percent rate read as a fraction would create
+  a 99x carry, and the contract path makes that impossible.
+
+The scanner output is byte-identical before and after P1 (replay clock), and STRICT
+is unchanged. The full suite is 1169 OK.

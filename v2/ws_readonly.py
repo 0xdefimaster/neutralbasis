@@ -167,6 +167,7 @@ class Books:
 
     def record(self, **r):
         r.setdefault("recv_ts", self.clock())
+        r.setdefault("recv_mono", time.monotonic())   # Phase 15 P1: interval-safe time
         st = r.get("source_ts")
         r["latency_s"] = None if st is None else r["recv_ts"] - st
         if r["latency_s"] is not None:

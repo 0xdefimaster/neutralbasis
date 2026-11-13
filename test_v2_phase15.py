@@ -397,5 +397,149 @@ class SignAndUnitTests(unittest.TestCase):
         self.assertGreater(var["next_timestamp_past_reads"], 0)
 
 
+class ContractV2Tests(unittest.TestCase):
+    """P1: the multi-venue data contract v2 (MOCK rows unless stated)."""
+
+    def setUp(self):
+        from v2.control import contract
+        self.c = contract
+
+    def test_every_normalizer_emits_the_full_v2_contract(self):
+        from v2.identity import Instrument
+        c = self.c
+        ws = c.normalize_ws(dict(venue="txflow", market="7", channel="l2BookDepth",
+                                 source_ts=T0, recv_ts=T0 + 0.2, recv_mono=55.0, seq=9,
+                                 prev_seq=8, kind="delta", status="ok"), "txflow",
+                            evidence="MOCK")
+        ans = c.normalize_answer("xyz_book_NATGAS", dict(
+            ok=True, xid="tradexyz", t1=T0 + 1,
+            data={"time": T0 * 1000, "levels": [[], []]}), evidence="MOCK")
+        rec = dict(instrument=Instrument("variational", "NATGAS-PERP", "NATGAS-PERP",
+                                         price=3.0, multiplier=1.0),
+                   funding=dict(raw=0.00288, unit="fraction", interval_s=14400.0,
+                                next_ts=T0 + 3600))
+        mk = c.normalize_market(rec, T0, evidence="MOCK")
+        bk = c.normalize_book(dict(bids=[(1, 1)], asks=[(2, 1)], ts=T0, received=T0 + 0.5,
+                                   received_mono=9.0, model="orderbook", source="arcus",
+                                   multiplier=1.0), "arcus", "BTC-USD", evidence="MOCK")
+        for row in (ws, ans, mk, bk):
+            self.assertEqual(set(row), set(c.FIELDS))
+            self.assertEqual(row["schema_version"], c.SCHEMA_VERSION)
+            self.assertEqual(c.validate(row), [], row)
+        self.assertEqual((ws["integrity"], ws["monotonic_receive_ts"]), ("OK", 55.0))
+        self.assertEqual(ans["integrity"], "NO_SEQUENCE")
+        self.assertEqual(mk["quote_type"], "RFQ_INDICATIVE")
+        self.assertEqual(mk["execution_model"], "RFQ_INDICATIVE_UNVERIFIED")
+        self.assertEqual(mk["funding_evidence"]["settlement_status"], "PROJECTED")
+        self.assertAlmostEqual(mk["funding_evidence"]["rate_per_hour"], 0.00072)
+
+    def test_validate_catches_contract_violations_without_repairing(self):
+        c = self.c
+        good = c.normalize_book(dict(bids=[(1, 1)], asks=[(2, 1)], ts=T0, received=T0 + 1,
+                                     model="orderbook"), "arcus", "BTC-USD", evidence="MOCK")
+        cases = {
+            "SOURCE_TS_UNIT_SUSPECT": dict(source_ts=T0 * 1000),          # ms kept as s
+            "SOURCE_AHEAD_OF_RECEIPT": dict(source_ts=T0 + 60),
+            "SOURCE_TIME_IMPLAUSIBLE": dict(source_ts=T0 - 3 * 86400),
+            "RECEIVE_TIME_MISSING": dict(received_ts=None),
+            "EVIDENCE_UNLABELLED": dict(evidence=None),
+            "EXECUTION_MODEL_MISMATCH": dict(quote_type="RFQ_INDICATIVE"),
+            "MULTIPLIER_INVALID": dict(multiplier=0.0),
+            "PROJECTION_NOT_LIMITED_TO_CURRENT_PERIOD": dict(funding_evidence=dict(
+                settlement_status="PROJECTED", valid_for="NEXT_24H")),
+        }
+        for code, change in cases.items():
+            bad = dict(good, **change)
+            self.assertIn(code, c.validate(bad), code)
+            self.assertEqual(bad, dict(good, **change))                 # never repaired
+        broken = dict(good)
+        broken.pop("integrity")
+        self.assertIn("MISSING_FIELD:integrity", c.validate(broken))
+
+    def test_sequence_check_reports_suspicion_not_loss(self):
+        c = self.c
+        rows = [dict(sequence=s, prev_sequence=p, source_ts=t) for s, p, t in (
+            (1, None, 1.0), (2, 1, 2.0), (2, 1, 2.0), (5, 4, 3.0), (4, 3, 2.5), (6, 5, 4.0))]
+        r = c.sequence_check(rows + [dict(sequence=None, source_ts=None)])
+        self.assertEqual(r["duplicates"], 1)
+        self.assertEqual(r["gaps_suspected"], 1)         # 2 -> 5: suspicion only
+        self.assertEqual(r["regressions"], 1)
+        self.assertEqual(r["out_of_order_source"], 1)
+        self.assertEqual(r["no_sequence"], 1)
+        self.assertNotIn("lost", r)
+
+    def test_fake_signals_from_scale_or_multiplier_never_become_rows(self):
+        """MOCK: a 10x price (wrong scale) and an unknown multiplier are refused by
+        identity, so no price gap or carry is ever computed from them."""
+        from v2 import source
+        from v2.identity import Instrument
+
+        def rec(xid, legacy, symbol, price):
+            return dict(instrument=Instrument(xid, symbol, symbol, asset_class="crypto",
+                                              price=price, class_source="mock"),
+                        legacy_venue=legacy, mark=price, index=None, fee_taker=0.0004,
+                        funding=dict(raw=0.00001, unit="fraction", interval_s=3600))
+
+        ok = {"arcus": [rec("arcus", "Arcus", "PEPE-USD", 0.000012)],
+              "txflow": [rec("txflow", "TxFlow", "1000PEPE", 0.012)],
+              "risex": [rec("risex", "RISEx", "PEPE-USD", 0.0000121)]}
+        rows, _, _ = source.build(ok, at=0.0)
+        self.assertEqual(len(rows), 3)
+        bad = {"arcus": [rec("arcus", "Arcus", "PEPE-USD", 0.000012)],
+               "risex": [rec("risex", "RISEx", "PEPE-USD", 0.0000121)],
+               "txflow": [rec("txflow", "TxFlow", "1000PEPE", 0.12)]}       # 10x off
+        rows, _, reasons = source.build(bad, at=0.0)
+        self.assertNotIn("TxFlow", {r["venue"] for r in rows})
+        self.assertIn("PRICE_MISMATCH", reasons["txflow"])
+        unk = {"arcus": [rec("arcus", "Arcus", "X-USD", 1.0)],
+               "risex": [rec("risex", "RISEx", "X-USD", 1.0)],
+               "txflow": [rec("txflow", "TxFlow", "5000X", 5000.0)]}         # no multiplier
+        rows, _, reasons = source.build(unk, at=0.0)
+        self.assertEqual({r["venue"] for r in rows}, {"Arcus", "RISEx"})
+        self.assertEqual(dict(reasons["txflow"]), {"MULTIPLIER_UNKNOWN": 1})
+
+    def test_collector_never_restamps_a_cached_answer(self):
+        """P1: a book served from the 5 s cache keeps its fetch time in
+        `answer_received`; rows carry the oldest fetch time of their venue's answers.
+        The legacy `received` that the gates read is unchanged (MOCK transport/clock)."""
+        from unittest import mock
+        from v2.collector import Collector
+        now = [1000.0]
+        col = Collector(transport=lambda *a, **k: {"x": 1}, clock=lambda: now[0],
+                        mono=lambda: now[0] - 900.0)
+        col.by_key = {("Arcus", "BTC"): dict(exchange_id="arcus", market_id="BTC-USD",
+                                             multiplier=1.0)}
+        with mock.patch("v2.venues.arcus.parse_book",
+                        return_value=dict(bids=[(1.0, 1.0)], asks=[(2.0, 1.0)])):
+            b1 = col.book("Arcus", "BTC")
+            now[0] = 1003.0                                   # within the 5 s TTL
+            b2 = col.book("Arcus", "BTC")
+        self.assertEqual(b1["answer_received"], 1000.0)
+        self.assertEqual(b2["answer_received"], 1000.0)       # the answer's own time
+        self.assertEqual(b2["received"], 1003.0)              # legacy gate input, unchanged
+        self.assertEqual(b2["received_mono"], 100.0)
+        from v2.control import contract
+        self.assertEqual(contract.normalize_book(b2, "arcus", "BTC-USD")["received_ts"],
+                         1000.0)                              # the contract is honest
+        col.cache["arcus:markets"] = (990.0, {}, 90.0)
+        col.cache["rh:markets"] = (995.0, {}, 95.0)
+        col.cache["rh:fund:1"] = (980.0, {}, 80.0)
+        vr = col.venue_received()
+        self.assertEqual((vr["arcus"], vr["lighter_rh"]), (990.0, 980.0))   # oldest
+
+    @unittest.skipUnless(HAVE_SNAPSHOT and HAVE_STREAM, "saved artifacts absent")
+    def test_observed_contract_audit_is_clean(self):
+        from tools import v2_contract_audit as ca
+        from v2.control import netguard
+        with netguard.offline() as g:
+            r = ca.build(paths.bench())
+        self.assertEqual(len(g), 0)
+        for xid, a in r["market_audit"].items():
+            self.assertEqual(a["problems"], {}, xid)
+        for xid, a in r["stream_audit"]["by_venue"].items():
+            self.assertEqual(a["problems"], {}, xid)
+        self.assertEqual(r["guards"]["unit_price_max_over_min"]["above_1_5x"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
