@@ -220,6 +220,52 @@ class QueryTests(ServerBase):
         self.assertEqual((st, b["status"], b["data_mode"]), (200, "NOT_BUILT", "UNKNOWN"))
 
 
+class StaticAssetTests(ServerBase):
+    ROOT = Path(__file__).resolve().parent
+
+    def test_static_routes_and_types(self):
+        for path, ctype in (("/", "text/html"), ("/app.js", "text/javascript"),
+                            ("/app.css", "text/css"), ("/icon.svg", "image/svg+xml"),
+                            ("/manifest.webmanifest", "application/manifest+json")):
+            st, h, d = self.req("GET", path)
+            self.assertEqual(st, 200, path)
+            self.assertTrue(h["Content-Type"].startswith(ctype), path)
+            self.assertGreater(len(d), 100, path)
+
+    def test_ui_code_is_csp_clean_and_text_only(self):
+        import re
+        js = (server.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        code = re.sub(r"/\*.*?\*/", "", js, flags=re.S)          # comments may name them
+        for bad in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
+                    "eval(", "new Function", "setTimeout(\"", "localStorage", "http://",
+                    "https://", "method: \"POST\"", "XMLHttpRequest", "WebSocket"):
+            self.assertTrue(bad not in code, "app.js uses %s" % bad)
+        self.assertEqual(re.findall(r"method:\s*\"([A-Z]+)\"", code), ["GET"])
+        html = (server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertNotIn("<script>", html)               # no inline script
+        self.assertNotIn("style=", html)                 # no inline style
+        self.assertNotIn("http", html.replace("http-equiv", ""))   # no external asset
+        self.assertNotIn("<form", html)
+        css = (server.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        self.assertNotIn("@import", css)
+        self.assertNotIn("url(http", css)
+
+    def test_build_tooling_pinned_and_not_committed(self):
+        ui = self.ROOT / "v2" / "control" / "ui"
+        pkg = json.loads((ui / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(pkg["devDependencies"], {"tailwindcss": "3.4.19"})
+        self.assertNotIn("dependencies", pkg)            # build-time only
+        lock = json.loads((ui / "package-lock.json").read_text(encoding="utf-8"))
+        self.assertEqual(lock["packages"]["node_modules/tailwindcss"]["version"], "3.4.19")
+        for name, p in lock["packages"].items():
+            if name:
+                self.assertTrue(p["resolved"].startswith("https://registry.npmjs.org/"), name)
+                self.assertTrue(p.get("integrity", "").startswith("sha512-"), name)
+        self.assertIn("ignore-scripts=true", (ui / ".npmrc").read_text(encoding="utf-8"))
+        self.assertIn("v2/control/ui/node_modules/",
+                      (self.ROOT / ".gitignore").read_text(encoding="utf-8"))
+
+
 class RedactionTests(unittest.TestCase):
     def test_redact_drops_secret_keys_and_local_paths(self):
         bench = r"C:\Users\someone\nb-benchmark"

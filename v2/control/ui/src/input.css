@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .chip { @apply inline-flex shrink-0 items-center whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-semibold uppercase leading-4 tracking-wide ring-1 ring-inset; }
+  .chip-paper { @apply bg-sky-950 text-sky-300 ring-sky-800; }
+  .chip-off { @apply bg-slate-900 text-slate-300 ring-slate-700; }
+  .chip-muted { @apply bg-slate-900 text-slate-400 ring-slate-700; }
+  .chip-ok { @apply bg-emerald-950 text-emerald-300 ring-emerald-800; }
+  .chip-warn { @apply bg-amber-950 text-amber-300 ring-amber-800; }
+  .chip-bad { @apply bg-rose-950 text-rose-300 ring-rose-800; }
+  .chip-hist { @apply bg-indigo-950 text-indigo-300 ring-indigo-800; }
+  .chip-unv { @apply bg-violet-950 text-violet-300 ring-violet-800; }
+  .chip-na { @apply bg-slate-900 text-slate-500 ring-slate-800; }
+  .card { @apply rounded-lg border border-slate-800 bg-slate-900/60 p-3 md:p-4; }
+  .card-title { @apply mb-2 flex items-center gap-2 text-sm font-semibold text-slate-100; }
+  .muted { @apply text-xs text-slate-400; }
+  .kv { @apply grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm; }
+  .kv dt { @apply min-w-0 break-words text-slate-400; }
+  .kv dd { @apply min-w-0 break-words text-right font-mono tabular-nums text-slate-200; }
+  .navlink { @apply rounded px-2 py-1.5 text-sm text-slate-300 hover:bg-slate-800 hover:text-white; }
+  .navlink.active { @apply bg-slate-800 font-semibold text-white; }
+  .tab { @apply flex min-h-[3.25rem] flex-col items-center justify-center gap-1 text-[11px] font-medium text-slate-400; }
+  .tab.active { @apply text-sky-300; }
+  .tab-dot { @apply h-1.5 w-1.5 rounded-full bg-transparent; }
+  .tab.active .tab-dot { @apply bg-sky-400; }
+  .h1 { @apply mb-3 text-lg font-semibold text-slate-100 md:text-xl; }
+  .btn { @apply inline-flex min-h-[2.5rem] items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-3 text-sm text-slate-200 hover:bg-slate-800 disabled:opacity-40; }
+  .sel { @apply min-h-[2.5rem] w-full rounded-md border border-slate-700 bg-slate-900 px-2 text-sm text-slate-200; }
+  .num { @apply font-mono tabular-nums; }
+  .unknown { @apply font-mono text-violet-300; }
+  .pos { @apply text-emerald-300; }
+  .neg { @apply text-rose-300; }
+  .tbl { @apply w-full border-collapse text-left text-sm; }
+  .tbl th { @apply border-b border-slate-800 px-2 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400; }
+  .tbl td { @apply border-b border-slate-800/60 px-2 py-1.5 align-top; }
+  .link { @apply text-sky-300 underline-offset-2 hover:underline; }
+}

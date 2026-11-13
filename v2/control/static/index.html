@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#0b1220">
+  <title>NeutralBasis Control</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-200 font-sans antialiased">
+  <header class="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/95 backdrop-blur">
+    <div class="mx-auto flex max-w-6xl items-center gap-2 px-3 py-2 md:px-6">
+      <a href="#/" class="mr-auto truncate text-base font-semibold tracking-tight text-slate-100">NeutralBasis</a>
+      <span class="chip chip-paper">PAPER</span>
+      <span class="chip chip-off" title="Live trading is disabled">LIVE OFF</span>
+      <span id="mode" class="chip chip-muted">…</span>
+    </div>
+    <div id="banner" class="hidden border-t border-amber-700/50 bg-amber-950/70 px-3 py-1.5 text-center text-xs font-medium text-amber-200 md:px-6"></div>
+  </header>
+
+  <div class="mx-auto flex max-w-6xl">
+    <nav id="sidenav" class="sticky top-14 hidden h-[calc(100vh-3.5rem)] w-52 shrink-0 flex-col gap-1 overflow-y-auto border-r border-slate-800 px-3 py-4 md:flex" aria-label="Sections">
+      <a class="navlink" data-view="home" href="#/">Overview</a>
+      <a class="navlink" data-view="venues" href="#/venues">Exchanges</a>
+      <a class="navlink" data-view="markets" href="#/markets">Markets</a>
+      <a class="navlink" data-view="opps" href="#/opps">Opportunities</a>
+      <a class="navlink" data-view="paper" href="#/paper">PAPER positions</a>
+      <a class="navlink" data-view="doctor" href="#/doctor">Doctor</a>
+      <a class="navlink" data-view="funding" href="#/funding">Funding persistence</a>
+      <a class="navlink" data-view="history" href="#/history">History</a>
+      <p class="mt-auto px-2 pt-6 text-[11px] leading-snug text-slate-500">Read-only panel. It cannot place orders, manage keys, start, pause or change anything.</p>
+    </nav>
+
+    <main id="view" class="min-w-0 flex-1 px-3 pb-28 pt-3 md:px-6 md:pb-10 md:pt-5" aria-live="polite"></main>
+  </div>
+
+  <nav id="bottomnav" class="fixed inset-x-0 bottom-0 z-20 grid grid-cols-5 border-t border-slate-800 bg-slate-950/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden" aria-label="Sections">
+    <a class="tab" data-view="home" href="#/"><span class="tab-dot"></span>Home</a>
+    <a class="tab" data-view="venues" href="#/venues"><span class="tab-dot"></span>Venues</a>
+    <a class="tab" data-view="opps" href="#/opps"><span class="tab-dot"></span>Opps</a>
+    <a class="tab" data-view="paper" href="#/paper"><span class="tab-dot"></span>Paper</a>
+    <a class="tab" data-view="doctor" href="#/doctor"><span class="tab-dot"></span>Doctor</a>
+  </nav>
+
+  <script src="app.js" defer></script>
+</body>
+</html>

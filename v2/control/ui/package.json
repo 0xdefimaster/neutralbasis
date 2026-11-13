@@ -1,0 +1,12 @@
+{
+  "name": "neutralbasis-control-ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Build-time only: compiles v2/control/static/app.css with Tailwind. Nothing here runs in the server.",
+  "scripts": {
+    "build": "tailwindcss -c tailwind.config.js -i src/input.css -o ../static/app.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.19"
+  }
+}

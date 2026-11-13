@@ -9,3 +9,6 @@ data-five-rh/
 !.env.example
 data-railway/
 phase1-evidence/
+
+# Control Center UI build tooling (Phase 14): dependencies are never committed
+v2/control/ui/node_modules/

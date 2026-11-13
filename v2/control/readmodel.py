@@ -342,7 +342,9 @@ def build(now=None, bench=None, out=None):
                                               for e in exchanges]) or None,
         venues=venue_problems,
         opportunities=dict(counts=summary["counts"], top=top[:5],
-                           snapshot_at=summary["snapshot_at"]),
+                           snapshot_at=summary["snapshot_at"],
+                           strict_eligible=(summary["execution_readiness"] or {}).get(
+                               "strict_paper_eligible")),
         paper_positions=dict(total=len(positions),
                              open=sum(1 for p in positions if p["state"] != "CLOSED"),
                              reliable=sum(1 for p in positions if p["valuation_reliable"])),
