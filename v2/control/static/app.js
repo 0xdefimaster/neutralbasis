@@ -27,6 +27,7 @@ const STATUS_CLASS = {
   ESTIMATED_RESEARCH_ONLY: "chip chip-warn", ESTIMATED_PAPER_CANDIDATE: "chip chip-warn",
   NOT_SAFE: "chip chip-bad", DISCONNECTED: "chip chip-bad", INTEGRITY_FAILURE: "chip chip-bad",
   NOT_RUNNING: "chip chip-bad", BLOCKED: "chip chip-bad", BLOCKED_ECONOMICS: "chip chip-bad",
+  FRESH: "chip chip-ok", NO_DATA: "chip chip-unv", DISABLED: "chip chip-na",
   HISTORICAL_ONLY: "chip chip-hist", HISTORICAL: "chip chip-hist", LIVE_OBSERVED: "chip chip-hist",
   UNVERIFIED: "chip chip-unv", UNKNOWN: "chip chip-unv", MOCK_TESTED: "chip chip-unv",
   NOT_SUPPORTED: "chip chip-na", UNSUPPORTED: "chip chip-na", NOT_TESTED: "chip chip-na",
@@ -248,6 +249,7 @@ async function vVenue(id) {
       el("td", "text-xs text-slate-400", isNum(v.as_of) ? age(nowS() - v.as_of) : "-")));
   }
   add(out, grid("mt-3", card("Capabilities", grid("overflow-x-auto", add(t, tb)))));
+  if (e.channels && e.channels.length) add(out, grid("mt-3", channelsCard(e.channels)));
   const pl = el("ul", "space-y-1.5 text-sm");
   for (const p of e.problems || []) add(pl, add(el("li", "flex flex-wrap items-start gap-1.5"), chip(p.status), el("span", "text-slate-300", p.dimension + " / " + (p.channel || "-") + ": " + p.reason)));
   if (!(e.problems || []).length) pl.appendChild(el("li", "muted", "No problem records."));
@@ -398,6 +400,27 @@ async function vDoctor() {
   }
   add(out, grid("mt-3", card("Strategy readiness", grid("overflow-x-auto", add(t, tb)), note(rd.note || ""))));
   return out;
+}
+
+function channelsCard(chs) {
+  // Phase 15 P3/P5: per channel source, cadence, last real change, stale, errors,
+  // evidence; POLICY_ONLY rows come from the scheduler plan (no producer running)
+  const t = el("table", "tbl");
+  add(t, add(el("thead"), add(el("tr"), el("th", null, "channel"), el("th", null, "source"),
+    el("th", "hidden sm:table-cell", "interval"), el("th", null, "status"),
+    el("th", "hidden sm:table-cell", "evidence"))));
+  const b = el("tbody");
+  for (const c of chs || []) {
+    const iv = isNum(c.policy_interval_s) ? c.policy_interval_s.toFixed(0) + " s" :
+      (c.mode === "WS" ? "push" : "-");
+    add(b, add(el("tr"), el("td", "text-xs", c.channel),
+      el("td", "text-xs", c.mode + (c.mode === "DISABLED" ? "" : " (" + (c.priority || "?") + ")")),
+      el("td", "hidden text-xs sm:table-cell num", iv),
+      add(el("td", "text-xs"), chip(c.status, c.why || "")),
+      el("td", "hidden text-xs sm:table-cell", c.evidence || "UNKNOWN")));
+  }
+  return card("Data channels", grid("overflow-x-auto", add(t, b)),
+    note("Source and cadence per channel. NOT_RUNNING: no producer heartbeat, policy shown only. A panel refresh never calls a venue."));
 }
 
 async function vFunding() {

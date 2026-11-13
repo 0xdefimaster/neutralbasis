@@ -276,6 +276,36 @@ def market_rows(opps, doctor_markets):
 
 
 # -------------------------------------------------------------------------- build
+def channel_views(matrix, now, folder=None):
+    """Phase 15 P3/P5: per venue, every data channel with its source / mode, policy
+    interval, last real data change, stale status, error rate and evidence. Observed
+    values come ONLY from a running producer's heartbeat (`channels`); without one the
+    policy is shown and the status is NOT_RUNNING (never invented). No venue call."""
+    from v2 import scheduler
+    observed = {}
+    folder = Path(folder) if folder else doctor.control_dir()
+    for f in sorted(folder.glob("heartbeat-*.json")):
+        try:
+            hb = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        age = now - float(hb.get("at", 0))
+        for c in hb.get("channels") or []:
+            observed[(c["exchange_id"], c["channel"], c.get("key", "*"))] = dict(
+                c, heartbeat=f.stem, heartbeat_age_s=age)
+    out = {}
+    for c in scheduler.Scheduler(matrix).snapshot(now):
+        k = (c["exchange_id"], c["channel"], c["key"])
+        o = observed.get(k)
+        if o is not None:
+            v = dict(o, data_source="OBSERVED")
+        else:
+            v = dict(c, status="DISABLED" if c["mode"] == "DISABLED" else "NOT_RUNNING",
+                     data_source="POLICY_ONLY")
+        out.setdefault(c["exchange_id"], []).append(v)
+    return out
+
+
 def build(now=None, bench=None, out=None):
     now = now or time.time()
     bench = Path(bench or paths.bench())
@@ -293,6 +323,7 @@ def build(now=None, bench=None, out=None):
     by_venue = {}
     for r in doc["records"]:
         by_venue.setdefault(r["exchange_id"], []).append(r)
+    chans = channel_views(doc["matrix"], now)
     exchanges = []
     for v, m in doc["matrix"].items():
         recs = by_venue.get(v, [])
@@ -309,7 +340,7 @@ def build(now=None, bench=None, out=None):
             last_verification_age_s=m["last_verification_age_s"],
             last_verification_current=m["last_verification_current"],
             capabilities=m["capabilities"], records=recs, problems=problems,
-            data_source="HISTORICAL"))
+            channels=chans.get(v, []), data_source="HISTORICAL"))
     doctor_markets = [r for r in doc["records"] if r.get("market_id") is not None]
     system_recs = by_venue.get("system", [])
 
