@@ -18,7 +18,7 @@ ESTIMATED `critical`, and `paper_obs`. RFQ legs are aged from the venue's quote
 | data | result |
 |---|---|
 | Rescued Phase 8 stream (90 cycles) and Phase 9 parallel probe (15 cycles), 315 books | Every book is fresh under both bases. Answer age p95 is 4.6 s at most and its maximum is 7.4 s. Source age is 0.5–1 s more than answer age. 0 LEGACY_FRESH_ANSWER_STALE. |
-| ESTIMATED replays (14 evaluation sets, 12,639 evaluations) | They measure from SOURCE time, else receive time. That is stricter than the answer basis, so their decisions do not change. 5 evaluations were blocked by time, all under that stricter basis already. |
+| ESTIMATED replays (14 evaluation sets, 9,639 evaluations) | They measure from SOURCE time, else receive time. That is stricter than the answer basis, so their decisions do not change. 5 evaluations were blocked by time, all under that stricter basis already. |
 | 05:12 scanner snapshot | NOT_MEASURABLE: the replay clock is constant, so read = fetch = evaluation. |
 | Live V2 collector path | No saved run exists, so only bounds can be given. A cache hit on a book is under 5 s old, and the STRICT limits are 10–30 s: a decision flips only if the gate runs more than limit − 5 s after the read. A funding row's honest age is below the meta TTL (60 s) plus refresh_every (60 s) = 120 s, which is exactly the legacy desk's entry limit. |
 

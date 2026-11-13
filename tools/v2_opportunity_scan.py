@@ -61,7 +61,26 @@ def models_report(disc):
                       net_unknown=sum(1 for v in nets if v is None))
     out["baseline_only_positive"] = sum(
         1 for x in rows if "BASELINE_ONLY_POSITIVE" in (x["funding_models"].get("flags") or []))
+    cls = [x.get("funding_class") for x in rows if x.get("funding_class")]
+    out["classes"] = {c: sum(1 for k in cls if c in k["classes"]) for c in (
+        "DISCOVERED", "BASELINE_POSITIVE", "PERSISTENCE_POSITIVE", "ADVERSE_POSITIVE",
+        "INSUFFICIENT_HISTORY")}
+    out["highest"] = dict(collections.Counter(str(k["highest"]) for k in cls))
+    out["profit_label"] = dict(collections.Counter(k["profit_label"] for k in cls))
+    out["paper_entry_readiness"] = dict(collections.Counter(k["paper_entry_readiness"]
+                                                            for k in cls))
     return out
+
+
+def funding_class(fm, edge, strict, label):
+    """Phase 15: classes of a funding / hybrid row (v2.funding_expectation.classify);
+    reporting only. None when the evaluator never reached the funding economics."""
+    if not fm or not fm.get("models"):
+        return None
+    from v2 import funding_expectation as fx
+    ready = ("STRICT_ELIGIBLE" if strict.get("eligible") else
+             "ESTIMATED_CANDIDATE" if label == "ESTIMATED_PAPER_CANDIDATE" else "NOT_READY")
+    return fx.classify(edge, fm.get("net"), fm.get("legs"), ready)
 
 
 def model_summary(fm):
@@ -191,7 +210,9 @@ def scan(r, size=1000.0, assets=None):
                         rejections=sorted(set(tr.get("canonical_codes") or []) |
                                           set(e.get("reasons") or [])),
                         risk_adjusted_score=score,
-                        funding_models=model_summary(e.get("funding_models"))))
+                        funding_models=model_summary(e.get("funding_models")),
+                        funding_class=funding_class(e.get("funding_models"), bool(edge),
+                                                    strict, lab)))
     return out, matched
 
 

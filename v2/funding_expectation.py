@@ -209,3 +209,49 @@ def model_nets(result, expected_net, expected_funding, realization=1.0):
             out[m] = expected_net - expected_funding + x["cash"] * min(1.0, max(0.0,
                                                                             realization))
     return out
+
+
+# -- Phase 15: funding opportunity classes (reporting only, never an entry gate) -------
+DISCOVERED = "DISCOVERED"
+BASELINE_POSITIVE = "BASELINE_POSITIVE"
+PERSISTENCE_POSITIVE = "PERSISTENCE_POSITIVE"
+ADVERSE_POSITIVE = "ADVERSE_POSITIVE"
+INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+CLASSES = (DISCOVERED, BASELINE_POSITIVE, PERSISTENCE_POSITIVE, ADVERSE_POSITIVE,
+           INSUFFICIENT_HISTORY)
+
+
+def classify(edge_positive, nets, legs=None, readiness=None):
+    """Classes of one funding opportunity (cumulative; nets after costs, ESTIMATED):
+      DISCOVERED            a funding (or price) edge was observed
+      BASELINE_POSITIVE     net > 0 with the published rate held (comparison model)
+      PERSISTENCE_POSITIVE  net > 0 under the persistence-adjusted model
+      ADVERSE_POSITIVE      net > 0 under the adverse model
+      INSUFFICIENT_HISTORY  persistence or adverse could not be evaluated (UNKNOWN)
+    `highest` is the strongest positive class reached. `profit_label` is never
+    VERIFIED: ESTIMATED when both legs have public settled history, else
+    ESTIMATED_SETTLEMENT_UNVERIFIED (a TxFlow or Variational leg). PAPER_ENTRY_READINESS is a separate, external judgement (`readiness`:
+    STRICT_ELIGIBLE / ESTIMATED_CANDIDATE / NOT_READY), passed through unchanged."""
+    nets = nets or {}
+    tiers = [DISCOVERED] if edge_positive else []
+    highest = DISCOVERED if edge_positive else None
+    for name, cls in (("baseline", BASELINE_POSITIVE), ("persistence", PERSISTENCE_POSITIVE),
+                      ("adverse", ADVERSE_POSITIVE)):
+        v = nets.get(name)
+        if v is not None and v > 0:
+            tiers.append(cls)
+            highest = cls
+    insufficient = nets.get("persistence") is None or nets.get("adverse") is None
+    if insufficient:
+        tiers.append(INSUFFICIENT_HISTORY)
+    legs = legs or {}
+    # both legs have PUBLIC SETTLED history (a fit was attempted on it); a leg priced
+    # from published values only (TxFlow, Variational) leaves the profit unverified
+    settled_ok = bool(legs) and all(l.get("fit_status") not in (None, "NO_HISTORY")
+                                    for l in legs.values())
+    return dict(classes=tiers, highest=highest, insufficient_history=insufficient,
+                profit_label="ESTIMATED" if settled_ok else "ESTIMATED_SETTLEMENT_UNVERIFIED",
+                paper_entry_readiness=readiness or "NOT_EVALUATED",
+                why_unknown=None if not insufficient else
+                "a leg has no settled history and no recorded published samples"
+                if not settled_ok else "settled history shorter than the fit needs")

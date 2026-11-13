@@ -141,6 +141,7 @@ def opportunity(row, idx):
         flags=flags(row), data_source="HISTORICAL",
         # Phase 15 P0-B: baseline / persistence / adverse, ESTIMATED; None = UNKNOWN
         funding_models=row.get("funding_models"),
+        funding_class=row.get("funding_class"),
         # never "SAFE": no verified execution exists; a positive expected net with a
         # negative or unknown stress net is explicitly NOT_SAFE
         safety="NOT_SAFE" if (row.get("expected_net") or 0) > 0 and (

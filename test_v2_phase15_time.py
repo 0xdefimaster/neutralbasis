@@ -142,5 +142,42 @@ class CollectorSwitchTests(unittest.TestCase):
         self.assertEqual(out["funding_answer_received"], 5.0)
 
 
+class FundingClassTests(unittest.TestCase):
+    """Phase 15 §3: classes are reported, never an entry gate (MOCK nets)."""
+
+    def test_classes_are_cumulative_and_unknown_is_insufficient(self):
+        from v2 import funding_expectation as fx
+        legs_pub = {"long": dict(fit_status="NO_HISTORY"), "short": dict(fit_status="OK")}
+        legs_set = {"long": dict(fit_status="OK"), "short": dict(fit_status="OK")}
+        c = fx.classify(True, dict(baseline=5.0, persistence=None, adverse=None), legs_pub)
+        self.assertEqual(c["classes"], ["DISCOVERED", "BASELINE_POSITIVE",
+                                        "INSUFFICIENT_HISTORY"])
+        self.assertEqual(c["profit_label"], "ESTIMATED_SETTLEMENT_UNVERIFIED")
+        c = fx.classify(True, dict(baseline=5.0, persistence=2.0, adverse=0.5), legs_set,
+                        "NOT_READY")
+        self.assertEqual(c["highest"], "ADVERSE_POSITIVE")
+        self.assertEqual(c["profit_label"], "ESTIMATED")               # never VERIFIED
+        self.assertEqual(c["paper_entry_readiness"], "NOT_READY")      # passed through
+        c = fx.classify(False, dict(baseline=-1.0, persistence=-2.0, adverse=-3.0), legs_set)
+        self.assertEqual((c["classes"], c["highest"]), ([], None))
+        for label in ("VERIFIED", "CONFIRMED"):
+            self.assertNotIn(label, json_dump(c))
+
+    def test_estimated_decisions_do_not_use_the_classes(self):
+        """The ESTIMATED evaluator's decision code never reads a class (reporting
+        only): its source has no reference to classify / funding_class."""
+        import inspect
+        from v2 import estimated, gates as g
+        for mod in (estimated, g):
+            src = inspect.getsource(mod)
+            for needle in ("fx.classify(", "funding_expectation.classify(", "funding_class"):
+                self.assertFalse(needle in src, "%s uses %s" % (mod.__name__, needle))
+
+
+def json_dump(x):
+    import json
+    return json.dumps(x)
+
+
 if __name__ == "__main__":
     unittest.main()

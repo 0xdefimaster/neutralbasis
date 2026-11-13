@@ -147,7 +147,9 @@ function oppCard(o, compact) {
       add(c, grid("mt-1", kv([["baseline net", usd(fm.net.baseline, "UNKNOWN")],
                               ["persistence net", usd(fm.net.persistence, "UNKNOWN: no settled history")],
                               ["adverse net", usd(fm.net.adverse, "UNKNOWN: no settled history")],
-                              ["model confidence", fm.confidence || "UNKNOWN"]])));
+                              ["model confidence", fm.confidence || "UNKNOWN"],
+                              ["class", (o.funding_class && o.funding_class.highest) || "UNKNOWN"],
+                              ["profit label", (o.funding_class && o.funding_class.profit_label) || "UNKNOWN"]])));
     }
   } else {
     add(c, el("p", "muted mt-2", "rejected: " + (o.estimated_first_rejection || o.strict_first_rejection || "-")));
