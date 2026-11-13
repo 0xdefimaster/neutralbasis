@@ -33,10 +33,16 @@ def num(x):
     return v if v == v and v not in (float("inf"), float("-inf")) else None
 
 
-def http_json(exchange_id, method, url, body=None, headers=None, timeout=20, tries=3):
+def http_json(exchange_id, method, url, body=None, headers=None, timeout=20, tries=3,
+              priority="HIGH"):
     """One public read through the venue's shared budget. A 429 pauses the venue for
     the time it asks (JSON retry_after_seconds / retryAfterMs or Retry-After) and is
-    retried at most `tries` times in total."""
+    retried at most `tries` times in total. With NB_V2_SHARED_BUDGET=1 the budget is
+    shared between processes (v2.ratecoord); otherwise per process (unchanged)."""
+    from v2 import ratecoord
+    if ratecoord.enabled():
+        return _http_json_shared(exchange_id, method, url, body, headers, timeout, tries,
+                                 priority)
     b = ratelimit.budget(exchange_id)
     data = json.dumps(body).encode() if body is not None else None
     h = dict(UA, **(headers or {}))
@@ -54,6 +60,43 @@ def http_json(exchange_id, method, url, body=None, headers=None, timeout=20, tri
                 raise
             last = ex
             b.rate_limited(retry_after_of(ex))
+    raise RateLimited("%s: HTTP 429 after %d tries (%s)" % (exchange_id, tries, last))
+
+
+def _open(method, url, data, h, timeout):
+    req = urllib.request.Request(url, data=data, method=method, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read(60_000_000))
+
+
+def _http_json_shared(exchange_id, method, url, body, headers, timeout, tries, priority):
+    """http_json through the cross-process coordinator: one budget per venue scope for
+    every process; 429 / 5xx / timeouts feed the shared breaker and pause."""
+    from v2 import ratecoord
+    coord = ratecoord.shared()
+    scope = ratecoord.scope_id(ratelimit.SHARED.get(exchange_id, exchange_id))
+    data = json.dumps(body).encode() if body is not None else None
+    h = dict(UA, **(headers or {}))
+    if data is not None:
+        h["Content-Type"] = "application/json"
+    last = None
+    for _ in range(tries):
+        lease = coord.acquire(scope, priority=priority, timeout=max(60.0, timeout * 3))
+        ok, status, ra = False, None, None
+        try:
+            out = _open(method, url, data, h, timeout)
+            ok = True
+            return out
+        except urllib.error.HTTPError as ex:
+            status = ex.code
+            if ex.code != 429:
+                raise
+            last, ra = ex, num(retry_after_of(ex))
+        except (urllib.error.URLError, TimeoutError, OSError):
+            status = "timeout"
+            raise
+        finally:
+            coord.release(scope, lease, ok=ok, status=status, retry_after=ra)
     raise RateLimited("%s: HTTP 429 after %d tries (%s)" % (exchange_id, tries, last))
 
 

@@ -250,6 +250,43 @@ def ingest_health(now, folder=None):
     return out
 
 
+def rate_budget(now, folder=None):
+    """Phase 15 P2: the cross-process rate budget per scope (read from its state files;
+    no venue call). The share of the venue quota used by OTHER clients on the same
+    public IP is always UNKNOWN and said so."""
+    from v2 import ratecoord, ratelimit
+    folder = Path(folder) if folder else control_dir() / "ratecoord"
+    on = ratecoord.enabled()
+    if not folder.exists():
+        return [model.record("system", "connectivity", "NOT_TESTED",
+                             "shared rate budget %s; no state yet (no request made through "
+                             "it). External clients on the same IP: UNKNOWN" % (
+                                 "ENABLED" if on else "OFF (NB_V2_SHARED_BUDGET=0: "
+                                 "per-process budgets)"), channel="rate_budget")]
+    coord = ratecoord.Coordinator.__new__(ratecoord.Coordinator)
+    coord.folder, coord.limits = folder, dict(ratelimit.BUDGETS)
+    out = []
+    for scope, x in coord.snapshot().items():
+        if x.get("status") == "UNREADABLE":
+            out.append(model.record("system", "connectivity", "UNVERIFIED",
+                                    "%s: state unreadable" % scope, channel="rate:" + scope))
+            continue
+        c = x.get("counters") or {}
+        st = ("RATE_LIMITED" if x.get("breaker") == "OPEN" or (x.get("pause_until") or 0) > now
+              else "DEGRADED" if c.get("http_429") or c.get("lock_timeouts") or
+              c.get("state_resets") else "HEALTHY")
+        out.append(model.record(
+            "system", "connectivity", st,
+            "%s: tokens %.1f/%s per %ss, breaker %s, in flight %s, granted %s, 429 %s, "
+            "failures %s, breaker refusals %s, leases reaped %s, state resets %s; %s" % (
+                scope, x.get("tokens") or 0, x.get("limit"), x.get("window_s"),
+                x.get("breaker"), x.get("in_flight"), c.get("granted"), c.get("http_429"),
+                c.get("failures"), c.get("breaker_refusals"), c.get("leases_reaped"),
+                c.get("state_resets"), x.get("external_ip_share")),
+            channel="rate:" + scope, evidence_level="LOCAL_STATE", data_source="OBSERVED"))
+    return out
+
+
 def system(now):
     out = []
     out.append(model.record("system", "storage_recorder", "HEALTHY" if sys.version_info >= (3, 13)
@@ -285,6 +322,7 @@ def system(now):
     for name in ("recorder", "paper_engine", "control_server"):
         out.append(heartbeat_status(name, now))
     out += ingest_health(now)
+    out += rate_budget(now)
     out.append(clock_status())
     backup = Path(os.environ.get("NB_V2_BACKUP_DIR") or r"C:\Users\W10\nb-backup")
     files = [f for f in backup.rglob("*") if f.is_file()] if backup.exists() else []
