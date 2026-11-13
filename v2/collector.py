@@ -62,6 +62,21 @@ class Collector:
             hit = self.cache.get(key)
         return (hit[0], hit[2]) if hit else (None, None)
 
+    # cache keys behind one market's rate (forced re-read; never a venue-wide refetch
+    # for TxFlow, whose ctx answers are per market)
+    RATE_KEYS = dict(tradexyz=lambda m: ["xyz:meta"], risex=lambda m: ["risex:markets"],
+                     arcus=lambda m: ["arcus:markets"],
+                     lighter_rh=lambda m: ["rh:markets", "rh:fund:" + str(m)],
+                     txflow=lambda m: ["tx:ctx:" + str(m)])
+
+    def invalidate_rate(self, xid, market_id):
+        """Drop the cached answers behind one market's funding rate, so the next refresh
+        really fetches them. Variational's shared stats answer (15 s TTL) is not
+        dropped. Returns the keys dropped."""
+        keys = self.RATE_KEYS.get(xid, lambda m: [])(market_id)
+        with self.lock:
+            return [k for k in keys if self.cache.pop(k, None) is not None]
+
     def venue_received(self):
         """{exchange_id: OLDEST fetch time of the answers its records come from}
         (conservative: a row is as old as its oldest input)."""
@@ -216,11 +231,13 @@ class Collector:
             b = dict(parse(raw), model="orderbook")
             fetched, mono = self.fetched_at(key)
         b = normalize.book(b, r.get("multiplier") or 1.0)
-        # `received` keeps its legacy meaning (read time; the STRICT BOOK_STALE gate uses
-        # it, unchanged). `answer_received` is the answer's own fetch time (P1): a
-        # cached book is up to TTL["book"] older than `received` says.
-        b["received"] = self.clock()
+        # `answer_received` is the answer's own fetch time (P1). `received` is what the
+        # gates read: the read time under the legacy basis (a cache hit looks up to
+        # TTL["book"] younger than it is), the fetch time under the answer basis
+        # (marketdata.TIME_BASIS; an unknown fetch time leaves it None -> stale).
+        from v2 import marketdata as _md
         b["answer_received"] = fetched
+        b["received"] = fetched if _md.TIME_BASIS == _md.ANSWER else self.clock()
         b["received_mono"] = mono
         b["audit_id"] = None
         return b

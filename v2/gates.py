@@ -128,11 +128,19 @@ class Gate:
                  for side, leg in (("long", long), ("short", short))
                  if leg.book is not None and marketdata.stale(
                      leg.book, leg.row.get("exchange_id"), at)]
+        # Phase 15 SHADOW: the same check under every time basis; reported only, the
+        # decision above is unchanged (docs/v2/45)
+        shadow = [dict(side=side, venue=leg.row.get("exchange_id"),
+                       **marketdata.stale_views(leg.book, leg.row.get("exchange_id"), at))
+                  for side, leg in (("long", long), ("short", short))
+                  if leg.book is not None]
         if stale:
-            return dict(strategy=strategy, reasons=stale, eligible=False)
+            return dict(strategy=strategy, reasons=stale, eligible=False,
+                        time_shadow=shadow)
         size = self.size or self.cfg["wide_size"]
         ev = STRATEGIES[strategy].evaluate(long, short, size, self.cfg, at)
         ev["eligible"] = not ev["reasons"] and not ev.get("research_only")
+        ev["time_shadow"] = shadow
         return ev
 
     def __call__(self, c, out=None, at=None):

@@ -46,10 +46,49 @@ class Backoff:
         self.failures = 0
 
 
-def stale(book, venue, now):
-    if not book or book.get("received") is None:
-        return True
-    return now - book["received"] > MAX_AGE.get(venue, 15.0)
+# Phase 15: which time a book's age is measured from (docs/v2/45).
+#   legacy  `received`: when the book was READ (a collector cache hit is re-stamped at
+#           read time; up to TTL["book"] = 5 s younger than the data). Current gates.
+#   answer  `answer_received`: when the venue's answer was FETCHED (P1). A book that
+#           carries the key with value None has an UNKNOWN fetch time -> stale. A book
+#           without the key (WS / stream books) has no cache: `received` is its arrival.
+# The answer basis is never less strict than legacy (a fetch precedes its read).
+# Switching TIME_BASIS is an owner decision; until then `answer` runs as a SHADOW.
+LEGACY, ANSWER = "legacy", "answer"
+TIME_BASIS = LEGACY
+
+
+def book_time(book, basis=None):
+    basis = basis or TIME_BASIS
+    if not book:
+        return None
+    if basis == ANSWER and "answer_received" in book:
+        return book["answer_received"]
+    return book.get("received")
+
+
+def stale(book, venue, now, basis=None):
+    t = book_time(book, basis)
+    if t is None:
+        return True                      # UNKNOWN time is never fresh
+    return now - t > MAX_AGE.get(venue, 15.0)
+
+
+def stale_views(book, venue, now):
+    """SHADOW: the book's age under every time basis (no decision changes).
+    verdict: AGREE_FRESH / AGREE_STALE / LEGACY_FRESH_ANSWER_STALE (the legacy basis
+    calls fresh a book whose answer is too old) / ANSWER_TIME_UNKNOWN."""
+    lim = MAX_AGE.get(venue, 15.0)
+    lt, at = book_time(book, LEGACY), book_time(book, ANSWER)
+    src = (book or {}).get("ts")
+    ls, as_ = stale(book, venue, now, LEGACY), stale(book, venue, now, ANSWER)
+    verdict = ("ANSWER_TIME_UNKNOWN" if at is None and lt is not None else
+               "AGREE_STALE" if ls and as_ else "AGREE_FRESH" if not ls and not as_ else
+               "LEGACY_FRESH_ANSWER_STALE" if as_ else "ANSWER_FRESH_LEGACY_STALE")
+    return dict(limit_s=lim, legacy_age_s=None if lt is None else now - lt,
+                answer_age_s=None if at is None else now - at,
+                source_age_s=None if src is None else now - src,
+                legacy_stale=ls, answer_stale=as_, verdict=verdict)
 
 
 class SeqBook:

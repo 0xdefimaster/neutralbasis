@@ -44,12 +44,22 @@ class V2EngineSource:
 
     def current_funding(self, v, a):
         # Rows are rebuilt at most every `refresh_every` s (< ENTRY_FUNDING_MAX_AGE).
+        # Under the answer time basis (Phase 15) this is a REAL re-read: the cached
+        # answers behind the market's rate are dropped first; under the legacy basis a
+        # refresh inside the cache TTL serves the same answer re-stamped (docs/v2/45).
+        from v2 import marketdata
+        if marketdata.TIME_BASIS == marketdata.ANSWER:
+            r0 = self.collector.row(v, a)
+            self.collector.invalidate_rate(r0["exchange_id"], r0["market_id"])
+            self.last = -1e18
         if self.clock() - self.last >= self.refresh_every:
             self.market_rows()
         r = self.collector.row(v, a)
         return dict(raw_rate=r["raw_rate"], rate=r["rate"], interval=r["interval"],
                     next=r["next"], funding_kind=r.get("funding_kind"),
-                    funding_received=r["received"])
+                    funding_received=r["received"],
+                    # Phase 15 SHADOW: the fetch time of the rate's answer (P1)
+                    funding_answer_received=r.get("answer_received"))
 
     def funding(self, v, a, start):
         rows = self.collector.settled(v, a) or []

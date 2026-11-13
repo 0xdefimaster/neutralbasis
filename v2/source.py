@@ -84,6 +84,16 @@ def per_hour(f):
     return raw / (f["interval_s"] / 3600.0)
 
 
+def row_time(at, fetched):
+    """What the gates read as a row's `received`: the build time under the legacy
+    basis, the fetch time under the answer basis (marketdata.TIME_BASIS; a venue
+    without a recorded fetch time keeps `at`, its answer_received stays None)."""
+    from v2 import marketdata
+    if marketdata.TIME_BASIS == marketdata.ANSWER and fetched is not None:
+        return fetched
+    return at
+
+
 def build(records, registry=None, at=None, received=None):
     """(rows, groups, reasons): strategy rows, verified groups, and
     {exchange_id: Counter(reason)} for every market (one reason each).
@@ -125,7 +135,8 @@ def build(records, registry=None, at=None, received=None):
                 asset=inst.base, venue=r["legacy_venue"], kind="perp",
                 mark=r.get("mark") or inst.price, index=r.get("index"),
                 rate=hourly, raw_rate=raw, interval=f["interval_s"], next=f.get("next_ts"),
-                received=at, answer_received=received.get(xid), fee=r["fee_taker"],
+                received=row_time(at, received.get(xid)),
+                answer_received=received.get(xid), fee=r["fee_taker"],
                 leverage=None, price_type="mark",
                 category="RWA" if inst.coarse == identity.RWA else None,
                 funding_kind=f.get("kind"), exchange_id=inst.exchange_id,
