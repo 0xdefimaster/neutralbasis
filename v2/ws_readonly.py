@@ -47,6 +47,7 @@ import re
 import time
 
 from v2 import observation
+from v2 import bounded
 from v2.marketdata import Backoff, SeqBook
 
 ENV = "NB_V2_READONLY_WS"
@@ -145,22 +146,44 @@ def check_frame(venue, obj, environ=None):
 class Books:
     """Per (venue, market) book state from WS frames; never merges an old frame."""
 
-    def __init__(self, clock=time.time, on_record=None):
+    # Phase 15 P4: METRIC containers are bounded (LRU, active markets protected);
+    # STATE (seq / snap / lighter / ctx) is never evicted by size, only by drop_market.
+    MAX_METRIC_MARKETS = 2000
+    MAX_TOTAL_KEYS = 20000
+    MAX_SAMPLE_KEYS = 200
+    MAX_ALIASES = 5000
+    # Hard guard on NEW state (books / ctx per venue): beyond it a frame for an unknown
+    # market is recorded as "state_limit" and creates no state. Existing state is never
+    # removed to make room (a live sequence chain must not be broken by a size policy).
+    MAX_STATE_MARKETS = 5000
+    DEDUPE_GENERATION = 100000
+    EVICTED = "__evicted__"
+
+    def __init__(self, clock=time.time, on_record=None, max_metric_markets=None,
+                 max_total_keys=None):
         self.clock = clock
         # optional telemetry hook (v2.control.telemetry.books_hook): on_record(venue, r)
         self.on_record = on_record
-        self.seq = {}            # txflow SeqBook per coin
-        self.snap = {}           # hyperliquid: (coin) -> dict(time, bids, asks)
-        self.lighter = {}        # lighter_rh: market -> dict(nonce, bids, asks, raw_ts)
-        self.seen = set()        # (venue, channel, market, source time / seq) for dedupe
+        self.seq = {}            # STATE txflow SeqBook per coin
+        self.snap = {}           # STATE hyperliquid: (coin) -> dict(time, bids, asks)
+        self.lighter = {}        # STATE lighter_rh: market -> dict(nonce, bids, asks)
+        self.ctx = {}            # STATE last activeAssetCtx per (venue, coin)
+        # dedupe keys in two generations: a rotation keeps the newest generation, so a
+        # duplicate right after a rotation is still caught (was: clear all at 200k)
+        self.seen, self.seen_old, self.seen_rotations = set(), set(), 0
         self.records = []        # the last 5000 records (bounded)
-        self.ctx = {}
-        # Totals that never shrink (the bounded record list must not hide the first
-        # snapshot or an early error): per (venue, channel, market, status, kind).
-        self.totals = {}
-        self.per_market = {}     # market -> dict(last_recv, gaps [..], lat [..]) bounded
-        self.samples = {}        # (venue, channel) -> first raw frames (truncated)
-        self.aliases = {}        # txflow book id -> coin field seen
+        # Totals per (venue, channel, market, status, kind). Bounded: an evicted
+        # market's counts are folded into market "__evicted__", so per-venue and
+        # per-channel totals never shrink (a per-market total of an evicted market does).
+        self.totals = bounded.LRUDict(max_total_keys or self.MAX_TOTAL_KEYS,
+                                      protect=self._total_protected,
+                                      on_evict=self._fold_total)
+        self.per_market = bounded.LRUDict(max_metric_markets or self.MAX_METRIC_MARKETS,
+                                          protect=lambda k: self.active(*k))
+        self.samples = {}        # (venue, channel) -> first raw frames (truncated, bounded)
+        self.aliases = bounded.LRUDict(self.MAX_ALIASES)   # txflow book id -> coin
+        self.cb_errors = bounded.CallbackErrors()
+        self.state_drops = 0
 
     LATENCY_BASIS = ("APPARENT: receive time - source time; includes the offset between "
                      "the local clock and the venue clock (local sync UNKNOWN)")
@@ -175,10 +198,10 @@ class Books:
             r["source_ahead_of_local"] = r["latency_s"] < 0
         k = (r.get("venue"), r.get("channel"), str(r.get("market")), r.get("status"),
              r.get("kind"))
-        self.totals[k] = self.totals.get(k, 0) + 1
+        self.totals[k] = self.totals.touch(k, int) + 1
         if r.get("status") == "ok" and r.get("market") is not None:
-            pm = self.per_market.setdefault((r.get("venue"), str(r["market"])),
-                                            dict(last=None, gaps=[], lat=[], ok=0))
+            pm = self.per_market.touch((r.get("venue"), str(r["market"])),
+                                       lambda: dict(last=None, gaps=[], lat=[], ok=0))
             pm["ok"] += 1
             if pm["last"] is not None:
                 pm["gaps"].append(r["recv_ts"] - pm["last"])
@@ -192,9 +215,64 @@ class Books:
         if self.on_record is not None:
             try:
                 self.on_record(r.get("venue"), r)
-            except Exception:
-                pass                        # telemetry must never break the data path
+            except Exception as ex:
+                # telemetry must never break the data path, but a failure is never
+                # silent: counted with time, source and a safe summary (Doctor reads it)
+                self.cb_errors.add(ex, now=r["recv_ts"], source=(
+                    r.get("venue"), r.get("channel"), r.get("market")))
         return r
+
+    # -- Phase 15 P4: bounded metrics, explicit state removal, health ------------------
+    STATE_OF = dict(txflow=("seq", "ctx"), hyperliquid=("snap", "ctx"),
+                    lighter_rh=("lighter",))
+
+    def active(self, venue, market):
+        """True while the market has live STATE (an active subscription)."""
+        m = str(market)
+        for name in self.STATE_OF.get(venue, ()):
+            if (m if name != "ctx" else (venue, m)) in getattr(self, name):
+                return True
+        return False
+
+    def _total_protected(self, k):
+        return k[2] == self.EVICTED or self.active(k[0], k[2])
+
+    def _fold_total(self, k, n):
+        agg = (k[0], k[1], self.EVICTED, k[3], k[4])
+        self.totals[agg] = self.totals.get(agg, 0) + n
+
+    def drop_market(self, venue, market):
+        """Explicit unsubscribe: removes the market's STATE and metrics. The only way
+        state is ever removed (never by a size policy)."""
+        m = str(market)
+        found = False
+        for name in self.STATE_OF.get(venue, ()):
+            key = m if name != "ctx" else (venue, m)
+            found = getattr(self, name).pop(key, None) is not None or found
+        self.per_market.pop((venue, m), None)
+        for k in [k for k in self.totals if k[0] == venue and k[2] == m]:
+            self._fold_total(k, self.totals.pop(k))
+        self.state_drops += found
+        return found
+
+    def health(self, now=None):
+        """Ingest health for the Doctor / heartbeat: callback errors, metric bounds and
+        evictions, state sizes. While callback errors exist the telemetry derived from
+        this stream is INCOMPLETE and its integrity is not counted as verified."""
+        now = self.clock() if now is None else now
+        cb = self.cb_errors.summary(now)
+        return dict(callback=cb, telemetry_complete=cb["telemetry_complete"],
+                    integrity_verifiable=cb["telemetry_complete"],
+                    metrics=dict(per_market=self.per_market.stats(),
+                                 totals=self.totals.stats(),
+                                 aliases=self.aliases.stats(),
+                                 samples=len(self.samples)),
+                    state=dict(txflow_books=len(self.seq), hyperliquid_books=len(self.snap),
+                               lighter_books=len(self.lighter), ctx=len(self.ctx),
+                               drops=self.state_drops, max_markets=self.MAX_STATE_MARKETS,
+                               refused_new=self.total(status="state_limit")),
+                    dedupe=dict(keys=len(self.seen) + len(self.seen_old),
+                                rotations=self.seen_rotations))
 
     def total(self, venue=None, status=None, kind=None, channel=None, market=None):
         return sum(n for (v, c, m, s, k), n in self.totals.items()
@@ -217,9 +295,10 @@ class Books:
         msg = json.loads(text)
         ch = msg.get("type") if venue == "lighter_rh" else (
             msg.get("channel") or msg.get("method"))
-        smp = self.samples.setdefault((venue, str(ch)), [])
-        if len(smp) < 2:
-            smp.append(text[:600])
+        if (venue, str(ch)) in self.samples or len(self.samples) < self.MAX_SAMPLE_KEYS:
+            smp = self.samples.setdefault((venue, str(ch)), [])
+            if len(smp) < 2:
+                smp.append(text[:600])
         if venue == "txflow":
             return self.txflow(msg)
         if venue == "hyperliquid":
@@ -227,11 +306,12 @@ class Books:
         return self.lighter_rh(msg)
 
     def dedupe(self, key):
-        if key in self.seen:
+        if key in self.seen or key in self.seen_old:
             return True
         self.seen.add(key)
-        if len(self.seen) > 200000:
-            self.seen.clear()
+        if len(self.seen) >= self.DEDUPE_GENERATION:
+            self.seen_old, self.seen = self.seen, set()
+            self.seen_rotations += 1
         return False
 
     # TxFlow: l2BookDepth snapshot + deltas with seq/prevSeq; activeAssetCtx
@@ -244,6 +324,7 @@ class Books:
             # `coin` field can be a name ("NATGAS-USDC") while subscriptions use the id
             coin = str(d["id"]) if d.get("id") is not None else str(d.get("coin"))
             if d.get("coin") is not None:
+                self.aliases.touch(coin, lambda: None)
                 self.aliases[coin] = d.get("coin")
             st = d["time"] / 1000.0 if d.get("time") is not None else None
             if self.dedupe(("txflow", ch, coin, d.get("seq"), d.get("type"))):
@@ -255,6 +336,9 @@ class Books:
                 # an older snapshot never replaces a newer valid book
                 return self.record(venue="txflow", channel=ch, market=coin, seq=d.get("seq"),
                                    source_ts=st, status="stale", kind="snapshot")
+            if coin not in self.seq and len(self.seq) >= self.MAX_STATE_MARKETS:
+                return self.record(venue="txflow", channel=ch, market=coin, seq=d.get("seq"),
+                                   source_ts=st, status="state_limit")
             res = self.seq.setdefault(coin, SeqBook()).apply(d)
             return self.record(venue="txflow", channel=ch, market=coin, seq=d.get("seq"),
                                prev_seq=d.get("prevSeq"), kind=d.get("type"), source_ts=st,
@@ -292,6 +376,9 @@ class Books:
             if bids and asks and bids[0][0] >= asks[0][0]:
                 return self.record(venue="hyperliquid", channel=ch, market=coin,
                                    source_ts=st, status="resync")
+            if coin not in self.snap and len(self.snap) >= self.MAX_STATE_MARKETS:
+                return self.record(venue="hyperliquid", channel=ch, market=coin,
+                                   source_ts=st, status="state_limit")
             self.snap[coin] = dict(time=t, bids=bids, asks=asks)   # replace, never merge
             return self.record(venue="hyperliquid", channel=ch, market=coin, source_ts=st,
                                status="ok")
@@ -323,6 +410,8 @@ class Books:
             return self.record(status="duplicate", **base)
         st = self.lighter.get(market)
         if t.startswith("subscribed/"):
+            if market not in self.lighter and len(self.lighter) >= self.MAX_STATE_MARKETS:
+                return self.record(status="state_limit", kind="snapshot", **base)
             st = dict(nonce=nonce, valid=True,
                       bids={float(x["price"]): float(x["size"]) for x in ob.get("bids") or []},
                       asks={float(x["price"]): float(x["size"]) for x in ob.get("asks") or []})

@@ -42,7 +42,8 @@ FIELDS = FIELDS_V1 + ("schema_version", "canonical_underlying_id", "channel",
 EVIDENCE = ("OBSERVED", "HISTORICAL", "MOCK", "FAILED", "SIMULATED")
 SOURCE_UNITS = ("ms", "s", "us", "ns", "iso", "NOT_STATED", "NOT_PUBLISHED")
 INTEGRITY = ("OK", "NO_SEQUENCE", "DUPLICATE", "STALE", "RESYNC_REQUESTED",
-             "SEQUENCE_GAP_SUSPECTED", "CROSSED", "EMPTY", "IGNORED", "FAILED", "UNKNOWN")
+             "SEQUENCE_GAP_SUSPECTED", "CROSSED", "EMPTY", "IGNORED", "FAILED",
+             "STATE_LIMIT", "UNKNOWN")
 QUOTE_TYPES = ("ORDERBOOK", "RFQ_INDICATIVE", "MARK_ONLY", "NONE")
 EXECUTION_MODELS = ("SIMULATED_ORDERBOOK", "RFQ_INDICATIVE_UNVERIFIED", "NONE")
 
@@ -91,7 +92,7 @@ AUDIT = {
 }
 UNITS = dict(txflow="ms", hyperliquid="ms", lighter_rh="NOT_STATED", variational="iso")
 WS_INTEGRITY = dict(ok="OK", duplicate="DUPLICATE", stale="STALE", resync="RESYNC_REQUESTED",
-                    ignored="IGNORED")
+                    ignored="IGNORED", state_limit="STATE_LIMIT")
 
 
 def _row(**kw):

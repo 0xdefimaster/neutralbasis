@@ -20,29 +20,40 @@ import shutil
 import time
 from pathlib import Path
 
-from v2 import storage
+from v2 import bounded, storage
 
 KINDS = ("message", "data_change", "rest_request", "refresh_ok", "error", "http_429",
          "reconnect", "sequence_gap")
 WINDOWS_MIN = (1, 5, 60, 1440)
 MAX_BUCKETS = 1440
 MIN_FREE_GB = 3.0
+# Phase 15 P4: the NUMBER of (venue, market, channel) keys is bounded too (LRU). Keys of
+# an active subscription (the `active` predicate, e.g. Books.active) are protected; every
+# eviction is counted. Recency alone never protects a key (a burst would defeat the cap).
+MAX_KEYS = 5000
 
 
 class Telemetry:
-    def __init__(self, clock=time.time, mono=time.monotonic, clock_confidence="UNKNOWN"):
+    def __init__(self, clock=time.time, mono=time.monotonic, clock_confidence="UNKNOWN",
+                 max_keys=MAX_KEYS, active=None):
         self.clock, self.mono = clock, mono
         self.clock_confidence = clock_confidence
-        self.keys = {}
+        self.active = active          # callable(venue, market, channel) -> bool, or None
+        self.keys = bounded.LRUDict(max_keys, protect=self._protected)
+
+    def _protected(self, k):
+        return bool(self.active and self.active(*k))
 
     def _k(self, venue, market, channel):
         k = (venue, str(market) if market is not None else None, channel)
-        if k not in self.keys:
-            self.keys[k] = dict(buckets=collections.deque(maxlen=MAX_BUCKETS),
-                                last_message_at=None, last_data_change_at=None,
-                                last_source_ts=None, last_mono=None, cadence=None,
-                                intervals=collections.deque(maxlen=200))
-        return self.keys[k]
+        return self.keys.touch(k, lambda: dict(
+            buckets=collections.deque(maxlen=MAX_BUCKETS), last_message_at=None,
+            last_data_change_at=None, last_source_ts=None, last_mono=None, cadence=None,
+            intervals=collections.deque(maxlen=200)))
+
+    def meta(self):
+        """Key-count bound and evictions (heartbeat / Doctor)."""
+        return dict(self.keys.stats(), protected_by_subscription=self.active is not None)
 
     def event(self, venue, market, channel, kind, source_ts=None, n=1):
         if kind not in KINDS:
@@ -97,9 +108,14 @@ class Telemetry:
         return out
 
 
-def books_hook(telemetry):
+def books_hook(telemetry, books=None):
     """A callable for v2.ws_readonly.Books(on_record=...): every WS record becomes
-    events (message / data_change / sequence_gap); the record itself is unchanged."""
+    events (message / data_change / sequence_gap); the record itself is unchanged.
+    With `books`, telemetry keys of markets that still have live book state are
+    protected from eviction (active subscription)."""
+    if books is not None and telemetry.active is None:
+        telemetry.active = lambda venue, market, channel: books.active(venue, market)
+
     def hook(venue, r):
         st = r.get("status")
         if st in ("ok", "duplicate", "stale", "resync", "ignored"):
@@ -174,7 +190,8 @@ class HeartbeatWriter:
             return False
         snap = telemetry.snapshot()
         hb = dict(at=now, name=self.name, pid=os.getpid(), every_s=self.every,
-                  memory_mb=process_memory_mb(), series=snap, **(extra or {}))
+                  memory_mb=process_memory_mb(), series=snap,
+                  telemetry=telemetry.meta(), **(extra or {}))
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(hb, default=str), encoding="utf-8")
         os.replace(tmp, self.path)

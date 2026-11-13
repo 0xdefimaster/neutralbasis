@@ -167,6 +167,7 @@ def run_venue(venue, subs, seconds, connect=None, clock=time.time, http_json=Non
         rest_vs_ws=dict(collections.Counter(c["status"] for c in comps)),
         rest_vs_ws_samples=comps[:10], api_errors=api_err, http_429=rate_limited,
         per_market=per_market, clock_offset_s=clock_offset_s,
+        ingest=books.health(),     # Phase 15 P4: callback errors, metric bounds, state
         clock_note="apparent latency = receive - source; corrected = apparent + measured "
                    "offset (local clock behind NTP by clock_offset_s; Windows Time NOT "
                    "synchronized, offset measured with w32tm /stripchart)"

@@ -74,12 +74,23 @@ def integrity(now, bench=None):
         seqless = v == "hyperliquid"
         st = "INTEGRITY_FAILURE" if x.get("resyncs", 0) > 5 else (
             "DEGRADED" if x.get("resyncs", 0) else "HISTORICAL_ONLY")
+        ing = x.get("ingest")
+        if ing is None:
+            ing_note = "callback errors not recorded (report older than Phase 15 P4)"
+        elif not ing.get("telemetry_complete", False):
+            # Phase 15 P4: telemetry incomplete -> integrity is not counted as verified
+            cb = ing.get("callback") or {}
+            st = "INTEGRITY_FAILURE" if st == "INTEGRITY_FAILURE" else "UNVERIFIED"
+            ing_note = "TELEMETRY INCOMPLETE: %s callback errors (last: %s)" % (
+                cb.get("total"), cb.get("last_error"))
+        else:
+            ing_note = "0 callback errors"
         out.append(model.record(
             v, "integrity", st,
-            "resyncs %s, stale %s, duplicates %s, REST/WS %s; %s" % (
+            "resyncs %s, stale %s, duplicates %s, REST/WS %s; %s; %s" % (
                 x.get("resyncs"), x.get("stale"), x.get("duplicates"), x.get("rest_vs_ws"),
                 "no sequence numbers: long gaps are only ESTIMATED loss" if seqless
-                else "sequence continuity checked"),
+                else "sequence continuity checked", ing_note),
             channel="ws", evidence_level="LIVE_OBSERVED", observed_at=r.get("created"),
             sample_count=sum((x.get("messages") or {}).values()),
             clock_confidence="LOW (local clock not synchronized at probe time)",
@@ -186,6 +197,59 @@ def heartbeat_status(name, now, max_age_s=120.0):
                         data_source="OBSERVED")
 
 
+def ingest_health(now, folder=None):
+    """Phase 15 P4: from every heartbeat that carries them, callback-error and
+    cardinality records. A callback error makes the telemetry INCOMPLETE: its integrity
+    figures are not counted as verified."""
+    folder = Path(folder) if folder else control_dir()
+    out = []
+    for f in sorted(folder.glob("heartbeat-*.json")):
+        name = f.stem[len("heartbeat-"):]
+        try:
+            hb = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        ing, tel = hb.get("ingest"), hb.get("telemetry")
+        if ing:
+            cb = ing.get("callback") or {}
+            if cb.get("in_window"):
+                st, why = "DEGRADED", "%d callback errors in %.0f s (%.2f/min), last %s: %s" % (
+                    cb["in_window"], cb.get("window_s") or 0, cb.get("per_minute") or 0,
+                    cb.get("last_at"), cb.get("last_error"))
+            elif cb.get("total"):
+                st, why = "UNVERIFIED", "telemetry INCOMPLETE: %d callback errors since %s " \
+                    "(none in the last %.0f s)" % (cb["total"], cb.get("first_at"),
+                                                   cb.get("window_s") or 0)
+            else:
+                st, why = "HEALTHY", "0 callback errors"
+            out.append(model.record(
+                "system", "integrity", st, why, channel="telemetry:%s" % name,
+                last_message_at=hb.get("at"), evidence_level="LOCAL_HEARTBEAT",
+                data_source="OBSERVED", next_action=None if st == "HEALTHY" else
+                "fix the telemetry hook; integrity figures of this process are unverified"))
+            m = (ing.get("metrics") or {})
+            ev = sum((m.get(k) or {}).get("evictions", 0) for k in ("per_market", "totals"))
+            oc = sum((m.get(k) or {}).get("over_cap", 0) for k in ("per_market", "totals"))
+            refused = (ing.get("state") or {}).get("refused_new", 0)
+            out.append(model.record(
+                "system", "storage_recorder", "DEGRADED" if oc or refused else "HEALTHY",
+                "book metrics: %s; evictions %d, over cap %d; new state refused %d" % (
+                    ", ".join("%s %s/%s" % (k, (m.get(k) or {}).get("keys"),
+                                            (m.get(k) or {}).get("max_keys"))
+                              for k in ("per_market", "totals")), ev, oc, refused),
+                channel="cardinality:%s" % name, evidence_level="LOCAL_HEARTBEAT",
+                data_source="OBSERVED", last_message_at=hb.get("at")))
+        if tel:
+            out.append(model.record(
+                "system", "storage_recorder", "DEGRADED" if tel.get("over_cap") else "HEALTHY",
+                "telemetry keys %s/%s, evictions %s, over cap %s" % (
+                    tel.get("keys"), tel.get("max_keys"), tel.get("evictions"),
+                    tel.get("over_cap")), channel="telemetry_keys:%s" % name,
+                evidence_level="LOCAL_HEARTBEAT", data_source="OBSERVED",
+                last_message_at=hb.get("at")))
+    return out
+
+
 def system(now):
     out = []
     out.append(model.record("system", "storage_recorder", "HEALTHY" if sys.version_info >= (3, 13)
@@ -220,6 +284,7 @@ def system(now):
                             channel="failing_disk", evidence_level="POLICY"))
     for name in ("recorder", "paper_engine", "control_server"):
         out.append(heartbeat_status(name, now))
+    out += ingest_health(now)
     out.append(clock_status())
     backup = Path(os.environ.get("NB_V2_BACKUP_DIR") or r"C:\Users\W10\nb-backup")
     files = [f for f in backup.rglob("*") if f.is_file()] if backup.exists() else []
