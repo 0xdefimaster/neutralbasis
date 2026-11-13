@@ -90,8 +90,8 @@ class SharedCache:
     """Answers kept for `ttl` seconds and handed to every caller; one fetch at a time
     per key (callers arriving meanwhile wait for it instead of sending their own)."""
 
-    def __init__(self, ttl, clock=time.monotonic):
-        self.ttl, self.clock = ttl, clock
+    def __init__(self, ttl, clock=time.monotonic, max_items=256):
+        self.ttl, self.clock, self.max_items = ttl, clock, max_items
         self.lock = threading.Lock()
         self.items = {}
         self.key_locks = {}
@@ -110,4 +110,9 @@ class SharedCache:
             value = fetch()
             with self.lock:
                 self.items[key] = (self.clock(), value)
+                if len(self.items) > self.max_items:       # bounded: drop the oldest
+                    for k in sorted(self.items, key=lambda k: self.items[k][0])[
+                            :len(self.items) - self.max_items]:
+                        self.items.pop(k, None)
+                        self.key_locks.pop(k, None)
             return value, False
