@@ -9,7 +9,7 @@ through this object.
 """
 import time
 
-from v2 import gates
+from v2 import gates, marketdata
 from v2.collector import Collector
 
 
@@ -27,6 +27,18 @@ class V2EngineSource:
 
     # -- EngineSource interface ---------------------------------------------------------
     def market_rows(self):
+        rows = self._market_rows()
+        from v2 import marketdata
+        if marketdata.TIME_BASIS == marketdata.ANSWER:
+            # the legacy desk reads `funding_received` (else `received`) for its entry
+            # funding-age rule: give it the rate's own answer time; unknown = -inf
+            # (age infinite: never fresh), never the price time
+            for r in rows:
+                f = r.get("funding_answer_received")
+                r["funding_received"] = f if f is not None else float("-inf")
+        return rows
+
+    def _market_rows(self):
         if self.clock() - self.last >= self.refresh_every or not self.collector.rows:
             self.collector.refresh()
             self.last = self.clock()
@@ -55,9 +67,13 @@ class V2EngineSource:
         if self.clock() - self.last >= self.refresh_every:
             self.market_rows()
         r = self.collector.row(v, a)
+        # the funding rate's own answer time under the answer basis (a Lighter rate
+        # comes from a separately cached fundings answer); else the legacy row time
+        f_rcv = r.get("funding_answer_received") if \
+            marketdata.TIME_BASIS == marketdata.ANSWER else r["received"]
         return dict(raw_rate=r["raw_rate"], rate=r["rate"], interval=r["interval"],
                     next=r["next"], funding_kind=r.get("funding_kind"),
-                    funding_received=r["received"],
+                    funding_received=f_rcv if f_rcv is not None else float("-inf"),
                     # Phase 15 SHADOW: the fetch time of the rate's answer (P1)
                     funding_answer_received=r.get("answer_received"))
 

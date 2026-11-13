@@ -105,10 +105,11 @@ class CollectorSwitchTests(unittest.TestCase):
         self.assertEqual(honest["answer_received"], 1000.0)
 
     def test_rows_take_the_venue_fetch_time_under_the_answer_basis(self):
-        self.assertEqual(source.row_time(500.0, 440.0), 500.0)
+        with mock.patch.object(marketdata, "TIME_BASIS", marketdata.LEGACY):
+            self.assertEqual(source.row_time(500.0, 440.0), 500.0)
         with mock.patch.object(marketdata, "TIME_BASIS", marketdata.ANSWER):
             self.assertEqual(source.row_time(500.0, 440.0), 440.0)
-            self.assertEqual(source.row_time(500.0, None), 500.0)   # labelled: unknown
+            self.assertIsNone(source.row_time(500.0, None))         # fail-closed: no row
 
     def test_invalidate_rate_drops_only_that_markets_answers(self):
         now = [1000.0]

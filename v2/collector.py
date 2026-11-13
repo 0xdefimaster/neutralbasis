@@ -77,6 +77,19 @@ class Collector:
         with self.lock:
             return [k for k in keys if self.cache.pop(k, None) is not None]
 
+    def answer_times(self, xid, market_id):
+        """(price answer fetch time, funding answer fetch time) of ONE market, or Nones.
+        TxFlow answers per market (tx:ctx:<id>); Lighter RH's current funding is its
+        own per-market fundings answer (rh:fund:<id>, cached up to TTL['settled'])."""
+        vr = self.venue_received()
+        if xid == "txflow":
+            t = self.fetched_at("tx:ctx:" + str(market_id))[0]
+            return t, t
+        if xid == "lighter_rh":
+            return self.fetched_at("rh:markets")[0], \
+                self.fetched_at("rh:fund:" + str(market_id))[0]
+        return vr.get(xid), vr.get(xid)
+
     def venue_received(self):
         """{exchange_id: OLDEST fetch time of the answers its records come from}
         (conservative: a row is as old as its oldest input)."""
@@ -177,7 +190,8 @@ class Collector:
         answers["lighter_rh"]["fundings"] = fundings
         records = source.catalog_from(answers)
         rows, groups, reasons = source.build(records, registry, at=self.clock(),
-                                             received=self.venue_received())
+                                             received=self.venue_received(),
+                                             times=self.answer_times)
         with self.lock:
             self.records, self.rows, self.groups, self.reasons = records, rows, groups, reasons
             self.by_key = {(r["venue"], r["asset"]): r for r in rows}
@@ -236,9 +250,16 @@ class Collector:
         # TTL["book"] younger than it is), the fetch time under the answer basis
         # (marketdata.TIME_BASIS; an unknown fetch time leaves it None -> stale).
         from v2 import marketdata as _md
+        now = self.clock()
         b["answer_received"] = fetched
-        b["received"] = fetched if _md.TIME_BASIS == _md.ANSWER else self.clock()
+        b["read_at"] = now                       # the READ time, kept apart
+        b["received"] = fetched if _md.TIME_BASIS == _md.ANSWER else now
         b["received_mono"] = mono
+        # source time vs fetch time: a venue time ahead of our receipt is a clock skew
+        # (ours or theirs), stated, never silently used as an age
+        if b.get("ts") is not None and fetched is not None and \
+                b["ts"] - fetched > _md.FUTURE_TOLERANCE_S:
+            b["time_flags"] = ["SOURCE_AHEAD_OF_FETCH %.1f s" % (b["ts"] - fetched)]
         b["audit_id"] = None
         return b
 

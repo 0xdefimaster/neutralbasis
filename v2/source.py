@@ -84,17 +84,21 @@ def per_hour(f):
     return raw / (f["interval_s"] / 3600.0)
 
 
+ANSWER_TIME_UNKNOWN = "ANSWER_TIME_UNKNOWN"
+
+
 def row_time(at, fetched):
     """What the gates read as a row's `received`: the build time under the legacy
-    basis, the fetch time under the answer basis (marketdata.TIME_BASIS; a venue
-    without a recorded fetch time keeps `at`, its answer_received stays None)."""
+    basis, the fetch time under the answer basis (marketdata.TIME_BASIS). Under the
+    answer basis an UNKNOWN fetch time returns None: the row is not built at all
+    (fail-closed; reason ANSWER_TIME_UNKNOWN), never stamped `at`."""
     from v2 import marketdata
-    if marketdata.TIME_BASIS == marketdata.ANSWER and fetched is not None:
+    if marketdata.TIME_BASIS == marketdata.ANSWER:
         return fetched
     return at
 
 
-def build(records, registry=None, at=None, received=None):
+def build(records, registry=None, at=None, received=None, times=None):
     """(rows, groups, reasons): strategy rows, verified groups, and
     {exchange_id: Counter(reason)} for every market (one reason each).
     `received` {exchange_id: fetch time of the answers the venue's records came from}
@@ -103,6 +107,10 @@ def build(records, registry=None, at=None, received=None):
     age gates read it; moving the gates to answer times is an owner decision."""
     at = time.time() if at is None else at
     received = received or {}
+    # times(exchange_id, market_id) -> (price answer fetch time, funding answer fetch
+    # time): per MARKET where the venue answers per market (TxFlow ctx, Lighter
+    # fundings); else the venue-wide time from `received`
+    times = times or (lambda xid, mid: (received.get(xid), received.get(xid)))
     catalog = {x: [r["instrument"] for r in recs] for x, recs in records.items()}
     groups = discovery.intersect(catalog, registry)
     group_fine = {uid: fine_class(g["members"]) for uid, g in groups.items()
@@ -129,14 +137,19 @@ def build(records, registry=None, at=None, received=None):
             if r.get("fee_taker") is None:
                 c[FEE_UNKNOWN] += 1
                 continue
+            p_t, f_t = times(xid, inst.market_id)
+            r_t = row_time(at, p_t)
+            if r_t is None:
+                c[ANSWER_TIME_UNKNOWN] += 1
+                continue
             c["ROW"] += 1
             raw = v2fees.to_fraction(f["raw"], f["unit"])
             rows.append(normalize.row(dict(
                 asset=inst.base, venue=r["legacy_venue"], kind="perp",
                 mark=r.get("mark") or inst.price, index=r.get("index"),
                 rate=hourly, raw_rate=raw, interval=f["interval_s"], next=f.get("next_ts"),
-                received=row_time(at, received.get(xid)),
-                answer_received=received.get(xid), fee=r["fee_taker"],
+                received=r_t, answer_received=p_t,
+                funding_answer_received=f_t, fee=r["fee_taker"],
                 leverage=None, price_type="mark",
                 category="RWA" if inst.coarse == identity.RWA else None,
                 funding_kind=f.get("kind"), exchange_id=inst.exchange_id,
