@@ -156,5 +156,152 @@ class LedgerSettledUnitTests(unittest.TestCase):
         self.assertEqual(booked[0]["evidence"], "SETTLED_PUBLIC_RATE")
 
 
+def _hourly_history(n, start, f, kind="settled_public"):
+    """MOCK settled points (rate per hour period) on the hour."""
+    return [dict(ts=start + i * 3600.0, rate=f(i), kind=kind) for i in range(n)]
+
+
+class FundingExpectationTests(unittest.TestCase):
+    def setUp(self):
+        from v2 import funding_expectation as fx
+        self.fx = fx
+
+    def test_baseline_is_the_published_rate_held(self):
+        fx = self.fx
+        lg = fx.leg("tradexyz", 1e-4, T0 + 11, next_ts=T0 + 3600, side="short")
+        p, basis = fx.path(lg, "baseline", 24)
+        self.assertEqual(p, [1e-4] * 24)
+        self.assertIn("comparison only", basis)
+
+    def test_no_history_no_samples_is_unknown_after_the_current_period(self):
+        fx = self.fx
+        lo = fx.leg("txflow", 4.2e-5, T0 + 11, next_ts=T0 + 3600, side="long")
+        sh = fx.leg("tradexyz", 7.36e-4, T0 + 11, next_ts=T0 + 3600, side="short")
+        r = fx.expect(lo, sh, 1000.0, 24)
+        self.assertGreater(r["models"]["baseline"]["cash"], 0)
+        self.assertIsNone(r["models"]["persistence"]["cash"])        # never defaulted
+        self.assertEqual(r["models"]["persistence"]["partial"]["known_hours"], 1)
+        self.assertIn("BASELINE_ONLY_POSITIVE", r["flags"])
+        self.assertIn("PAYMENT_RELATION_UNKNOWN:txflow", r["flags"])
+        self.assertEqual(r["evidence_class"], "ESTIMATED")
+        self.assertEqual(r["confidence"], "NONE")
+
+    def test_adverse_is_side_aware(self):
+        fx = self.fx
+        # MOCK history: rates alternate around 1e-4 so residual quantiles are two-sided
+        h = _hourly_history(200, T0 - 200 * 3600, lambda i: 1e-4 + (1e-5 if i % 3 else -2e-5))
+        lo = fx.leg("arcus", 1e-4, T0, next_ts=T0 + 3600, history=h, side="long")
+        sh = fx.leg("arcus", 1e-4, T0, next_ts=T0 + 3600, history=h, side="short")
+        self.assertEqual(lo["fit"]["status"], "OK")
+        pl, _ = fx.path(lo, "adverse", 24)
+        ps, _ = fx.path(sh, "adverse", 24)
+        self.assertGreater(pl[0], ps[0])     # long: pays more; short: receives less
+        self.assertAlmostEqual(pl[0] - 1e-4, lo["fit"]["resid_q90"])
+        self.assertAlmostEqual(ps[0] - 1e-4, sh["fit"]["resid_q10"])
+
+    def test_persistence_reverts_after_the_current_period(self):
+        fx = self.fx
+        h = _hourly_history(300, T0 - 300 * 3600, lambda i: 2e-5 * (1 if i % 2 else 0.5))
+        lg = fx.leg("lighter_rh", 5e-4, T0 + 1800, next_ts=T0 + 3600, history=h, side="short")
+        p, _ = fx.path(lg, "persistence", 24)
+        self.assertEqual(p[0], 5e-4)                       # current period: published
+        self.assertLess(abs(p[-1] - lg["fit"]["mean"]), abs(p[1] - lg["fit"]["mean"]))
+
+    def test_no_look_ahead_and_projections_refused(self):
+        fx = self.fx
+        past = _hourly_history(100, T0 - 100 * 3600, lambda i: 1e-4 + 1e-6 * (i % 7))
+        future = _hourly_history(50, T0 + 3600, lambda i: 9e-3)
+        proj = [dict(ts=T0 - 1800, rate=5e-2, kind="observed_published")]
+        a = fx.leg("arcus", 1e-4, T0, history=past, side="long")
+        b = fx.leg("arcus", 1e-4, T0, history=past + future + proj, side="long")
+        self.assertEqual(a["fit"], b["fit"])
+
+    def test_confidence_never_high_and_capped_without_payment_relation(self):
+        fx = self.fx
+        h = _hourly_history(24 * 40, T0 - 24 * 40 * 3600, lambda i: 1e-4 * (1 + (i % 5) / 10))
+        good = fx.leg("tradexyz", 1e-4, T0, history=h, side="short")
+        self.assertEqual(fx.leg_confidence(good), "MEDIUM")
+        capped = fx.leg("txflow", 1e-4, T0, history=h, side="long")   # MOCK history
+        self.assertEqual(fx.leg_confidence(capped), "LOW")
+        r = fx.expect(capped, good, 1000.0, 24)
+        self.assertNotIn(r["confidence"], ("HIGH", "VERIFIED"))
+
+    def test_model_nets_replace_only_the_funding_component(self):
+        fx = self.fx
+        res = dict(models=dict(baseline=dict(cash=16.0), persistence=dict(cash=-3.0),
+                               adverse=dict(cash=None)))
+        n = fx.model_nets(res, expected_net=4.0, expected_funding=16.0)
+        self.assertAlmostEqual(n["baseline"], 4.0)
+        self.assertAlmostEqual(n["persistence"], -15.0)
+        self.assertIsNone(n["adverse"])
+
+    def test_model_failure_never_changes_the_evaluation(self):
+        from unittest import mock
+        from v2 import estimated
+        cls = next(c for c in vars(estimated).values() if isinstance(c, type) and
+                   hasattr(c, "funding_models"))
+        obj = cls.__new__(cls)
+        obj.cfg = dict(wide_funding_realization=1.0)
+        with mock.patch.object(self.fx, "expect", side_effect=RuntimeError("boom")):
+            r = obj.funding_models(dict(exchange_id="arcus"), dict(exchange_id="risex"),
+                                   dict(rate=1e-5), dict(rate=2e-5), 1000.0, 24, T0, 1.0, 2.0)
+        self.assertIn("MODELS_FAILED", r["flags"])
+        self.assertIsNone(r["net"])
+
+    @unittest.skipUnless(HAVE_STREAM and paths.bench(
+        "v2-aligned-2026-11-12", "aligned.json.gz").exists(), "saved artifacts absent")
+    def test_observed_natgas_case_matches_phase14(self):
+        """OBSERVED: long TxFlow / short tradeXYZ at 15:00:11 local; baseline +$16.66,
+        persistence and adverse negative (docs/v2/41)."""
+        from tools import v2_funding_persistence as tp
+        from v2.control import netguard
+        fx = self.fx
+        with netguard.offline() as g:
+            rows, later, settled = tp.published_natgas(paths.bench())
+            xyz = tp.aligned_histories(paths.bench())["tradexyz NATGAS (90d)"]
+        self.assertEqual(len(g), 0)
+        ref = next(r for r in rows if r["prev_ft"] and r["t"] >= r["prev_ft"] and
+                   r["xyz_rate_h"] - r["txflow_rate_h"] > 0 and r["t"] % 86400 >= 12 * 3600)
+        past = [r["txflow_rate_h"] for r in rows if r["t"] <= ref["t"]]
+        series = [(t, x) for t, x in xyz if t <= ref["t"]]
+        lo = fx.leg("txflow", ref["txflow_rate_h"], ref["t"], next_ts=ref["next_ft"],
+                    samples=past, side="long")
+        sh = fx.leg("tradexyz", ref["xyz_rate_h"], ref["t"], next_ts=ref["next_ft"],
+                    side="short", fit_override=fx.fit(series))
+        r = fx.expect(lo, sh, 1000.0, 24)
+        self.assertAlmostEqual(r["models"]["baseline"]["cash"], 16.66, places=2)
+        self.assertLess(r["models"]["persistence"]["cash"], 0)
+        self.assertLess(r["models"]["adverse"]["cash"], r["models"]["persistence"]["cash"])
+        self.assertIn("BASELINE_ONLY_POSITIVE", r["flags"])
+        self.assertEqual(r["confidence"], "LOW")
+
+
+class ModelReportingTests(unittest.TestCase):
+    ROW = dict(strategy="funding", expected_net=4.99, stress_net=-0.45, long_xid="txflow",
+               short_xid="tradexyz", freshness="UNKNOWN", reference=None,
+               funding=dict(evidence=["RATE_PUBLISHED", "MARKET_SETTLEMENT_CONFIRMED"]),
+               funding_models=dict(net=dict(baseline=4.99, persistence=None, adverse=None),
+                                   flags=["BASELINE_ONLY_POSITIVE",
+                                          "PAYMENT_RELATION_UNKNOWN:txflow"],
+                                   confidence="NONE"))   # MOCK row
+
+    def test_read_model_flags_and_carries_models(self):
+        from v2.control import readmodel
+        o = readmodel.opportunity(self.ROW, 7)
+        self.assertIn("BASELINE_ONLY_POSITIVE", o["flags"])
+        self.assertIn("PUBLISHED_PAYMENT_RELATION_UNKNOWN", o["flags"])
+        self.assertEqual(o["safety"], "NOT_SAFE")
+        self.assertIsNone(o["funding_models"]["net"]["persistence"])   # not zero
+
+    def test_scanner_report_counts_unknown_as_unknown(self):
+        from tools import v2_opportunity_scan as sc
+        r = sc.models_report([self.ROW, dict(self.ROW, funding_models=None)])
+        self.assertEqual(r["rows_with_models"], 1)
+        self.assertEqual(r["baseline"]["net_positive"], 1)
+        self.assertEqual(r["persistence"]["net_positive"], 0)
+        self.assertEqual(r["persistence"]["net_unknown"], 1)
+        self.assertEqual(r["baseline_only_positive"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,6 +109,12 @@ def flags(row):
         f.append("RFQ_INDICATIVE_NO_FIRM_QUOTE")
     if row.get("freshness") in (None, "UNKNOWN"):
         f.append("FRESHNESS_UNKNOWN")
+    fm = row.get("funding_models") or {}
+    for x in fm.get("flags") or []:
+        if x == "BASELINE_ONLY_POSITIVE":
+            f.append("BASELINE_ONLY_POSITIVE")
+        elif x.startswith("PAYMENT_RELATION_UNKNOWN") and                 "PUBLISHED_PAYMENT_RELATION_UNKNOWN" not in f:
+            f.append("PUBLISHED_PAYMENT_RELATION_UNKNOWN")
     return f
 
 
@@ -132,6 +138,8 @@ def opportunity(row, idx):
         rejections=row.get("rejections") or [], risk_adjusted_score=row.get(
             "risk_adjusted_score"),
         flags=flags(row), data_source="HISTORICAL",
+        # Phase 15 P0-B: baseline / persistence / adverse, ESTIMATED; None = UNKNOWN
+        funding_models=row.get("funding_models"),
         # never "SAFE": no verified execution exists; a positive expected net with a
         # negative or unknown stress net is explicitly NOT_SAFE
         safety="NOT_SAFE" if (row.get("expected_net") or 0) > 0 and (

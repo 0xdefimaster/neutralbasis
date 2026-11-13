@@ -87,3 +87,56 @@ its embedded settled histories.
 - **P1** multi-venue data contract v2 and fake-signal tests (scale, multiplier, unit).
 
 Results and test counts are added to this document when each slice is committed.
+
+## 5. Results
+
+### P0-A (commit 000a6b1)
+
+`v2/funding_semantics.py`: rate kind and evidence per venue (`matrix()`), observation /
+settlement contract, stale next-payment detection, one unit path. The TxFlow
+hard-coded `/100` paths and the PAPER engine's settled-rate path (G5) changed; the
+values are identical for every hourly venue. Full suite 1147 OK.
+
+### P0-B: models reported separately
+
+`v2/funding_expectation.py` (baseline / persistence / adverse, side-aware adverse, no
+look-ahead, confidence never above MEDIUM). Attached to every ESTIMATED funding result
+(`funding_models`) and to the scanner rows. It is reported only: a failure in the
+models is reported as `MODELS_FAILED` and can never change an evaluation.
+
+**NATGAS 15:00:11 local, $1,000, 24 h (OBSERVED inputs, ESTIMATED result)**
+
+| model | P0-B general module | Phase 14 research (docs/v2/41) |
+|---|---|---|
+| baseline | +$16.66 (+0.555 %/8h) | +$16.66 |
+| persistence | -$1.99 (-0.066 %/8h) | -$3.02 |
+| adverse | -$4.96 (-0.165 %/8h) | -$5.10 |
+
+The difference comes from method. The general module keeps the published tradeXYZ
+value for the current period, and takes its residual quantiles from the whole history
+up to the reference time (Phase 14 used a 70 % training split). The conclusion is the
+same: only the baseline is positive.
+
+**Scanner, 05:12 snapshot** (`v2-paper-data/phase15-scan-0512`, 0 network attempts).
+Decisions and counts are identical to Phase 13: 1290 discovered, 2 expected-positive,
+0 stress-positive, 0 STRICT.
+
+| funding / hybrid rows reaching the funding economics: 52 | net > 0 | UNKNOWN |
+|---|---|---|
+| baseline (published held 24 h) | 2 | 0 |
+| persistence-adjusted | 0 | 46 |
+| adverse | 0 | 46 |
+
+46 rows have an UNKNOWN persistence or adverse result because one leg (TxFlow or
+Variational) has no settled history and no recorded samples in this snapshot. They
+are shown as UNKNOWN, never as 0. 51 rows carry `BASELINE_ONLY_POSITIVE` (positive
+baseline carry cash, persistence cash <= 0 or UNKNOWN). Both expected-positive rows
+(NATGAS +4.99 and CL +2.37, long TxFlow / short tradeXYZ) are BASELINE_ONLY_POSITIVE,
+PUBLISHED_PAYMENT_RELATION_UNKNOWN and NOT_SAFE.
+
+Control Center: the opportunity detail shows the three nets and the model confidence.
+UI smoke: 44 checks (10 views plus the NATGAS detail, at 360 / 390 / 768 / 1280 px),
+0 problems.
+
+Owner decision, not taken here: whether the ESTIMATED entry rule should require a
+positive persistence-adjusted net. Today it is reported only; STRICT is unchanged.

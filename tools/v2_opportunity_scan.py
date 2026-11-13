@@ -47,6 +47,36 @@ STRATEGIES = (("funding", "funding"), ("price_gap", "convergence"), ("hybrid", "
 SETTLED = (fe.MARKET_SETTLEMENT, fe.ACCOUNT_PAYMENT)
 
 
+
+def models_report(disc):
+    """How many discovered funding / hybrid rows stay positive under each model
+    (ESTIMATED; a model whose net is None counts as UNKNOWN, never as positive)."""
+    rows = [x for x in disc if x.get("funding_models")]
+    out = dict(rows_with_models=len(rows), note="baseline = published rate held for "
+               "the horizon (comparison only); persistence / adverse per "
+               "v2/funding_expectation; ESTIMATED")
+    for m in ("baseline", "persistence", "adverse"):
+        nets = [(x["funding_models"].get("net") or {}).get(m) for x in rows]
+        out[m] = dict(net_positive=sum(1 for v in nets if v is not None and v > 0),
+                      net_unknown=sum(1 for v in nets if v is None))
+    out["baseline_only_positive"] = sum(
+        1 for x in rows if "BASELINE_ONLY_POSITIVE" in (x["funding_models"].get("flags") or []))
+    return out
+
+
+def model_summary(fm):
+    """Phase 15 P0-B: the three funding models of an ESTIMATED result, compact
+    (ESTIMATED; None when the evaluator did not reach the funding economics)."""
+    if not fm:
+        return None
+    return dict(evidence_class=fm.get("evidence_class"), hours=fm.get("hours"),
+                net=fm.get("net"), cash={k: v.get("cash") for k, v in fm["models"].items()},
+                confidence=fm.get("confidence"), flags=fm.get("flags"),
+                legs={k: dict(rate_kind=v.get("rate_kind"),
+                              payment_relation_known=v.get("payment_relation_known"),
+                              fit_status=v.get("fit_status"))
+                      for k, v in (fm.get("legs") or {}).items()})
+
 def evidence_weight(xl, xs):
     st = [fe.venue_status(x) for x in (xl, xs)]
     n = sum(1 for s in st if s in SETTLED)
@@ -160,7 +190,8 @@ def scan(r, size=1000.0, assets=None):
                         estimated_first=e.get("first"),
                         rejections=sorted(set(tr.get("canonical_codes") or []) |
                                           set(e.get("reasons") or [])),
-                        risk_adjusted_score=score))
+                        risk_adjusted_score=score,
+                        funding_models=model_summary(e.get("funding_models"))))
     return out, matched
 
 
@@ -205,7 +236,8 @@ def report(rows, matched):
                        by_label=by(disc, "label"), by_freshness=by(disc, "freshness")),
         ECONOMIC=dict(expected_net_positive=len(econ), by_strategy=by(econ, "strategy"),
                       stress_positive=len(stress),
-                      stress_positive_by_strategy=by(stress, "strategy")),
+                      stress_positive_by_strategy=by(stress, "strategy"),
+                      funding_models=models_report(disc)),
         EXECUTION_READINESS=dict(strict_paper_eligible=len(strict),
                                  estimated_paper_candidates=len(est),
                                  estimated_by_strategy=by(est, "strategy")),

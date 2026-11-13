@@ -139,6 +139,16 @@ function oppCard(o, compact) {
                             ["hedge reference", o.reference || "UNKNOWN"],
                             ["STRICT first rejection", o.strict_first_rejection || "-"],
                             ["ESTIMATED first rejection", o.estimated_first_rejection || "-"]])));
+    const fm = o.funding_models;
+    if (fm && fm.net) {
+      // Phase 15 P0-B: three funding models, ESTIMATED; null = UNKNOWN, never zero
+      add(c, el("p", "muted mt-3", "Funding models (ESTIMATED, " + (fm.hours || "?") +
+        " h; baseline = published rate held, comparison only)"));
+      add(c, grid("mt-1", kv([["baseline net", usd(fm.net.baseline, "UNKNOWN")],
+                              ["persistence net", usd(fm.net.persistence, "UNKNOWN: no settled history")],
+                              ["adverse net", usd(fm.net.adverse, "UNKNOWN: no settled history")],
+                              ["model confidence", fm.confidence || "UNKNOWN"]])));
+    }
   } else {
     add(c, el("p", "muted mt-2", "rejected: " + (o.estimated_first_rejection || o.strict_first_rejection || "-")));
   }

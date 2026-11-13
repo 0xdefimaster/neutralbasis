@@ -58,7 +58,7 @@ def browser():
     raise SystemExit("no Edge/Chrome found")
 
 
-async def run(url, out, wait_s):
+async def run(url, out, wait_s, views=VIEWS):
     import aiohttp
 
     prof = Path(tempfile.mkdtemp(prefix="nb-ui-prof-"))
@@ -102,7 +102,7 @@ async def run(url, out, wait_s):
                 for w, h, mobile in WIDTHS:
                     await call("Emulation.setDeviceMetricsOverride", width=w, height=h,
                                deviceScaleFactor=1, mobile=mobile)
-                    for v in VIEWS:
+                    for v in views:
                         events.clear()
                         await call("Page.navigate", url=url.rstrip("/") + "/" + v)
                         await asyncio.sleep(wait_s)
@@ -134,12 +134,14 @@ def main(argv=None):
     ap.add_argument("--url", default="http://127.0.0.1:8765")
     ap.add_argument("--out", required=True)
     ap.add_argument("--wait", type=float, default=1.5)
+    ap.add_argument("--also", nargs="*", default=[],
+                    help="extra hash views, e.g. #/opp/op-01830")
     a = ap.parse_args(argv)
     if not a.url.startswith(("http://127.0.0.1:", "http://localhost:", "http://[::1]:")):
         raise SystemExit("loopback URLs only")
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    res = asyncio.run(run(a.url, out, a.wait))
+    res = asyncio.run(run(a.url, out, a.wait, VIEWS + tuple(a.also)))
     (out / "ui_smoke.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
     bad = [r for r in res if r["overflow"] or r["errors"] or r["cannotLoad"] or r["text"] < 20]
     for r in res:

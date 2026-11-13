@@ -46,6 +46,7 @@ import statistics
 
 from v2 import economics, marketdata, observation, references, rfq_paper
 from v2 import funding_evidence as fe
+from v2 import funding_expectation as fx
 from v2 import funding_scenarios as fsc
 from v2.strategies import COST, DATA, EXECUTION, reason
 
@@ -167,6 +168,28 @@ class EstimatedEvaluator:
                     book, rows[(v, c["asset"])].get("exchange_id"), at):
                 out.append("BOOK_STALE")
         return out
+
+    def funding_models(self, lr, sr, li, si, size, horizon, at, net, expected_funding):
+        """v2.funding_expectation for this pair (ESTIMATED, reported only). A failure
+        here is reported, never raised: it must not change the evaluation."""
+        try:
+            return self._funding_models(lr, sr, li, si, size, horizon, at, net,
+                                        expected_funding)
+        except Exception as ex:  # reporting only
+            return dict(evidence_class="ESTIMATED", error=str(ex)[:200], net=None,
+                        models={}, flags=["MODELS_FAILED"], confidence="NONE")
+
+    def _funding_models(self, lr, sr, li, si, size, horizon, at, net, expected_funding):
+        legs = []
+        for side, row, inp in (("long", lr, li), ("short", sr, si)):
+            legs.append(fx.leg(row.get("exchange_id"), inp.get("rate"), at,
+                               next_ts=row.get("next_funding") or row.get("next"),
+                               interval_s=inp.get("interval"), history=inp.get("history"),
+                               side=side))
+        res = fx.expect(legs[0], legs[1], size, max(1, int(round(horizon))))
+        res["net"] = fx.model_nets(res, net, expected_funding,
+                                   self.cfg["wide_funding_realization"])
+        return res
 
     def leg_inputs(self, v, asset, row, at):
         """Rate, interval, settled history and next payment of one leg (scenarios)."""
@@ -294,9 +317,14 @@ class EstimatedEvaluator:
             stresses.append(basis_st["net"])
         # The published rate is assumed constant over the horizon: say so, and show
         # what history, a regime change, a sign flip and the payment times would do.
-        fs = fsc.scenarios(size, horizon, self.leg_inputs(c["long"], c["asset"], lr, at),
-                           self.leg_inputs(c["short"], c["asset"], sr, at), at,
-                           fees + spread + reserve)
+        li = self.leg_inputs(c["long"], c["asset"], lr, at)
+        si = self.leg_inputs(c["short"], c["asset"], sr, at)
+        fs = fsc.scenarios(size, horizon, li, si, at, fees + spread + reserve)
+        # Phase 15 P0-B: baseline / persistence / adverse reported separately. A
+        # published rate is valid for its current period only; REPORTED, not a gate
+        # (decisions above are unchanged).
+        fm = self.funding_models(lr, sr, li, si, size, horizon, at, n["net"],
+                                 econ["expected_funding"])
         return dict(out, status=ENTERED if not reasons else REJECTED,
                     first=reasons[0] if reasons else None, reasons=reasons,
                     estimated=True, label="ESTIMATED_PAPER (not a strict decision)",
@@ -321,7 +349,7 @@ class EstimatedEvaluator:
                                      constant_rate_assumed=True,
                                      funding_scenario_min=fs["net_min"]),
                     stress=st, rfq_stress=rfq_st, reference_stress=basis_st,
-                    funding_scenarios=fs,
+                    funding_scenarios=fs, funding_models=fm,
                     components=dict(funding=econ["expected_funding"], convergence=None,
                                     shared_costs=dict(fees=fees, spread=spread,
                                                       counted="once"),
