@@ -154,6 +154,18 @@ def memory():
         return None, None
 
 
+def decode_console(b):
+    """Console bytes -> text: the OEM code page on Windows, never raising."""
+    if not b:
+        return ""
+    for enc in (("oem",) if os.name == "nt" else ()) + ("utf-8",):
+        try:
+            return b.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return b.decode("utf-8", errors="replace")
+
+
 def clock_status():
     """Local query only (no network): Windows Time sync state; the offset itself needs
     a network measurement and is therefore UNKNOWN offline."""
@@ -161,17 +173,23 @@ def clock_status():
         return model.record("system", "integrity", "NOT_TESTED", "clock check implemented "
                             "for Windows only (use timedatectl on Linux)", channel="clock")
     try:
-        out = subprocess.run(["w32tm", "/query", "/status"], capture_output=True, text=True,
-                             timeout=5).stdout
+        p = subprocess.run(["w32tm", "/query", "/status"], capture_output=True, timeout=5)
     except Exception as ex:
         return model.record("system", "integrity", "NOT_TESTED", "w32tm failed: %s" % ex,
                             channel="clock")
+    # Bytes in the console (OEM) code page, e.g. Turkish text when the service is
+    # stopped; decoding never raises (it used to crash the whole Doctor, 2026-11-14).
+    out = decode_console(p.stdout) + decode_console(p.stderr)
     last = next((l.split(":", 1)[1].strip() for l in out.splitlines()
                  if l.startswith("Last Successful Sync Time")), None)
-    if not last:
+    if p.returncode != 0 or not last:
+        why = " ".join(out.split())[:160] or "no output"
         return model.record("system", "integrity", "UNVERIFIED",
-                            "Windows Time not synchronized or not readable", channel="clock",
-                            clock_confidence="NONE")
+                            "Windows Time not synchronized or not readable (w32tm exit %s: %s)"
+                            % (p.returncode, why), channel="clock",
+                            clock_confidence="NONE",
+                            next_action="clock offset UNKNOWN: no latency or age is "
+                            "reliable to better than the sync state (not changed here)")
     return model.record("system", "integrity", "UNVERIFIED",
                         "Windows Time synced at %s; offset not measurable offline (needs NTP)"
                         % last, channel="clock", clock_confidence="UNKNOWN_OFFSET",
