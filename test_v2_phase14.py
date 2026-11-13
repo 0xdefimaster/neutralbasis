@@ -250,5 +250,104 @@ class TelemetryTests(unittest.TestCase):
         self.assertIsInstance(tm.process_memory_mb(), float)
 
 
+class FundingPersistenceTests(unittest.TestCase):
+    """Slice D. All series here are MOCK (synthetic), never evidence."""
+
+    @staticmethod
+    def mock_ar1(n, phi, mu=1e-4, sd=2e-5, seed=7, t0=1_790_000_000.0):
+        import random
+        rnd = random.Random(seed)
+        x, out = mu, []
+        for i in range(n):
+            x = mu + phi * (x - mu) + rnd.gauss(0, sd)
+            out.append((t0 + i * 3600.0, x))
+        return out
+
+    def test_ar1_recovers_phi_and_half_life(self):
+        from v2 import funding_persistence as fp
+        s = self.mock_ar1(3000, 0.9)
+        mu, phi = fp.ar1([r for _, r in s])
+        self.assertAlmostEqual(phi, 0.9, delta=0.03)
+        self.assertAlmostEqual(fp.half_life(0.5), 1.0)
+        self.assertIsNone(fp.half_life(-0.2))
+        m = fp.metrics(s)
+        self.assertEqual(m["points"], 3000)
+        self.assertAlmostEqual(m["half_life_h"], fp.half_life(m["ar1_phi"]))
+
+    def test_insufficient_history(self):
+        from v2 import funding_persistence as fp
+        s = self.mock_ar1(50, 0.9)
+        v = fp.validate(s)
+        self.assertEqual(v["status"], "INSUFFICIENT_HISTORY")
+        self.assertEqual(fp.confidence(fp.metrics(s), v), "INSUFFICIENT_HISTORY")
+        self.assertEqual(fp.metrics([])["confidence"], "INSUFFICIENT_HISTORY")
+
+    def test_validation_has_no_look_ahead(self):
+        from v2 import funding_persistence as fp
+        s = self.mock_ar1(400, 0.95)
+        v1 = fp.validate(s, return_rows=True)
+        cut = v1["train_points"]
+        # change everything after the train part: the fit must not move
+        s2 = s[:cut] + [(t, r * -3 + 1e-3) for t, r in s[cut:]]
+        v2 = fp.validate(s2, return_rows=True)
+        for k in ("train_mean", "train_phi", "adverse_q10", "adverse_q90"):
+            self.assertEqual(v1[k], v2[k], k)
+        # a forecast made at t uses nothing after t: perturb only the points after the
+        # first validation row and its forecasts stay identical
+        t = v1["rows"][0]["t"]
+        s3 = [(u, r if u <= t else r + 5e-4) for u, r in s]
+        v3 = fp.validate(s3, return_rows=True)
+        a, b = v1["rows"][0], v3["rows"][0]
+        for k in ("base", "pers", "trail24", "local"):
+            self.assertEqual(a[k], b[k], k)
+        self.assertNotEqual(a["real"], b["real"])     # only the realized value moved
+
+    def test_confidence_never_high_and_needs_30_days(self):
+        from v2 import funding_persistence as fp
+        short = self.mock_ar1(24 * 10, 0.9)
+        long_ = self.mock_ar1(24 * 40, 0.9)
+        self.assertEqual(fp.confidence(fp.metrics(short), fp.validate(short)), "LOW")
+        self.assertEqual(fp.confidence(fp.metrics(long_), fp.validate(long_)), "MEDIUM")
+
+    def test_no_history_leg_is_trusted_for_one_period_only(self):
+        from v2 import funding_persistence as fp
+        p = fp.leg_path(-1.6e-5, "persistence", 24)
+        self.assertEqual(p[0], -1.6e-5)
+        self.assertTrue(all(x is None for x in p[1:]))
+        cash, partial = fp.pair_cash(p, [7e-4] * 24, 1000.0)
+        self.assertIsNone(cash)                          # never a number: UNKNOWN hours
+        self.assertEqual(partial["known_hours"], 1)
+        p2 = fp.leg_path(4e-5, "persistence", 24, samples=[7e-4, 9e-4, 4e-5])
+        self.assertEqual(p2[0], 4e-5)
+        self.assertAlmostEqual(p2[5], (7e-4 + 9e-4 + 4e-5) / 3)
+        # baseline holds the published rate for the whole hold: kept only as a
+        # comparison model, it is what the research shows to be unsafe
+        self.assertEqual(fp.leg_path(4e-5, "baseline", 24), [4e-5] * 24)
+
+    def test_snap_hour_normalizes_interval_and_drops_off_grid(self):
+        from tools.v2_funding_persistence import snap_hour
+        t0 = 1_790_006_400.0  # multiple of 8 h
+        rows = [dict(ts=t0 + 0.05, rate=8e-4), dict(ts=t0 + 8 * 3600 + 1000, rate=1e-3),
+                dict(ts=t0 + 16 * 3600, rate=None)]
+        s = snap_hour(rows, 8 * 3600)
+        self.assertEqual(s, [(t0, 1e-4)])                # per hour; off-grid row dropped
+
+    @unittest.skipUnless(HAVE_DATA, "saved artifacts absent")
+    def test_observed_natgas_case_offline(self):
+        """OBSERVED saved data (not MOCK): the 15:00 reference exists, the baseline is
+        the only positive model, and the TxFlow payment stays UNVERIFIED."""
+        from tools import v2_funding_persistence as t
+        bench = paths.bench()
+        with netguard.offline() as g:
+            rows, later, xyz = t.published_natgas(bench)
+            fit = dict(mean=1e-4, phi=0.96, adverse_q10=-3e-5)
+            c = t.natgas_case(rows, later, xyz, fit)
+        self.assertEqual(g, [])
+        self.assertGreater(c["models"]["baseline"]["cash_24h"], 0)
+        self.assertLess(c["models"]["persistence"]["cash_24h"], 0)
+        self.assertLess(c["models"]["adverse"]["cash_24h"], 0)
+        self.assertIn("UNVERIFIED", c["txflow_payment_evidence"])
+
+
 if __name__ == "__main__":
     unittest.main()
