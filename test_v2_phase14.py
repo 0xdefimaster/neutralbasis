@@ -169,5 +169,86 @@ class RateLimitTests(unittest.TestCase):
         self.assertNotIn("again", calls)
 
 
+class TelemetryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="nb-p14c-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_windows_cadence_and_ages(self):
+        from v2.control import telemetry as tm
+
+        now, mono = [1_800_000_000.0], [100.0]
+        t = tm.Telemetry(clock=lambda: now[0], mono=lambda: mono[0])
+        for k in range(10):                               # a message every 3 s
+            t.event("txflow", "119", "activeAssetCtx", "message", source_ts=now[0] - 0.4)
+            if k % 2 == 0:
+                t.event("txflow", "119", "activeAssetCtx", "data_change")
+            now[0] += 3
+            mono[0] += 3
+        t.event("txflow", "119", "activeAssetCtx", "http_429")
+        s = t.snapshot()[0]
+        self.assertAlmostEqual(s["observed_cadence_s"], 3.0)
+        self.assertEqual(s["windows"]["5m"]["counts"]["message"], 10)
+        self.assertEqual(s["windows"]["5m"]["counts"]["http_429"], 1)
+        self.assertAlmostEqual(s["message_age_s"], 3.0)
+        self.assertAlmostEqual(s["data_change_age_s"], 6.0)     # last change at k=8
+        self.assertEqual(s["clock_confidence"], "UNKNOWN")
+        now[0] += 3600
+        s = t.snapshot()[0]
+        self.assertEqual(s["windows"]["1m"]["counts"], {})        # rolled out
+        self.assertEqual(s["windows"]["1440m"]["counts"]["message"], 10)
+        with self.assertRaises(ValueError):
+            t.event("x", None, "y", "bogus")
+
+    def test_monotonic_cadence_survives_a_wall_clock_step(self):
+        from v2.control import telemetry as tm
+
+        now, mono = [1_800_000_000.0], [0.0]
+        t = tm.Telemetry(clock=lambda: now[0], mono=lambda: mono[0])
+        t.event("hl", "INIT", "l2Book", "message")
+        now[0] -= 30                                      # NTP steps the wall clock back
+        mono[0] += 10
+        t.event("hl", "INIT", "l2Book", "message")
+        self.assertEqual(t.snapshot()[0]["observed_cadence_s"], 10.0)
+
+    def test_books_hook_turns_ws_records_into_events(self):
+        import test_v2_phase10 as t10
+        from v2 import ws_readonly
+        from v2.control import telemetry as tm
+
+        tel = tm.Telemetry(clock=lambda: 1_794_500_001.0, mono=time.monotonic)
+        b = ws_readonly.Books(lambda: 1_794_500_001.0, on_record=tm.books_hook(tel))
+        b.handle("txflow", t10.depth(1, None, "snapshot", [(3.6, 1)], [(3.61, 1)]))
+        b.handle("txflow", t10.depth(3, 2, "delta", [(3.59, 1)], []))   # gap
+        s = {x["channel"]: x for x in tel.snapshot()}["l2BookDepth"]
+        c = s["windows"]["1m"]["counts"]
+        self.assertEqual((c["message"], c["data_change"], c["sequence_gap"]), (2, 1, 1))
+
+    def test_heartbeat_atomic_bounded_and_stale_detection(self):
+        from v2.control import telemetry as tm
+
+        now = [1_800_000_000.0]
+        t = tm.Telemetry(clock=lambda: now[0])
+        t.event("txflow", "119", "ctx", "message")
+        w = tm.HeartbeatWriter(self.tmp, "recorder", every_s=15, max_bytes=2000,
+                               clock=lambda: now[0])
+        self.assertTrue(w.maybe_write(t))
+        self.assertFalse(w.maybe_write(t))                 # within the interval
+        for _ in range(40):
+            now[0] += 16
+            w.maybe_write(t)
+        self.assertLessEqual(w.history.stat().st_size, 2000)
+        self.assertTrue(w.history.with_suffix(".jsonl.1").exists())
+        r = tm.read_heartbeat(self.tmp, "recorder", now=now[0] + 10)
+        self.assertEqual(r["status"], "RUNNING")
+        r = tm.read_heartbeat(self.tmp, "recorder", now=now[0] + 100)
+        self.assertEqual(r["status"], "STALE")
+        self.assertEqual(tm.read_heartbeat(self.tmp, "nope")["status"], "NOT_RUNNING")
+        self.assertTrue(tm.read_history(self.tmp, "recorder", since_s=3600, now=now[0]))
+        self.assertIsInstance(tm.process_memory_mb(), float)
+
+
 if __name__ == "__main__":
     unittest.main()

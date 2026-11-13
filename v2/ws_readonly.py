@@ -145,8 +145,10 @@ def check_frame(venue, obj, environ=None):
 class Books:
     """Per (venue, market) book state from WS frames; never merges an old frame."""
 
-    def __init__(self, clock=time.time):
+    def __init__(self, clock=time.time, on_record=None):
         self.clock = clock
+        # optional telemetry hook (v2.control.telemetry.books_hook): on_record(venue, r)
+        self.on_record = on_record
         self.seq = {}            # txflow SeqBook per coin
         self.snap = {}           # hyperliquid: (coin) -> dict(time, bids, asks)
         self.lighter = {}        # lighter_rh: market -> dict(nonce, bids, asks, raw_ts)
@@ -186,6 +188,11 @@ class Books:
                 del pm["lat"][:-20000]
         self.records.append(r)
         del self.records[:-5000]
+        if self.on_record is not None:
+            try:
+                self.on_record(r.get("venue"), r)
+            except Exception:
+                pass                        # telemetry must never break the data path
         return r
 
     def total(self, venue=None, status=None, kind=None, channel=None, market=None):
