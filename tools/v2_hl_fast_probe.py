@@ -15,7 +15,8 @@ Measured per mode and coin:
   5 vs 20 levels, integrity (stale / duplicate / crossed -> resync), reconnects,
   REST vs WS: REST book time minus the last WS book time (positive = REST newer),
   price agreement only where REST and WS carry the SAME book time (same state),
-  HTTP 429 / errors, data loss (gaps > 3 x the median interval).
+  HTTP 429 / errors, suspected data loss (gaps > 3 x the median interval; ESTIMATED,
+  Hyperliquid l2Book carries no sequence numbers).
 """
 import argparse
 import json
@@ -113,7 +114,10 @@ def summarize(mode, rest):
         out[c] = dict(
             pushes=len(o),
             interval_s=None if not iv else dict(median=med, p95=pct(iv, 0.95), max=max(iv)),
-            data_loss_gaps=0 if not iv else sum(1 for x in iv if x > 3 * med),
+            # Hyperliquid l2Book has no sequence numbers: a long gap is NOT proof of a
+            # lost message, only a suspicion -> labelled ESTIMATED
+            long_gaps_estimated=0 if not iv else sum(1 for x in iv if x > 3 * med),
+            data_loss_basis="ESTIMATED: no sequence numbers on l2Book; gaps > 3 x median",
             age_s=None if not ag else dict(median=pct(ag, 0.5), p95=pct(ag, 0.95),
                                            max=max(ag)),
             share_age_le_2s=None if not ag else sum(1 for a in ag if a <= 2.0) / len(ag),

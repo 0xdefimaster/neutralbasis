@@ -120,3 +120,60 @@ Timing figures depend on the clock. Until §2 is done they are offset-corrected 
 | 3 | TxFlow account funding proof | An authorized address |
 | 4 | NATGAS reference spec on TxFlow | Venue documentation |
 | 5 | Variational firm quotes | Trading API not available |
+
+## 7. Clock verification after the owner's sync (2026-11-13 05:24–05:28)
+
+Read-only checks, no admin:
+
+| Check | Result |
+|---|---|
+| `Get-Service W32Time` | Running (Manual) |
+| `w32tm /query /status` | Leap 0; Stratum 5; Source `time.windows.com,0x9`; Last Successful Sync 05:09:32; **Root Dispersion 8.06 s**; poll 1024 s |
+| `w32tm /query /source`, `/query /configuration` | access denied (admin only) |
+| Offset vs time.windows.com | 05:24: +0.294 … +0.311 s; 05:28: +0.287 … +0.302 s |
+| Offset vs time.google.com | +0.303 … +0.339 s |
+| Offset vs pool.ntp.org | +0.303 … +0.312 s |
+
+- **Verdict: the clock is NOT correct.** Three independent NTP sources agree that the local clock is still ~0.30 s behind, the same as before the 05:09 sync. The "successful" sync did not step or slew the clock in 19 minutes, and the root dispersion of 8 s marks the sync as poor.
+- **Consequence:** per the owner's condition ("if the clock is fine"), **the Hyperliquid fast-mode test was NOT run.**
+- **Likely cause:** W32Time only slews offsets below `MaxAllowedPhaseOffset`, and with this configuration the correction did not take effect. UNVERIFIED: the configuration cannot be read without admin.
+- **Admin commands to step the clock:**
+
+  ```powershell
+  reg add "HKLM\SYSTEM\CurrentControlSet\Services\W32Time\Config" /v MaxAllowedPhaseOffset /t REG_DWORD /d 0 /f
+  w32tm /config /update
+  w32tm /resync /force
+  w32tm /stripchart /computer:time.windows.com /samples:5 /dataonly
+  ```
+
+  `MaxAllowedPhaseOffset = 0` makes W32Time set the clock directly instead of slewing.
+
+- **Data that does NOT depend on the local clock** (could be measured now if the owner prefers):
+  - push intervals (from the venue's own `time`);
+  - REST − WS book time;
+  - same-time price agreement;
+  - depth (5 vs 20 levels);
+  - integrity.
+- **Data that depends on it:** only the "share of seconds ≤ 2 s old" and the absolute data age.
+
+## 8. NATGAS TxFlow ↔ tradeXYZ: the four parts kept apart (`tools/v2_pair_snapshot.py`)
+
+Applied to the latest RECORDED observation, 2026-11-12 16:15:17 (parallel probe, cycle 15). These are not current prices; a current snapshot needs one more approved read.
+
+| Part | TxFlow | tradeXYZ |
+|---|---|---|
+| 1. Price: bid / ask (spread) | 3.621 / 3.625 (11.0 bp) | 3.6283 / 3.6293 (2.8 bp) |
+| 1. Time | book source time; pair skew 1.80 s, limit 35.9 s → aligned | book source + ctx receive time |
+| 2. Funding evidence | published +0.0932 %/h (+0.746 %/8h), next payment published; **RATE_PUBLISHED**, account payment **UNVERIFIED** | published +0.0741 %/h (+0.593 %/8h); **MARKET_SETTLEMENT_CONFIRMED**, 72 settled points (last 2026-11-12 16:00) |
+| 3. Depth, visible USD bid / ask: within 10 bp | 67k / 80k | 100k / 65k |
+| 3. Depth, visible USD bid / ask: within 50 bp, total visible (20 levels) | 600k / 552k; 699k / 860k | 100k / 68k (all within 10–25 bp) |
+| 3. 10 bp IOC fill of $1k–$10k (simulated) | 100 %, slippage 5.5–6.7 bp | 100 %, slippage 1.4–2.4 bp |
+
+**Part 4, simulated (ESTIMATED funding strategy; not a verified trade; strict gate: RWA_REFERENCE_UNVERIFIED + SETTLEMENT_EVIDENCE_MISSING):**
+
+| Direction | Carry | Size | Expected net | Entry stress estimate | Status |
+|---|---|---|---|---|---|
+| long TxFlow / short tradeXYZ | −0.15 %/8h | $1k / $10k | −8.64 / −88.54 $ | −11.27 / −116.04 $ | REJECTED, CARRY_NOT_POSITIVE |
+| long tradeXYZ / short TxFlow | +0.15 %/8h | $1k / $10k | +0.52 / +3.03 $ | −2.12 / −24.31 $ | REJECTED, STRESS_NEGATIVE |
+
+Assumptions on every row: ESTIMATED_FUNDING_PUBLISHED, ESTIMATED_REFERENCE_BASIS_RISK, reference class UNKNOWN.

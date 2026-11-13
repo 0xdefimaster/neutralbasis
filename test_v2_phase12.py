@@ -128,3 +128,32 @@ class GuardsThatMustNotMove(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PairSnapshotTests(unittest.TestCase):
+    def test_four_separate_parts_and_no_verified_claim(self):
+        import test_v2_paper as tp
+        from tools import v2_pair_snapshot as ps
+
+        at = tp.AT + 60
+        rows = {("TxFlow", "NATGAS"): dict(venue="TxFlow", asset="NATGAS", exchange_id="txflow",
+                                           market_id="119", rate=-0.0005, fee=0.00045,
+                                           mark=3.6, interval=3600, fine_class="commodity",
+                                           kind="perp", next_funding=at + 1800),
+                ("tradeXYZ", "NATGAS"): dict(venue="tradeXYZ", asset="NATGAS",
+                                             exchange_id="tradexyz", market_id="xyz:NATGAS",
+                                             rate=0.0003, fee=0.00009, mark=3.61,
+                                             interval=3600, fine_class="commodity",
+                                             kind="perp")}
+        o = tp.FakeObs(at, rows, {("TxFlow", "NATGAS"): tp.ob(3.6, received=at),
+                                  ("tradeXYZ", "NATGAS"): tp.ob(3.61, received=at)},
+                       settled={("tradeXYZ", "NATGAS"): tp.arcus_history(at - at % 3600)})
+        o.time_basis = {}
+        r = ps.snapshot(o)
+        self.assertEqual(sorted(k for k in r if k.startswith("part")),
+                         ["part1_prices", "part2_funding", "part3_depth", "part4_simulated"])
+        self.assertEqual(r["part2_funding"]["TxFlow"]["evidence"], fe.RATE_PUBLISHED)
+        self.assertIn("UNVERIFIED", r["part2_funding"]["TxFlow"]["account_payment"])
+        self.assertTrue(all("not a verified trade" in s["label"] for s in r["part4_simulated"]))
+        self.assertTrue(all(s["status"] != "STRICT_ELIGIBLE" for s in r["part4_simulated"]))
+        self.assertIn("RWA_REFERENCE_UNVERIFIED", r["part4_simulated"][0]["strict_reasons"])
