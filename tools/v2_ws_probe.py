@@ -59,13 +59,17 @@ def rest_top(venue, market, http_json):
     from v2.venues import hyperliquid_obs as hlo
     from v2.venues import lighter_rh, tradexyz, txflow
 
+    src = None
     if venue == "txflow":
-        b = txflow.parse_book(http_json("txflow", *txflow.book_request(market),
-                                        headers=txflow.HEADERS))
+        raw = http_json("txflow", *txflow.book_request(market), headers=txflow.HEADERS)
+        b = txflow.parse_book(raw)
+        t = ((raw or {}).get("data") or {}).get("time")
+        src = t / 1000.0 if t else None
     elif venue == "hyperliquid":
         body = tradexyz.l2_book(market.split(":", 1)[1]) if market.startswith("xyz:") \
             else hlo.l2_book("hyperliquid_native", market)
         raw = http_json("tradexyz", "POST", hlo.INFO_URL, body)
+        src = raw["time"] / 1000.0 if (raw or {}).get("time") else None
         lv = (raw or {}).get("levels") or [[], []]
         b = dict(bids=[(float(x["px"]), float(x["sz"])) for x in lv[0]],
                  asks=[(float(x["px"]), float(x["sz"])) for x in lv[1]])
@@ -73,11 +77,12 @@ def rest_top(venue, market, http_json):
         b = lighter_rh.parse_book(http_json("lighter_rh", *lighter_rh.book_request(market)))
     if not b or not b.get("bids") or not b.get("asks"):
         return None
-    return dict(bids=b["bids"], asks=b["asks"]), time.time()
+    # the REST book's own source time when the venue publishes one, else receive time
+    return dict(bids=b["bids"], asks=b["asks"]), (src if src else time.time()), bool(src)
 
 
 def run_venue(venue, subs, seconds, connect=None, clock=time.time, http_json=None,
-              rest_every=60.0, environ=None, sleep=time.sleep):
+              rest_every=60.0, environ=None, sleep=time.sleep, clock_offset_s=None):
     """One venue for `seconds` (<= 300). Returns a metrics dict. `connect`/`http_json`
     are injected in tests (MOCK); None means the live client (needs the switches)."""
     seconds = min(float(seconds), MAX_SECONDS)
@@ -105,30 +110,67 @@ def run_venue(venue, subs, seconds, connect=None, clock=time.time, http_json=Non
                     rate_limited += "429" in str(ex)
                     continue
                 if got:
-                    comps.append(dict(market=m, **ws_readonly.compare(
-                        books.top(venue, m), got[0], got[1])))
+                    top = books.top(venue, m)
+                    basis = "SOURCE_TIME" if got[2] else "REST_RECEIVE_TIME"
+                    if top is not None and top[2] is None:
+                        # Lighter: the time unit of last_updated_at is NOT STATED, so the
+                        # WS side is timed by its receive time (labelled)
+                        last = max((x["recv_ts"] for x in books.records
+                                    if x.get("market") == str(m) and x.get("status") == "ok"),
+                                   default=None)
+                        top, basis = (top[0], top[1], last), "WS_RECEIVE_TIME"
+                    if top is not None and top[2] is not None and got[2] and \
+                            abs(top[2] - got[1]) < 1e-6:
+                        basis += " (same source time: same book state)"
+                    comps.append(dict(market=m, time_basis=basis,
+                                      **ws_readonly.compare(top, got[0], got[1])))
     try:
         if ws.conn is not None:
             ws.conn.close()
     except Exception:
         pass
     recs = books.records
-    acks = sum(1 for x in recs if x.get("channel") == "subscriptionResponse" or
-               str(x.get("kind")) == "snapshot")
+    acks = books.total(venue, channel="subscriptionResponse") + books.total(
+        venue, kind="snapshot", status="ok")
+    per_market = {}
+    for m in markets:
+        pm = books.per_market.get((venue, str(m)), dict(gaps=[], lat=[], ok=0))
+        gaps = pm["gaps"]
+        lat = sorted(pm["lat"])
+        per_market[str(m)] = dict(
+            messages=books.total(venue, market=m), ok=pm["ok"],
+            channels={c: n for (v, c, mm, s, k), n in books.totals.items()
+                      if v == venue and mm == str(m)},
+            interarrival_s=None if not gaps else dict(
+                median=sorted(gaps)[len(gaps) // 2], max=max(gaps)),
+            apparent_latency_s=None if not lat else dict(
+                min=lat[0], median=lat[len(lat) // 2], max=lat[-1]),
+            corrected_latency_s=None if not lat or clock_offset_s is None else dict(
+                min=lat[0] + clock_offset_s, median=lat[len(lat) // 2] + clock_offset_s,
+                max=lat[-1] + clock_offset_s))
     return dict(
         venue=venue, seconds=seconds, connected=ws.stats["connects"] > 0,
         connects=ws.stats["connects"], reconnects=ws.stats["reconnects"],
         errors=ws.stats["errors"], refused_frames=ws.stats["refused"],
         subscription_ack_or_first_snapshot=acks, messages=dict(status),
-        with_source_time=sum(1 for x in recs if x.get("source_ts") is not None),
+        with_source_time=sum(len(pm["lat"]) for (v, _), pm in books.per_market.items()
+                             if v == venue),
         apparent_latency=books.latency_stats(venue),
-        resyncs=sum(1 for x in recs if x.get("status") == "resync"),
-        stale=sum(1 for x in recs if x.get("status") == "stale"),
-        duplicates=sum(1 for x in recs if x.get("status") == "duplicate"),
+        resyncs=books.total(venue, status="resync"),
+        stale=books.total(venue, status="stale"),
+        duplicates=books.total(venue, status="duplicate"),
+        unattributed=sorted({(c, mm, s) for (v, c, mm, s, k) in books.totals
+                             if v == venue and mm not in [str(x) for x in markets]
+                             and c not in ("pong", "subscriptionResponse", "PONG")}),
+        txflow_coin_aliases=dict(books.aliases),
+        raw_samples={"%s/%s" % k: v for k, v in books.samples.items() if k[0] == venue},
         rest_vs_ws=dict(collections.Counter(c["status"] for c in comps)),
         rest_vs_ws_samples=comps[:10], api_errors=api_err, http_429=rate_limited,
-        clock_note="apparent latency includes the local clock offset (Windows Time "
-                   "service not running on 2026-11-13: offset UNKNOWN)")
+        per_market=per_market, clock_offset_s=clock_offset_s,
+        clock_note="apparent latency = receive - source; corrected = apparent + measured "
+                   "offset (local clock behind NTP by clock_offset_s; Windows Time NOT "
+                   "synchronized, offset measured with w32tm /stripchart)"
+        if clock_offset_s is not None else "clock offset UNKNOWN: latency not reliable")
 
 
 def main():
@@ -137,6 +179,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=300.0)
     ap.add_argument("--venues", default="txflow,hyperliquid,lighter_rh")
     ap.add_argument("--owner-approved", action="store_true")
+    ap.add_argument("--clock-offset", type=float, default=None,
+                    help="seconds the local clock is BEHIND the reference (measured)")
     a = ap.parse_args()
     if not a.owner_approved or (os.environ.get(ws_readonly.ENV) or "") != "1":
         raise SystemExit("refused: needs --owner-approved AND %s=1 (owner decision)"
@@ -163,7 +207,8 @@ def main():
 
         def go(v=v):
             try:
-                results[v] = run_venue(v, subs[v], a.seconds, http_json=base.http_json)
+                results[v] = run_venue(v, subs[v], a.seconds, http_json=base.http_json,
+                                       clock_offset_s=a.clock_offset)
             except Exception as ex:
                 results[v] = dict(venue=v, error="%s: %s" % (type(ex).__name__,
                                                               str(ex)[:300]))

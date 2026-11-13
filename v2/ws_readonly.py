@@ -146,8 +146,14 @@ class Books:
         self.snap = {}           # hyperliquid: (coin) -> dict(time, bids, asks)
         self.lighter = {}        # lighter_rh: market -> dict(nonce, bids, asks, raw_ts)
         self.seen = set()        # (venue, channel, market, source time / seq) for dedupe
-        self.records = []
+        self.records = []        # the last 5000 records (bounded)
         self.ctx = {}
+        # Totals that never shrink (the bounded record list must not hide the first
+        # snapshot or an early error): per (venue, channel, market, status, kind).
+        self.totals = {}
+        self.per_market = {}     # market -> dict(last_recv, gaps [..], lat [..]) bounded
+        self.samples = {}        # (venue, channel) -> first raw frames (truncated)
+        self.aliases = {}        # txflow book id -> coin field seen
 
     LATENCY_BASIS = ("APPARENT: receive time - source time; includes the offset between "
                      "the local clock and the venue clock (local sync UNKNOWN)")
@@ -159,9 +165,29 @@ class Books:
         if r["latency_s"] is not None:
             r["latency_basis"] = self.LATENCY_BASIS
             r["source_ahead_of_local"] = r["latency_s"] < 0
+        k = (r.get("venue"), r.get("channel"), str(r.get("market")), r.get("status"),
+             r.get("kind"))
+        self.totals[k] = self.totals.get(k, 0) + 1
+        if r.get("status") == "ok" and r.get("market") is not None:
+            pm = self.per_market.setdefault((r.get("venue"), str(r["market"])),
+                                            dict(last=None, gaps=[], lat=[], ok=0))
+            pm["ok"] += 1
+            if pm["last"] is not None:
+                pm["gaps"].append(r["recv_ts"] - pm["last"])
+                del pm["gaps"][:-20000]
+            pm["last"] = r["recv_ts"]
+            if r["latency_s"] is not None:
+                pm["lat"].append(r["latency_s"])
+                del pm["lat"][:-20000]
         self.records.append(r)
         del self.records[:-5000]
         return r
+
+    def total(self, venue=None, status=None, kind=None, channel=None, market=None):
+        return sum(n for (v, c, m, s, k), n in self.totals.items()
+                   if (venue is None or v == venue) and (status is None or s == status)
+                   and (kind is None or k == kind) and (channel is None or c == channel)
+                   and (market is None or m == str(market)))
 
     def latency_stats(self, venue):
         """Apparent latency per venue. Its minimum bounds the clock offset: when the
@@ -176,6 +202,11 @@ class Books:
 
     def handle(self, venue, text):
         msg = json.loads(text)
+        ch = msg.get("type") if venue == "lighter_rh" else (
+            msg.get("channel") or msg.get("method"))
+        smp = self.samples.setdefault((venue, str(ch)), [])
+        if len(smp) < 2:
+            smp.append(text[:600])
         if venue == "txflow":
             return self.txflow(msg)
         if venue == "hyperliquid":
@@ -196,7 +227,11 @@ class Books:
             return self.record(venue="txflow", channel="pong", status="ok")
         ch, d = msg.get("channel"), msg.get("data") or {}
         if ch == "l2BookDepth":
-            coin = str(d.get("coin"))
+            # key the book by the instrument id ("id", e.g. 119) when present: the
+            # `coin` field can be a name ("NATGAS-USDC") while subscriptions use the id
+            coin = str(d["id"]) if d.get("id") is not None else str(d.get("coin"))
+            if d.get("coin") is not None:
+                self.aliases[coin] = d.get("coin")
             st = d["time"] / 1000.0 if d.get("time") is not None else None
             if self.dedupe(("txflow", ch, coin, d.get("seq"), d.get("type"))):
                 return self.record(venue="txflow", channel=ch, market=coin, seq=d.get("seq"),

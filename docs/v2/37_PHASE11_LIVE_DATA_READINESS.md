@@ -158,3 +158,73 @@ python -m tools.v2_ws_probe --owner-approved --seconds 300 --out C:\Users\W10\nb
 - Windows Time sync (or an offset measurement);
 - an authorized TxFlow address;
 - storage for any longer recording.
+
+## 8. Approved actions on 2026-11-13
+
+### 8.1 GitHub
+
+- **Pre-push scan** of `f5c6f4c..61fd8fb`:
+  - 10 files, the largest 24 KB;
+  - no key, token, personal data, `.env`, database or archive;
+  - author e-mail is the GitHub noreply address.
+- **Pushed:** `61fd8fb` to `v2/venue-policy` only. `main` is unchanged (`e8a0e7b`); no merge or deploy.
+
+### 8.2 Clock
+
+- **Windows Time service:** `W32Time` is Stopped (StartType Manual), and this session is **not an administrator**, so the service was not started and the clock was **not synchronized**. Starting it needs the owner: an elevated `net start w32time` followed by `w32tm /resync`.
+- **Offset measured without changing anything:** `w32tm /stripchart /computer:time.windows.com`:
+
+  | When | Samples | Offset |
+  |---|---|---|
+  | 04:30 | 5 | +0.261 … +0.279 s |
+  | 04:38 (after the probe) | 3 | +0.265 … +0.280 s |
+
+  The offset is stable, and its direction is consistent with the 525 recorded REST answers (never a negative receive − source), so the **local clock is ~0.27 s BEHIND** NTP.
+- **Timing labels:** latencies below are labelled *corrected* = apparent + 0.27 s.
+  - This is a measured correction, not a synchronized clock.
+  - The uncertainty is the NTP jitter (~±0.02 s) plus the venue's own clock (UNKNOWN).
+
+### 8.3 Live read-only WebSocket probe
+
+- **Run:** 04:31:07–04:36:47, 300 s, `tools/v2_ws_probe.py --owner-approved`, `NB_V2_READONLY_WS=1` for that process only.
+- **Output:** `C:\Users\W10\nb-benchmark\v2-paper-data\ws-probe-20261113\ws_probe_report.json` (8.7 KB).
+- **Guard:** 21 allowed, 0 refused.
+- **Never happened:** no order, account or signature frame (0 refused frames), no write to D:/E:.
+
+| Venue / market | Connected | Subscription accepted | Messages (300 s) | Interval (median / max) | Data age = corrected latency (median, range) | REST vs WS | Integrity | Reconnects / errors / 429 | Source timestamp |
+|---|---|---|---|---|---|---|---|---|---|
+| Hyperliquid INIT | ✅ | ✅ `subscriptionResponse` | 30 `l2Book` | 10.27 s / 10.51 s | 0.42 s (0.39–0.67) | ❌ not compared: REST read 5–8 s after the last WS push (> 2 s rule) | 0 stale / dup / resync (snapshot feed) | 0 / 0 / 0 | ✅ `time` (ms) |
+| tradeXYZ NATGAS (`xyz:NATGAS` on the HL socket) | ✅ | ✅ (the spelling `xyz:NATGAS` works) | 30 `l2Book` | 10.27 s / 10.51 s | 0.42 s (0.39–0.78) | ❌ not compared (same reason) | 0 / 0 / 0 | 0 / 0 / 0 | ✅ |
+| TxFlow NATGAS (119) `activeAssetCtx` | ✅ | ✅ (data arrived; TxFlow sends no ack by design) | 99 | 3.00 s / 4.41 s | 0.46 s (0.41–1.85) | — | — | 0 / 0 / 0 | ✅ `blockTime` |
+| TxFlow NATGAS `l2BookDepth` | ✅ | ⚠️ frames arrived, but **not attributed to market 119** | ~215 (inferred: 314 records with a source time − 99 ctx) | ~1.4 s (inferred) | ~0.20 s corrected (apparent median −0.07 s) | ❌ not compared: WS book not found under "119" | ⚠️ 0 resync / 0 gaps reported, but attribution failed, so **not verified** | 0 / 0 / 0 | ✅ `time` |
+| Lighter RH BTC (`order_book/1`) | ✅ | ✅ inferred: deltas are accepted only after a snapshot, and 0 resyncs occurred (the snapshot record itself was pushed out of the 5000-record buffer; fixed) | 5,339 | 0.051 s / 0.87 s (docs: batches every 50 ms) | not measured: the time unit of `last_updated_at` is NOT STATED | ✅ 4 CONSISTENT / 1 INCONSISTENT (0.96 bp vs tolerance 0.46 bp, 0.77 s apart, WS timed by receive time) | ✅ nonce continuity held for every delta (0 resync) | 0 / 0 / 0 | ❌ unit unknown |
+
+**Bugs the live run exposed (fixed, offline-tested; NOT yet re-verified live):**
+1. TxFlow `l2BookDepth` frames carry the instrument id in `id` and the name in `coin` (the REST book showed `coin: "NATGAS-USDC"`). Books are now keyed by `id` and the alias is recorded (`test_txflow_book_is_keyed_by_instrument_id_not_coin_name`).
+2. Statistics were computed from the bounded 5000-record list, so the first snapshot was lost on Lighter. They now come from never-shrinking totals (`test_totals_survive_the_bounded_record_list`).
+3. The REST side was timed by its receive time. It now uses the REST book's own `time` when the venue publishes it, so HL / TxFlow can be compared on the same book state (`test_rest_side_uses_its_own_source_time`).
+4. The report now also carries 2 raw frames per channel, unattributed keys and coin aliases.
+
+### 8.4 Freshness: WebSocket vs the earlier REST method
+
+| | REST polling, 20 s (Phase 8 stream) | WS live (this probe) |
+|---|---|---|
+| Book age at receipt (HL INIT / xyz NATGAS) | 0.50 / 0.52 s apparent (~0.77 / 0.79 s corrected) | 0.42 s corrected |
+| Update interval | 20 s (polling) | 10.3 s (HL push cadence observed for these two thin books; both pushed at the same block times) |
+| Average age at a random decision moment | ≈ 0.8 + 10 = **~10.8 s** | ≈ 0.42 + 5.1 = **~5.6 s** |
+| Worst age between updates | ~20.8 s | ~10.9 s |
+| TxFlow NATGAS funding/mark (ctx) | 20 s polling | every 3.0 s, 0.46 s old |
+
+- **NATGAS** (TxFlow / tradeXYZ, limit 36 s): already aligned with REST. WS roughly halves the average age of the tradeXYZ leg and gives TxFlow ctx every 3 s. The TxFlow WS book is not verified yet (bug 1).
+- **INIT** (limit 2 s): **not solved.** The WS Hyperliquid leg is up to ~10.9 s old between pushes, and the binding leg is still Variational's REST indicative quote (age median 10–20 s, minimum 1.4–2.7 s; no WebSocket exists).
+
+### 8.5 Verdict
+
+| Venue | LIVE VERIFIED (WS) after this probe |
+|---|---|
+| Hyperliquid INIT | ✅ connection, subscription, data, source time; ❌ REST agreement not shown |
+| tradeXYZ NATGAS | ✅ connection, subscription, data, source time; ❌ REST agreement not shown |
+| TxFlow NATGAS | ✅ connection and ctx data; ⚠️ book data received but unattributed: **not verified** |
+| Lighter RH BTC | ✅ connection, data, nonce integrity, REST agreement (4/5); ❌ source-time latency (unit unknown) |
+
+A second ≤ 300 s probe would confirm fixes 1–3 live. It needs the owner's approval.

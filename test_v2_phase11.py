@@ -287,3 +287,45 @@ class PackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LiveProbeFindingsTests(unittest.TestCase):
+    """Regressions from the first approved live probe (2026-11-13 04:31-04:36)."""
+
+    def test_txflow_book_is_keyed_by_instrument_id_not_coin_name(self):
+        b = ws_readonly.Books(lambda: 1_794_500_001.0)
+        frame = json.dumps({"channel": "l2BookDepth", "data": {
+            "coin": "NATGAS-USDC", "id": 119, "time": 1_794_500_000_000, "seq": 1,
+            "prevSeq": None, "type": "snapshot",
+            "levels": [[{"px": "3.6", "sz": "1", "n": 1}], [{"px": "3.61", "sz": "1", "n": 1}]]}})
+        self.assertEqual(b.handle("txflow", frame)["market"], "119")
+        self.assertEqual(b.top("txflow", "119")[:2], (3.6, 3.61))
+        self.assertEqual(b.aliases["119"], "NATGAS-USDC")
+
+    def test_totals_survive_the_bounded_record_list(self):
+        now = [1000.0]
+        b = ws_readonly.Books(lambda: now[0])
+
+        def ob(kind, nonce, begin):
+            return json.dumps({"type": kind + "/order_book", "channel": "order_book:1",
+                               "order_book": {"nonce": nonce, "begin_nonce": begin,
+                                              "bids": [{"price": "100", "size": "1"}],
+                                              "asks": [{"price": "101", "size": "1"}]}})
+        b.handle("lighter_rh", ob("subscribed", 0, None))
+        for n in range(1, 6001):
+            now[0] += 0.05
+            b.handle("lighter_rh", ob("update", n, n - 1))
+        self.assertEqual(len(b.records), 5000)
+        self.assertEqual(b.total("lighter_rh", kind="snapshot", status="ok"), 1)
+        self.assertEqual(b.total("lighter_rh", status="ok"), 6001)
+        self.assertEqual(b.per_market[("lighter_rh", "1")]["ok"], 6001)
+        self.assertIn(("lighter_rh", "subscribed/order_book"), b.samples)
+
+    def test_rest_side_uses_its_own_source_time(self):
+        from tools import v2_ws_probe
+
+        def http_json(xid, method, url, body=None, headers=None):
+            return {"coin": "INIT", "time": 1_794_500_000_000,
+                    "levels": [[{"px": "1", "sz": "1"}], [{"px": "1.1", "sz": "1"}]]}
+        got = v2_ws_probe.rest_top("hyperliquid", "INIT", http_json)
+        self.assertEqual((got[1], got[2]), (1_794_500_000.0, True))
