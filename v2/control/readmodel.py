@@ -419,7 +419,9 @@ def build(now=None, bench=None, out=None):
     # fresh (and the recorder runs), never by association.
     age = summary["snapshot_age_s"]
     scan_live = live and age is not None and age <= SCAN_LIVE_MAX_S
-    snap_banner = None if scan_live else (
+    # the recorder state is always said when it is not running (Phase 14 invariant)
+    pre = "" if live else BANNER_HISTORICAL + " "
+    snap_banner = None if scan_live else pre + (
         "HISTORICAL SNAPSHOT - opportunities from a scan %s old. Nothing here is live."
         % ("UNKNOWN" if age is None else "%.1f h" % (age / 3600.0)))
     override = {n: dict(data_mode="LIVE_OBSERVED" if scan_live else "HISTORICAL",
@@ -427,10 +429,10 @@ def build(now=None, bench=None, out=None):
                 for n in ("opportunities", "opportunities_summary", "markets",
                           "strategies_readiness")}
     override["paper_positions"] = dict(
-        data_mode="SIMULATION", banner="SIMULATED PAPER positions from ESTIMATED replays "
-        "of recorded data. No fill is an exchange fill.")
+        data_mode="SIMULATION", banner=pre + "SIMULATED PAPER positions from ESTIMATED "
+        "replays of recorded data. No fill is an exchange fill.")
     override["funding_persistence"] = dict(
-        data_mode="HISTORICAL", banner="Research on recorded data (ESTIMATED models).")
+        data_mode="HISTORICAL", banner=pre + "Research on recorded data (ESTIMATED models).")
     out.mkdir(parents=True, exist_ok=True)
     sizes = {}
     for name in FILES:
