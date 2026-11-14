@@ -316,8 +316,27 @@ def make_handler(store, stats):
             name = h.rsplit(":", 1)[0] if not h.startswith("[") else h.split("]")[0] + "]"
             return name in LOOPBACK_NAMES
 
+        MAX_DRAIN = 65536
+
+        def _drain(self):
+            """Read and DISCARD a refused request's body (bounded, never parsed or
+            stored). Closing with unread bytes makes Windows reset the connection, and
+            the client may then see a reset instead of the 405 (flaky, 2 in 25)."""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return
+            n = max(0, min(n, self.MAX_DRAIN))
+            if n:
+                try:
+                    self.connection.settimeout(2.0)
+                    self.rfile.read(n)
+                except OSError:
+                    pass
+
         def _deny(self):
             stats["refused"] += 1
+            self._drain()
             self._json(405, dict(error="method not allowed: this server is GET-only "
                                  "(PAPER; no actions)"), extra={"Allow": "GET, HEAD"})
 
