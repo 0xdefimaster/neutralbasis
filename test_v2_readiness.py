@@ -217,5 +217,56 @@ class SectionLabelTests(unittest.TestCase):
         self.assertEqual(r["opportunities"]["data_mode"], "HISTORICAL")
 
 
+class RecorderConsistencyTests(unittest.TestCase):
+    def setUp(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        self.d = Path(tempfile.mkdtemp(prefix="nb-rec-"))
+        self.addCleanup(shutil.rmtree, self.d, True)
+
+    def recorder(self, **kw):
+        from v2 import recorder
+        return recorder.Recorder(self.d / "rec", wanted=lambda: {("V", "A")},
+                                 disk_usage=lambda p: mock.Mock(free=10 ** 12), **kw)
+
+    def test_a_sealed_segment_missing_from_the_manifest_is_reconciled(self):
+        import json
+        r = self.recorder()
+        r.record("book", "V", "A", {"x": 1})
+        r.close()
+        mf = self.d / "rec" / "manifest.jsonl"
+        lines = mf.read_text().splitlines()
+        mf.write_text("")                      # crash between rename and manifest line
+        r2 = self.recorder()
+        rows = [json.loads(x) for x in mf.read_text().splitlines()]
+        self.assertEqual(r2.stats["manifest_reconciled"], 1)
+        self.assertEqual(rows[0]["note"], "MANIFEST_MISSING")
+        self.assertEqual(rows[0]["sha256"], json.loads(lines[0])["sha256"])
+        r3 = self.recorder()                   # idempotent: nothing added twice
+        self.assertEqual(r3.stats["manifest_reconciled"], 0)
+
+    def test_the_recorder_writes_its_own_heartbeat(self):
+        import json
+        hb = self.d / "control"
+        now = [T0]
+        r = self.recorder(heartbeat_dir=hb, clock=lambda: now[0])
+        r.record("book", "V", "A", {"x": 1})
+        f = hb / "heartbeat-recorder.json"
+        x = json.loads(f.read_text())
+        self.assertEqual((x["name"], x["at"]), ("recorder", T0))
+        self.assertEqual(x["recorder"]["written"], 1)
+        now[0] = T0 + 5
+        r.record("book", "V", "A", {"x": 2})
+        self.assertEqual(json.loads(f.read_text())["at"], T0)     # at most every 15 s
+        r.close()
+
+    def test_heartbeat_never_on_the_failing_disk(self):
+        r = self.recorder(heartbeat_dir="E:\\nb-control")
+        self.assertFalse(r.heartbeat(force=True))
+        self.assertEqual(r.stats["heartbeat_failures"], 1)
+        r.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,7 +31,7 @@ SCHEMA = 1
 class Recorder:
     def __init__(self, root, wanted, min_free_bytes=2 * 1024 ** 3,
                  segment_bytes=64 * 1024 ** 2, segment_seconds=3600.0, clock=time.time,
-                 disk_usage=shutil.disk_usage):
+                 disk_usage=shutil.disk_usage, heartbeat_dir=None, heartbeat_every=15.0):
         root = Path(root).resolve()
         if str(root).lower().startswith("e:"):
             raise ValueError("the recorder must not write on E: (failing disk)")
@@ -45,7 +45,11 @@ class Recorder:
         self.raw_bytes = 0
         self.stopped_for_disk = False
         self.stats = dict(written=0, refused_unwanted=0, refused_disk=0, sealed=0,
-                          recovered=0, gaps=0)
+                          recovered=0, gaps=0, manifest_reconciled=0)
+        # readiness audit: the Doctor / panel learn that THIS producer runs only from a
+        # heartbeat it writes itself (heartbeat-recorder.json, atomic, small)
+        self.heartbeat_dir = Path(heartbeat_dir) if heartbeat_dir else None
+        self.heartbeat_every, self.last_heartbeat = heartbeat_every, None
         (self.root / "segments").mkdir(parents=True, exist_ok=True)
         self.recover()
 
@@ -54,6 +58,27 @@ class Recorder:
         for p in sorted((self.root / "segments").glob("*/*.part.jsonl.gz")):
             self._seal(p, recovered=True)
             self.stats["recovered"] += 1
+        self.reconcile_manifest()
+
+    def reconcile_manifest(self):
+        """A crash between a segment's rename and its manifest line leaves a sealed
+        segment no manifest knows (no checksum on record). Every such segment gets its
+        line now, flagged recovered with note MANIFEST_MISSING; nothing is deleted."""
+        mf = self.root / "manifest.jsonl"
+        known = set()
+        if mf.exists():
+            for line in mf.read_text(encoding="utf-8").splitlines():
+                try:
+                    known.add(json.loads(line)["file"].replace("\\", "/"))
+                except Exception:
+                    continue                  # a torn manifest line: the file is re-added
+        for p in sorted((self.root / "segments").glob("*/*.jsonl.gz")):
+            if ".part." in p.name:
+                continue
+            rel = str(p.relative_to(self.root)).replace("\\", "/")
+            if rel not in known:
+                self._manifest(p, p.read_bytes(), recovered=True, note="MANIFEST_MISSING")
+                self.stats["manifest_reconciled"] += 1
 
     def _open(self):
         day = datetime.datetime.fromtimestamp(self.clock(), datetime.timezone.utc).strftime(
@@ -80,12 +105,45 @@ class Recorder:
         from v2 import ops
 
         ops.replace_retry(part, final)
+        self._manifest(final, data, recovered, lines=lines, first=first, last=last)
+        self.stats["sealed"] += 1
+
+    def _manifest(self, final, data, recovered, lines=None, first=None, last=None,
+                  note=None):
         with open(self.root / "manifest.jsonl", "a", encoding="utf-8") as m:
             m.write(json.dumps(dict(file=str(final.relative_to(self.root)),
                                     sha256=hashlib.sha256(data).hexdigest(),
                                     bytes=len(data), lines=lines, first=first, last=last,
-                                    recovered=recovered, sealed=self.clock())) + "\n")
-        self.stats["sealed"] += 1
+                                    recovered=recovered, sealed=self.clock(),
+                                    **({"note": note} if note else {}))) + "\n")
+            m.flush()
+            os.fsync(m.fileno())
+
+    def heartbeat(self, force=False):
+        """heartbeat-recorder.json with the recorder's own health (atomic); at most every
+        `heartbeat_every` s. Never raises: a failed heartbeat is counted."""
+        if self.heartbeat_dir is None:
+            return False
+        now = self.clock()
+        if not force and self.last_heartbeat is not None and \
+                now - self.last_heartbeat < self.heartbeat_every:
+            return False
+        try:
+            from v2 import storage
+            storage.check_dir(self.heartbeat_dir)
+            self.heartbeat_dir.mkdir(parents=True, exist_ok=True)
+            f = self.heartbeat_dir / "heartbeat-recorder.json"
+            tmp = f.with_suffix(".tmp")
+            tmp.write_text(json.dumps(dict(at=now, name="recorder", pid=os.getpid(),
+                                           every_s=self.heartbeat_every,
+                                           recorder=self.health()), default=str),
+                           encoding="utf-8")
+            os.replace(tmp, f)
+            self.last_heartbeat = now
+            return True
+        except Exception:
+            self.stats["heartbeat_failures"] = self.stats.get("heartbeat_failures", 0) + 1
+            return False
 
     def rotate(self):
         with self.lock:
@@ -160,6 +218,7 @@ class Recorder:
                     or self.clock() - self.opened >= self.segment_seconds):
                 self._rotate_locked()
         self.stats["written"] += 1
+        self.heartbeat()
         return True
 
     # -- retention / health -------------------------------------------------------------
