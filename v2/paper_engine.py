@@ -242,17 +242,26 @@ class PaperEngine:
     # filled. A refused fill is "not filled" (the position stays at risk, visibly).
     # The shared price-quality layer (v2.fill_guard), also used by wide_paper's desk.
 
-    def fill_guard(self, p, side, obs, book=None, price=None):
-        """Reason a fill must not be booked, or None (v2.fill_guard)."""
+    def fill_guard(self, p, side, obs, book=None, price=None, action=None):
+        """Reason a fill must not be booked, or None (v2.fill_guard). Exits of a
+        position stuck for STUCK_RELAX_S get the relaxed divergence / spread limits."""
         leg = p["legs"][side]
+        relaxed = action in ("retry", "unwind", "close") and fill_guard.relaxed_after(
+            p.get("guard_stuck_since"), obs.at)
         if book is not None and leg["model"] == "CLOB":
-            rs = fill_guard.book_reasons(book, leg.get("exchange_id"), obs.at)
+            rs = fill_guard.book_reasons(book, leg.get("exchange_id"), obs.at,
+                                         relaxed=relaxed)
             if rs:
                 return rs[0]
         if price is not None:
             return fill_guard.price_reason(price, cross_ref=self.cross_reference(p, side, obs),
-                                           own_ref=self.reference_price(p, side, obs))
+                                           own_ref=self.reference_price(p, side, obs),
+                                           relaxed=relaxed)
         return None
+
+    def guard_refused(self, p, obs):
+        if p.get("guard_stuck_since") is None:
+            p["guard_stuck_since"] = obs.at
 
     def cross_reference(self, p, side, obs):
         """The OTHER leg's fresh current mid (same underlying, per-unit), or None."""
@@ -277,9 +286,12 @@ class PaperEngine:
         v, a = leg["venue"], p["asset"]
         n = sum(1 for f in leg["fills"] if f["action"] == action)
         times = obs.times.get((v, a)) or []
+        relaxed = action in ("retry", "unwind", "close") and fill_guard.relaxed_after(
+            p.get("guard_stuck_since"), obs.at)
         if leg["model"] == "CLOB":
-            why = self.fill_guard(p, side, obs, book=obs.book(v, a))
+            why = self.fill_guard(p, side, obs, book=obs.book(v, a), action=action)
             if why:
+                self.guard_refused(p, obs)
                 self.ledger.emit("reliability", pos=p["id"], note="%s %s %s not filled at "
                                  "%.0f: FILL_GUARD %s" % (action, side, v, obs.at, why))
                 return 0.0
@@ -301,11 +313,19 @@ class PaperEngine:
             self.ledger.emit("reliability", pos=p["id"], note="%s %s %s not filled at %.0f: %s"
                              % (action, side, v, obs.at, f.get("reason")))
             return 0.0
-        why = self.fill_guard(p, side, obs, price=f.get("price"))
+        why = self.fill_guard(p, side, obs, price=f.get("price"), action=action)
         if why:
+            self.guard_refused(p, obs)
             self.ledger.emit("reliability", pos=p["id"], note="%s %s %s not filled at %.0f: "
                              "FILL_GUARD %s" % (action, side, v, obs.at, why))
             return 0.0
+        if relaxed:
+            self.ledger.emit("reliability", pos=p["id"], note="%s %s %s FILLED UNDER RELAXED "
+                             "GUARD after %.0f s stuck (divergence / spread limits widened; "
+                             "stale / crossed / scale never relaxed)" % (
+                                 action, side, v, obs.at - p["guard_stuck_since"]))
+        if action == "open":
+            p["guard_stuck_since"] = None   # exits keep the clock until the position closes
         self.ledger.emit("fill", pos=p["id"], side=side, at=obs.at, action=action,
                          qty=f["filled"], price=f["price"], fee=f["fee"], label=f["label"],
                          model=f["model"], obs_time=times, quote_age_s=f.get("quote_age_s"),

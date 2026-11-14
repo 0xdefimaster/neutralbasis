@@ -312,6 +312,9 @@ class FakeObs:
     def rfq_record(self, v, a):
         return None
 
+    def settled(self, v, a, at):
+        return []                     # MOCK: no settled history in these scenarios
+
 
 def book(px, received=T0, crossed=False):
     b = dict(bids=[(px * (1.002 if crossed else 0.999), 1000.0)],

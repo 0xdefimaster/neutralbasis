@@ -197,6 +197,13 @@ def paper_positions(bench):
                 problems.append("unrealized PnL UNKNOWN (no aligned marks)")
             if "PUBLISHED_ESTIMATE" in ev:
                 problems.append("funding from published rates (payments UNVERIFIED)")
+            from v2 import paper_ledger as L
+            if s.get("state") in (L.RECOVERY_PENDING, L.LEG_RECOVERY, L.PARTIAL,
+                                  L.CLOSE_ATTEMPT):
+                # a position the fill guard (or a missing book) keeps from closing: its
+                # loss is not realized yet - never shown as quietly flat
+                problems.append("STUCK_IN_RECOVERY: exits refused or unfilled; loss not "
+                                "realized yet")
             out.append(dict(
                 id=s.get("position"), scenario=scenario,
                 scenario_only=scenario != "estimated", asset=s.get("asset"),

@@ -194,5 +194,90 @@ class EveryFillPathIsGuardedTests(unittest.TestCase):
         self.assertEqual(ioc_users, {"fill"})
 
 
+class StuckPositionTests(unittest.TestCase):
+    """A real persistent divergence or a chronically wide book must not keep a position
+    from closing forever (its loss never realized); data errors stay refused."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.store = bot.Store(os.path.join(self.dir.name, "p.sqlite3"))
+        self.addCleanup(self.store.db.close)
+        self.t = [T0]
+        for p in (mock.patch.object(bot, "now", lambda: self.t[0]),
+                  mock.patch.object(wide_paper, "now", lambda: self.t[0])):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_close(self, b_long, b_short, hours=7):
+        src = DeskSource({})
+        d = wide_paper.WidePaper(self.store, src, sleep=lambda s: None)
+        p = DeskTests.position()
+        d.positions.append(p)
+
+        def books(at):
+            src.books = {("A", "BTC"): dict(b_long, received=at),
+                         ("B", "BTC"): dict(b_short, received=at)}
+        books(self.t[0])
+        d.close(p, "test")
+        first = (p["status"], any(l["closed"] for l in p["legs"]))
+        self.t[0] = T0 + hours * 3600
+        books(self.t[0])
+        d.close(p, "test")
+        return first, p
+
+    def test_a_real_10pct_divergence_closes_after_the_stuck_period(self):
+        first, p = self.run_close(book(100.0), book(110.0))
+        self.assertEqual(first, ("RECOVERY", False))               # refused at first
+        self.assertTrue(all(l["closed"] for l in p["legs"]))      # closed after 6 h
+        self.assertTrue(p.get("closed_under_relaxed_guard"))
+        self.assertLess(p["price_pnl"], 0)                         # the loss is realized
+
+    def test_a_scale_sized_error_is_never_relaxed(self):
+        first, p = self.run_close(book(100.0), book(300.0), hours=48)
+        self.assertEqual(first, ("RECOVERY", False))
+        self.assertFalse(any(l["closed"] for l in p["legs"]))
+
+    def test_a_wide_book_closes_after_the_stuck_period_but_not_an_absurd_one(self):
+        first, p = self.run_close(book(100.0), book(100.0, half=1.5))   # 300 bp
+        self.assertEqual(first, ("RECOVERY", False))
+        self.assertTrue(all(l["closed"] for l in p["legs"]))
+        first, p = self.run_close(book(100.0), book(100.0, half=4.5))   # 900 bp
+        self.assertFalse(any(l["closed"] for l in p["legs"]))
+
+    def test_stale_is_never_relaxed(self):
+        src = DeskSource({("A", "BTC"): book(100.0, at=T0 - 600),
+                          ("B", "BTC"): book(100.0)})
+        d = wide_paper.WidePaper(self.store, src, sleep=lambda s: None)
+        p = DeskTests.position()
+        p["guard_stuck_since"] = T0 - 30 * 3600                      # long stuck
+        d.close(p, "test")
+        self.assertFalse(any(l["closed"] for l in p["legs"]))
+
+    def test_estimated_engine_retry_relaxes_only_after_the_stuck_period(self):
+        from tools import v2_failure_harness as h
+        from v2 import paper_engine, paper_ledger as L
+        d = tempfile.mkdtemp(prefix="nb-stuck-")
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        led = L.PaperLedger(Path(d) / "led")
+        p = h.partial_position(led)
+        eng = paper_engine.PaperEngine(led, dict(wide_paper.WIDE_DEFAULTS), [])
+        t1 = h.T0
+        obs = lambda t: h.FakeObs(t, {("tradeXYZ", "X"): h.book(3.3, received=t),  # noqa
+                                      ("TxFlow", "X"): h.book(3.0, received=t)})
+        eng.retry(p, obs(t1))                                       # 10 % apart
+        self.assertFalse(p["legs"]["short"]["fills"])
+        self.assertEqual(p["guard_stuck_since"], t1)
+        eng.retry(p, obs(t1 + 7 * 3600))
+        # after 6 h stuck the engine's recovery timeout unwinds the excess long leg
+        # under the relaxed guard: the position is flat and the outcome is realized
+        unwinds = [f for f in p["legs"]["long"]["fills"] if f["action"] == "unwind"]
+        self.assertTrue(unwinds)
+        self.assertEqual(p["state"], L.CLOSED)
+        notes = [m for m in (Path(d) / "led" / "ledger.jsonl").read_text().splitlines()
+                 if "RELAXED GUARD" in m]
+        self.assertTrue(notes)
+
+
 if __name__ == "__main__":
     unittest.main()

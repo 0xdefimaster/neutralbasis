@@ -2684,14 +2684,14 @@ class WidePaper:
         b = self.book(v, a)
         return walk(b["asks" if buy else "bids"], qty, buy, self.extra_slippage), b
 
-    def price_guard(self, v, a, b, px, other=None, own_ref=None, walk=False):
+    def price_guard(self, v, a, b, px, other=None, own_ref=None, walk=False, relaxed=False):
         """The shared price-quality layer (v2.fill_guard) for a desk fill: None, or the
         reason this price must not be booked. `other`: the other leg's venue (its fresh
         current mid is the cross-leg reference)."""
         from v2 import fill_guard as fg
 
         at = now()
-        rs = fg.book_reasons(b, fg.xid_of(v), at)
+        rs = fg.book_reasons(b, fg.xid_of(v), at, relaxed=relaxed)
         if rs:
             return rs[0]
         cross = None
@@ -2701,7 +2701,7 @@ class WidePaper:
             except Exception:
                 cross = None
         return fg.price_reason(px, book_mid=mid_of(b), cross_ref=cross, own_ref=own_ref,
-                               walk=walk)
+                               walk=walk, relaxed=relaxed)
 
     def fill(self, v, a, qty, buy, limit, lots, other=None):
         """An entry order: immediate-or-cancel at `limit` on the venue's book now. A
@@ -2732,9 +2732,12 @@ class WidePaper:
         px, b = self.quote(leg["venue"], p["asset"], qty, leg["side"] == "short")
         other = next((x["venue"] for x in p["legs"] if x is not leg and not x.get("closed")),
                      None)
+        from v2 import fill_guard as fg
         why = self.price_guard(leg["venue"], p["asset"], b, px, other=other,
-                               own_ref=leg["entry"], walk=True)
+                               own_ref=leg["entry"], walk=True,
+                               relaxed=fg.relaxed_after(p.get("guard_stuck_since"), now()))
         if why:
+            p.setdefault("guard_stuck_since", now())
             self.events("FILL_GUARD", "Bacak boşaltma reddedildi: " + why,
                         position=p["id"], venue=leg["venue"])
             raise FillGuardRefused("unwind refused: " + why)
@@ -3249,13 +3252,15 @@ class WidePaper:
         for leg in open_legs:
             b = books.get(leg["venue"])
             buy = leg["side"] == "short"
-            why = (fg.book_reasons(b, fg.xid_of(leg["venue"]), now()) or [None])[0]
+            rlx = fg.relaxed_after(p.get("guard_stuck_since"), now())
+            why = (fg.book_reasons(b, fg.xid_of(leg["venue"]), now(), relaxed=rlx)
+                   or [None])[0]
             if why is None:
                 px = walk(b["asks" if buy else "bids"], leg["qty"], buy, self.extra_slippage)
                 cross = next((fg.reference_mid(books.get(o["venue"]), fg.xid_of(o["venue"]),
                                                now()) for o in open_legs if o is not leg),
                              None)
-                why = fg.price_reason(px, cross_ref=cross, own_ref=leg["entry"])
+                why = fg.price_reason(px, cross_ref=cross, own_ref=leg["entry"], relaxed=rlx)
             if why:
                 p["mark_status"] = "UNRELIABLE: %s %s" % (leg["venue"], why)
                 p["mark_refused_at"] = now()
@@ -3324,7 +3329,11 @@ class WidePaper:
             for i in range(len(legs)):
                 amount[i] = room[i]
         # The shared price guard on EVERY leg first: if one leg's exit price is refused,
-        # nothing is closed this round (closing the other leg alone would unhedge).
+        # nothing is closed this round (closing the other leg alone would unhedge). A
+        # position stuck for fill_guard.STUCK_RELAX_S gets the relaxed divergence /
+        # spread limits (stale / crossed / scale errors are never relaxed).
+        from v2 import fill_guard as fg
+        relaxed = fg.relaxed_after(p.get("guard_stuck_since"), now())
         for i, leg in enumerate(legs):
             if amount[i] <= 1e-12:
                 continue
@@ -3337,14 +3346,21 @@ class WidePaper:
                 from v2 import fill_guard as fg
                 cross = fg.reference_mid(books[others[0]], fg.xid_of(legs[others[0]]["venue"]),
                                          now())
-            from v2 import fill_guard as fg
-            why = (fg.book_reasons(b, fg.xid_of(leg["venue"]), now()) or [None])[0] or \
+            why = (fg.book_reasons(b, fg.xid_of(leg["venue"]), now(), relaxed=relaxed)
+                   or [None])[0] or \
                 fg.price_reason(px, book_mid=mid_of(b), cross_ref=cross,
-                                own_ref=leg["entry"], walk=True)
+                                own_ref=leg["entry"], walk=True, relaxed=relaxed)
             if why:
                 errors.append("FILL_GUARD %s: %s" % (leg["venue"], why))
+                if p.get("guard_stuck_since") is None:
+                    p["guard_stuck_since"] = now()
                 amount = {k: 0.0 for k in amount}
                 break
+        if relaxed and any(v > 1e-12 for v in amount.values()):
+            p["closed_under_relaxed_guard"] = True
+            self.events("FILL_GUARD", "Takılı pozisyon gevşetilmiş koruma ile kapatılıyor "
+                        "(ayrışma / spread sınırı genişletildi)", position=p["id"],
+                        stuck_s=now() - p["guard_stuck_since"])
         for i, leg in enumerate(legs):
             qty = amount[i]
             if qty <= 1e-12:
