@@ -696,6 +696,10 @@ def round_counts(outcomes):
     )
 
 
+class FillGuardRefused(ValueError):
+    """The shared price guard (v2.fill_guard) refused a desk fill."""
+
+
 def mid_of(book):
     return (max(p for p, q in book["bids"]) + min(p for p, q in book["asks"])) / 2
 
@@ -2680,23 +2684,60 @@ class WidePaper:
         b = self.book(v, a)
         return walk(b["asks" if buy else "bids"], qty, buy, self.extra_slippage), b
 
-    def fill(self, v, a, qty, buy, limit, lots):
+    def price_guard(self, v, a, b, px, other=None, own_ref=None, walk=False):
+        """The shared price-quality layer (v2.fill_guard) for a desk fill: None, or the
+        reason this price must not be booked. `other`: the other leg's venue (its fresh
+        current mid is the cross-leg reference)."""
+        from v2 import fill_guard as fg
+
+        at = now()
+        rs = fg.book_reasons(b, fg.xid_of(v), at)
+        if rs:
+            return rs[0]
+        cross = None
+        if other is not None:
+            try:
+                cross = fg.reference_mid(self.book(other, a), fg.xid_of(other), at)
+            except Exception:
+                cross = None
+        return fg.price_reason(px, book_mid=mid_of(b), cross_ref=cross, own_ref=own_ref,
+                               walk=walk)
+
+    def fill(self, v, a, qty, buy, limit, lots, other=None):
         """An entry order: immediate-or-cancel at `limit` on the venue's book now. A
         partial fill keeps what both legs' order sizes allow (the rest is cancelled);
-        returns the quantity, its average price and the book."""
+        returns the quantity, its average price and the book. A fill the shared price
+        guard refuses is NOT filled (0, None)."""
         b = self.book(v, a)
         side = b["asks" if buy else "bids"]
         got, px = ioc(side, qty, buy, limit, self.extra_slippage)
         if 0 < got < qty * (1 - 1e-9):
             got = lot_floor(got, px, lots)
             px = ioc(side, got, buy, limit, self.extra_slippage)[1] if got else None
+        if got:
+            why = self.price_guard(v, a, b, px, other=other,
+                                   own_ref=limit / (1 + FILL_TOLERANCE) if buy else
+                                   limit / (1 - FILL_TOLERANCE))
+            if why:
+                self.events("FILL_GUARD", "Dolum reddedildi: " + why, venue=v, asset=a)
+                return 0.0, None, b
         return got, px, b
 
     def unwind(self, p, leg, qty):
         """Close at once the part of a filled leg the other leg could not match: a real
-        account would otherwise hold that much open directional exposure."""
+        account would otherwise hold that much open directional exposure. A price the
+        shared guard refuses is not booked: FillGuardRefused (the position goes to
+        recovery, the excess stays open and visible)."""
         self.sleep(self.latency(leg["venue"]))
         px, b = self.quote(leg["venue"], p["asset"], qty, leg["side"] == "short")
+        other = next((x["venue"] for x in p["legs"] if x is not leg and not x.get("closed")),
+                     None)
+        why = self.price_guard(leg["venue"], p["asset"], b, px, other=other,
+                               own_ref=leg["entry"], walk=True)
+        if why:
+            self.events("FILL_GUARD", "Bacak boşaltma reddedildi: " + why,
+                        position=p["id"], venue=leg["venue"])
+            raise FillGuardRefused("unwind refused: " + why)
         pnl = qty * (px - leg["entry"]) * (1 if leg["side"] == "long" else -1)
         fee = qty * px * leg["fee_rate"]
         self.credit(leg["venue"], pnl - fee)
@@ -2753,7 +2794,8 @@ class WidePaper:
                 self.sleep(self.latency(venue))
                 planned = c["entry_long"] if buy else c["entry_short"]
                 limit = planned * (1 + FILL_TOLERANCE if buy else 1 - FILL_TOLERANCE)
-                got, px, b = self.fill(venue, c["asset"], qty, buy, limit, lots)
+                got, px, b = self.fill(venue, c["asset"], qty, buy, limit, lots,
+                                       other=c["short"] if buy else c["long"])
                 if not got:
                     raise ValueError(
                         "Dolum olmadı: defter %0,1 fiyat sınırı içinde emir boyutunu "
@@ -2938,7 +2980,8 @@ class WidePaper:
             leg, buy = legs[side], side == "long"
             self.sleep(self.latency(leg["venue"]))
             limit = planned * (1 + FILL_TOLERANCE if buy else 1 - FILL_TOLERANCE)
-            got, px, b = self.fill(leg["venue"], p["asset"], qty, buy, limit, lots)
+            got, px, b = self.fill(leg["venue"], p["asset"], qty, buy, limit, lots,
+                                   other=legs["short" if buy else "long"]["venue"])
             fee = got * px * leg["fee_rate"] if got else 0.0
             margin = got * px / q["leverage"] if got else 0.0
             if not got or margin + fee > self.headroom(leg["venue"]):
@@ -2967,7 +3010,13 @@ class WidePaper:
             else:
                 matched = got
                 if got < qty * (1 - 1e-9):
-                    self.unwind(p, legs["long"], qty - got)
+                    try:
+                        self.unwind(p, legs["long"], qty - got)
+                    except FillGuardRefused as ex:
+                        # legs are unequal now: never hide it, hand it to recovery
+                        p["status"] = "RECOVERY"
+                        p["close_reason"] = "Bacak kurtarma: " + str(ex)
+                        self.persist()
         return matched
 
     @staticmethod
@@ -3191,6 +3240,27 @@ class WidePaper:
         return min(0.0, cash)
 
     def mark_position(self, p, books):
+        # The shared price guard first: an unrealized PnL marked from a crossed, stale or
+        # mis-scaled book would be a fake PAPER profit. A refused mark keeps the last
+        # one and says why (never invented).
+        from v2 import fill_guard as fg
+
+        open_legs = [leg for leg in p["legs"] if not leg["closed"]]
+        for leg in open_legs:
+            b = books.get(leg["venue"])
+            buy = leg["side"] == "short"
+            why = (fg.book_reasons(b, fg.xid_of(leg["venue"]), now()) or [None])[0]
+            if why is None:
+                px = walk(b["asks" if buy else "bids"], leg["qty"], buy, self.extra_slippage)
+                cross = next((fg.reference_mid(books.get(o["venue"]), fg.xid_of(o["venue"]),
+                                               now()) for o in open_legs if o is not leg),
+                             None)
+                why = fg.price_reason(px, cross_ref=cross, own_ref=leg["entry"])
+            if why:
+                p["mark_status"] = "UNRELIABLE: %s %s" % (leg["venue"], why)
+                p["mark_refused_at"] = now()
+                return
+        p["mark_status"] = "OK"
         unrealized = exit_fee = slippage = 0.0
         for leg in p["legs"]:
             if leg["closed"]:
@@ -3253,6 +3323,28 @@ class WidePaper:
         else:
             for i in range(len(legs)):
                 amount[i] = room[i]
+        # The shared price guard on EVERY leg first: if one leg's exit price is refused,
+        # nothing is closed this round (closing the other leg alone would unhedge).
+        for i, leg in enumerate(legs):
+            if amount[i] <= 1e-12:
+                continue
+            b = books[i]
+            px = walk(b["asks" if leg["side"] == "short" else "bids"], amount[i],
+                      leg["side"] == "short", self.extra_slippage)
+            others = [j for j in books if j != i]
+            cross = None
+            if others:
+                from v2 import fill_guard as fg
+                cross = fg.reference_mid(books[others[0]], fg.xid_of(legs[others[0]]["venue"]),
+                                         now())
+            from v2 import fill_guard as fg
+            why = (fg.book_reasons(b, fg.xid_of(leg["venue"]), now()) or [None])[0] or \
+                fg.price_reason(px, book_mid=mid_of(b), cross_ref=cross,
+                                own_ref=leg["entry"], walk=True)
+            if why:
+                errors.append("FILL_GUARD %s: %s" % (leg["venue"], why))
+                amount = {k: 0.0 for k in amount}
+                break
         for i, leg in enumerate(legs):
             qty = amount[i]
             if qty <= 1e-12:

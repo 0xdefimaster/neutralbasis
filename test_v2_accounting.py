@@ -140,12 +140,12 @@ class DeskTests(unittest.TestCase):
         self.setup_pair()
         original = self.desk.fill
 
-        def fill(v, a, qty, buy, limit, lots):
+        def fill(v, a, qty, buy, limit, lots, other=None):
             if v == "Binance":
                 # MOCK: the long leg's price jumps, then the short leg finds no fill.
                 self.src.books[("Hyperliquid", "BTC")] = book(101.0, T0)
                 return 0.0, None, self.src.book(v, a)
-            return original(v, a, qty, buy, limit, lots)
+            return original(v, a, qty, buy, limit, lots, other=other)
 
         with mock.patch.object(self.desk, "fill", fill):
             self.desk.cycle()

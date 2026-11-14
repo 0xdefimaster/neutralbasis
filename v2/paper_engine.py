@@ -53,7 +53,7 @@ evaluation records `alt_gate_blocks` either way.
 """
 import math
 
-from v2 import economics, estimated, gates, marketdata, paper_exec, rfq_paper
+from v2 import economics, estimated, fill_guard, gates, marketdata, paper_exec, rfq_paper
 from v2 import paper_ledger as L
 
 SIZES = (1000.0, 2500.0, 5000.0, 10000.0)
@@ -240,34 +240,34 @@ class PaperEngine:
     # refuses stale books, but retries, unwinds and closes of an open position used the
     # observation's book as is: a crossed, stale or wrongly scaled book would have been
     # filled. A refused fill is "not filled" (the position stays at risk, visibly).
-    MAX_FILL_DEVIATION = 0.25
+    # The shared price-quality layer (v2.fill_guard), also used by wide_paper's desk.
 
     def fill_guard(self, p, side, obs, book=None, price=None):
-        """Reason a fill must not be booked, or None."""
+        """Reason a fill must not be booked, or None (v2.fill_guard)."""
         leg = p["legs"][side]
         if book is not None and leg["model"] == "CLOB":
-            if book.get("crossed") or (book.get("bids") and book.get("asks") and
-                                       book["bids"][0][0] >= book["asks"][0][0]):
-                return "BOOK_CROSSED"
-            if marketdata.stale(book, leg.get("exchange_id"), obs.at):
-                return "BOOK_STALE"
+            rs = fill_guard.book_reasons(book, leg.get("exchange_id"), obs.at)
+            if rs:
+                return rs[0]
         if price is not None:
-            ref = self.reference_price(p, side, obs)
-            if ref and abs(price / ref - 1) > self.MAX_FILL_DEVIATION:
-                return "PRICE_SCALE_SUSPECT (%.6g vs reference %.6g)" % (price, ref)
+            return fill_guard.price_reason(price, cross_ref=self.cross_reference(p, side, obs),
+                                           own_ref=self.reference_price(p, side, obs))
         return None
 
+    def cross_reference(self, p, side, obs):
+        """The OTHER leg's fresh current mid (same underlying, per-unit), or None."""
+        other = p["legs"]["short" if side == "long" else "long"]
+        b = obs.book(other["venue"], p["asset"])
+        return fill_guard.reference_mid(b, other.get("exchange_id"), obs.at,
+                                        rfq=(b or {}).get("model") == "rfq_indicative")
+
     def reference_price(self, p, side, obs):
-        """This leg's average fill price so far, else the other leg's fill average, else
-        the other leg's current mid (same underlying, per-unit prices)."""
+        """This leg's average fill price so far, else the other leg's fill average
+        (the last-defence reference; None before any fill)."""
         for s in (side, "short" if side == "long" else "long"):
             fl = [f for f in p["legs"][s]["fills"] if f.get("price") and f.get("qty")]
             if fl:
                 return sum(f["price"] * f["qty"] for f in fl) / sum(f["qty"] for f in fl)
-        other = p["legs"]["short" if side == "long" else "long"]
-        b = obs.book(other["venue"], p["asset"])
-        if b and b.get("bids") and b.get("asks") and not b.get("crossed"):
-            return economics.mid(b)
         return None
 
     def sim_fill(self, p, side, obs, action, qty=None, size_usd=None):

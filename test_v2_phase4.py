@@ -343,10 +343,10 @@ class LifecycleTests(unittest.TestCase):
     def test_second_leg_without_fill_is_a_leg_recovery(self):
         original = self.desk.fill
 
-        def fill(v, a, qty, buy, limit, lots):
+        def fill(v, a, qty, buy, limit, lots, other=None):
             if v == "Binance":
                 return 0.0, None, self.src.book(v, a)
-            return original(v, a, qty, buy, limit, lots)
+            return original(v, a, qty, buy, limit, lots, other=other)
 
         with mock.patch.object(self.desk, "fill", fill):
             self.desk.cycle()
