@@ -150,7 +150,8 @@ function oppCard(o, compact) {
                               ["adverse net", usd(fm.net.adverse, "UNKNOWN: no settled history")],
                               ["model confidence", fm.confidence || "UNKNOWN"],
                               ["class", (o.funding_class && o.funding_class.highest) || "UNKNOWN"],
-                              ["profit label", (o.funding_class && o.funding_class.profit_label) || "UNKNOWN"]])));
+                              ["profit label", (o.funding_class && o.funding_class.profit_label) || "UNKNOWN"],
+                              ["execution", (o.funding_class && o.funding_class.execution_basis) || "UNVERIFIED"]])));
     }
   } else {
     add(c, el("p", "muted mt-2", "rejected: " + (o.estimated_first_rejection || o.strict_first_rejection || "-")));

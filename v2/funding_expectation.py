@@ -217,11 +217,12 @@ BASELINE_POSITIVE = "BASELINE_POSITIVE"
 PERSISTENCE_POSITIVE = "PERSISTENCE_POSITIVE"
 ADVERSE_POSITIVE = "ADVERSE_POSITIVE"
 INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+EXECUTION_UNVERIFIED = "EXECUTION_UNVERIFIED"
 CLASSES = (DISCOVERED, BASELINE_POSITIVE, PERSISTENCE_POSITIVE, ADVERSE_POSITIVE,
-           INSUFFICIENT_HISTORY)
+           INSUFFICIENT_HISTORY, EXECUTION_UNVERIFIED)
 
 
-def classify(edge_positive, nets, legs=None, readiness=None):
+def classify(edge_positive, nets, legs=None, readiness=None, rfq=False):
     """Classes of one funding opportunity (cumulative; nets after costs, ESTIMATED):
       DISCOVERED            a funding (or price) edge was observed
       BASELINE_POSITIVE     net > 0 with the published rate held (comparison model)
@@ -244,6 +245,9 @@ def classify(edge_positive, nets, legs=None, readiness=None):
     insufficient = nets.get("persistence") is None or nets.get("adverse") is None
     if insufficient:
         tiers.append(INSUFFICIENT_HISTORY)
+    # PAPER ONLY: no fill was ever an exchange fill, so execution is ALWAYS unverified;
+    # the basis says how it was simulated
+    tiers.append(EXECUTION_UNVERIFIED)
     legs = legs or {}
     # both legs have PUBLIC SETTLED history (a fit was attempted on it); a leg priced
     # from published values only (TxFlow, Variational) leaves the profit unverified
@@ -251,6 +255,8 @@ def classify(edge_positive, nets, legs=None, readiness=None):
                                     for l in legs.values())
     return dict(classes=tiers, highest=highest, insufficient_history=insufficient,
                 profit_label="ESTIMATED" if settled_ok else "ESTIMATED_SETTLEMENT_UNVERIFIED",
+                execution_basis="RFQ_INDICATIVE_NO_FIRM_QUOTE" if rfq else
+                "SIMULATED_ORDERBOOK",
                 paper_entry_readiness=readiness or "NOT_EVALUATED",
                 why_unknown=None if not insufficient else
                 "a leg has no settled history and no recorded published samples"

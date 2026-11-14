@@ -156,7 +156,10 @@ class FundingClassTests(unittest.TestCase):
         legs_set = {"long": dict(fit_status="OK"), "short": dict(fit_status="OK")}
         c = fx.classify(True, dict(baseline=5.0, persistence=None, adverse=None), legs_pub)
         self.assertEqual(c["classes"], ["DISCOVERED", "BASELINE_POSITIVE",
-                                        "INSUFFICIENT_HISTORY"])
+                                        "INSUFFICIENT_HISTORY", "EXECUTION_UNVERIFIED"])
+        self.assertEqual(c["execution_basis"], "SIMULATED_ORDERBOOK")
+        self.assertEqual(fx.classify(True, {}, legs_pub, rfq=True)["execution_basis"],
+                         "RFQ_INDICATIVE_NO_FIRM_QUOTE")
         self.assertEqual(c["profit_label"], "ESTIMATED_SETTLEMENT_UNVERIFIED")
         c = fx.classify(True, dict(baseline=5.0, persistence=2.0, adverse=0.5), legs_set,
                         "NOT_READY")
@@ -164,9 +167,10 @@ class FundingClassTests(unittest.TestCase):
         self.assertEqual(c["profit_label"], "ESTIMATED")               # never VERIFIED
         self.assertEqual(c["paper_entry_readiness"], "NOT_READY")      # passed through
         c = fx.classify(False, dict(baseline=-1.0, persistence=-2.0, adverse=-3.0), legs_set)
-        self.assertEqual((c["classes"], c["highest"]), ([], None))
-        for label in ("VERIFIED", "CONFIRMED"):
-            self.assertNotIn(label, json_dump(c))
+        self.assertEqual((c["classes"], c["highest"]), (["EXECUTION_UNVERIFIED"], None))
+        for label in ("VERIFIED", "CONFIRMED"):                        # never a verdict
+            self.assertNotEqual(c["profit_label"], label)
+            self.assertNotIn(label, c["classes"])
 
     def test_estimated_decisions_do_not_use_the_classes(self):
         """The ESTIMATED evaluator's decision code never reads a class (reporting

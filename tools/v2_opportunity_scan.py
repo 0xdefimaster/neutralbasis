@@ -64,7 +64,9 @@ def models_report(disc):
     cls = [x.get("funding_class") for x in rows if x.get("funding_class")]
     out["classes"] = {c: sum(1 for k in cls if c in k["classes"]) for c in (
         "DISCOVERED", "BASELINE_POSITIVE", "PERSISTENCE_POSITIVE", "ADVERSE_POSITIVE",
-        "INSUFFICIENT_HISTORY")}
+        "INSUFFICIENT_HISTORY", "EXECUTION_UNVERIFIED")}
+    out["execution_basis"] = dict(collections.Counter(k.get("execution_basis")
+                                                      for k in cls))
     out["highest"] = dict(collections.Counter(str(k["highest"]) for k in cls))
     out["profit_label"] = dict(collections.Counter(k["profit_label"] for k in cls))
     out["paper_entry_readiness"] = dict(collections.Counter(k["paper_entry_readiness"]
@@ -72,7 +74,7 @@ def models_report(disc):
     return out
 
 
-def funding_class(fm, edge, strict, label):
+def funding_class(fm, edge, strict, label, rfq=False):
     """Phase 15: classes of a funding / hybrid row (v2.funding_expectation.classify);
     reporting only. None when the evaluator never reached the funding economics."""
     if not fm or not fm.get("models"):
@@ -80,7 +82,7 @@ def funding_class(fm, edge, strict, label):
     from v2 import funding_expectation as fx
     ready = ("STRICT_ELIGIBLE" if strict.get("eligible") else
              "ESTIMATED_CANDIDATE" if label == "ESTIMATED_PAPER_CANDIDATE" else "NOT_READY")
-    return fx.classify(edge, fm.get("net"), fm.get("legs"), ready)
+    return fx.classify(edge, fm.get("net"), fm.get("legs"), ready, rfq=rfq)
 
 
 def model_summary(fm):
@@ -212,7 +214,7 @@ def scan(r, size=1000.0, assets=None):
                         risk_adjusted_score=score,
                         funding_models=model_summary(e.get("funding_models")),
                         funding_class=funding_class(e.get("funding_models"), bool(edge),
-                                                    strict, lab)))
+                                                    strict, lab, rfq)))
     return out, matched
 
 

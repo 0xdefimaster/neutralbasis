@@ -123,6 +123,16 @@ def strategy(bench=None):
             observed_at=r.get("at"), data_source="ESTIMATED",
             next_action="realized funding / persistence evidence (see Funding Persistence)"
             if s != "price_gap" else "price history and a US-session snapshot"))
+    fm = (e.get("funding_models") or {})
+    cls = fm.get("classes")
+    out.append(model.record(
+        "all", "funding_evidence", "HISTORICAL_ONLY" if cls else "NOT_TESTED",
+        "funding classes (ESTIMATED, reported only, not an entry rule): %s; profit label "
+        "%s; execution basis %s; TxFlow / Variational published rates are never "
+        "payments" % (cls, fm.get("profit_label"), fm.get("execution_basis"))
+        if cls else "scanner report has no funding classes (re-run the scanner)",
+        channel="strategy:funding_classes", evidence_level="ESTIMATED",
+        observed_at=r.get("at"), data_source="ESTIMATED"))
     return out, dict(report=str(reps[-1]), at=r.get("at"), counts=r.get("counts"),
                      strict_first=r.get("strict_first_rejection"),
                      estimated_first=r.get("estimated_first_rejection"))
