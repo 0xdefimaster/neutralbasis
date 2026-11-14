@@ -129,7 +129,11 @@ def attach(engine, desk, data_dir=None):
         root = ops.not_on_e(data_dir)
         (root / "v2").mkdir(parents=True, exist_ok=True)
         hybrid = HybridDesk(root / "v2" / "hybrid_positions.json", src, desk.cfg)
-        recorder = Recorder(root / "v2" / "recorder", src.wanted)
+        # the recorder announces itself to the Doctor / panel (heartbeat-recorder.json
+        # in the control folder they read; never on E:)
+        from v2.control import doctor
+        recorder = Recorder(root / "v2" / "recorder", src.wanted,
+                            heartbeat_dir=doctor.control_dir())
         engine.v2_runtime = Runtime(src.collector, desk.v2_gate, desk.cfg, desk=hybrid,
                                     recorder=recorder, data_dir=str(root),
                                     db_path=str(Path(root) / "paper.sqlite3"))
