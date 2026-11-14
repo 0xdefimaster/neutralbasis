@@ -268,5 +268,25 @@ class RecorderConsistencyTests(unittest.TestCase):
         r.close()
 
 
+class ProcessGlobalBasisTests(unittest.TestCase):
+    """marketdata.use_basis() swaps a PROCESS-global value: inside a running engine
+    other threads would see the looser legacy basis for that moment. Today only the
+    offline, single-threaded identity tool calls it; this test keeps it that way."""
+
+    def test_only_the_offline_identity_tool_switches_the_basis(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parent
+        callers = set()
+        for f in list(root.glob("v2/**/*.py")) + list(root.glob("tools/*.py")) + \
+                list(root.glob("*.py")):
+            if f.name.startswith("test_") or f.name == "marketdata.py":
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            import re
+            if "use_basis(" in text or re.search(r"TIME_BASIS\s*=(?!=)", text):
+                callers.add(f.relative_to(root).as_posix())
+        self.assertEqual(callers, {"tools/v2_identity_snapshot.py"})
+
+
 if __name__ == "__main__":
     unittest.main()
