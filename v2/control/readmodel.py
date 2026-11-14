@@ -36,6 +36,7 @@ FILES = ("overview", "exchanges", "markets", "system", "opportunities",
 SECRET_KEY = re.compile(r"(secret|token|passw|private|api[_-]?key|signature|signing|auth|"
                         r"cookie|mnemonic|seed|credential|nonce|session[_-]?id)", re.I)
 BANNER_HISTORICAL = "HISTORICAL DATA - RECORDER NOT RUNNING. Nothing here is live."
+SCAN_LIVE_MAX_S = 600.0   # an opportunity section is LIVE only from a scan this fresh
 PUBLISHED_ONLY = ("RATE_PUBLISHED", "RATE_SAMPLED_AT_CUTOFF")
 
 
@@ -412,10 +413,28 @@ def build(now=None, bench=None, out=None):
                                   "ESTIMATED candidates are research only"),
         paper_positions=dict(items=positions), health_history=hist,
         funding_persistence=fp)
+    # Per-section labels (readiness audit 2026-11-14): a running recorder makes the
+    # Doctor / system view live, but the opportunity sections come from a scanner
+    # SNAPSHOT and the PAPER positions from replays: they are LIVE only when the scan is
+    # fresh (and the recorder runs), never by association.
+    age = summary["snapshot_age_s"]
+    scan_live = live and age is not None and age <= SCAN_LIVE_MAX_S
+    snap_banner = None if scan_live else (
+        "HISTORICAL SNAPSHOT - opportunities from a scan %s old. Nothing here is live."
+        % ("UNKNOWN" if age is None else "%.1f h" % (age / 3600.0)))
+    override = {n: dict(data_mode="LIVE_OBSERVED" if scan_live else "HISTORICAL",
+                        banner=snap_banner)
+                for n in ("opportunities", "opportunities_summary", "markets",
+                          "strategies_readiness")}
+    override["paper_positions"] = dict(
+        data_mode="SIMULATION", banner="SIMULATED PAPER positions from ESTIMATED replays "
+        "of recorded data. No fill is an exchange fill.")
+    override["funding_persistence"] = dict(
+        data_mode="HISTORICAL", banner="Research on recorded data (ESTIMATED models).")
     out.mkdir(parents=True, exist_ok=True)
     sizes = {}
     for name in FILES:
-        body = redact(dict(head, **payloads[name]), bench=bench)
+        body = redact(dict(head, **payloads[name], **override.get(name, {})), bench=bench)
         data = json.dumps(body, default=str, separators=(",", ":"), allow_nan=False)
         tmp = out / (name + ".json.tmp")
         tmp.write_text(data, encoding="utf-8")

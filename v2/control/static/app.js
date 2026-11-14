@@ -82,6 +82,12 @@ function card(title, ...kids) {
 }
 function grid(cls, ...kids) { return add(el("div", cls), ...kids); }
 function note(text) { return el("p", "muted mt-2", text); }
+// per-section label: a section is never shown as live by association (readiness audit)
+function sectionBanner(d) {
+  if (!d || !d.banner) return null;
+  const b = el("p", "mt-2 rounded bg-amber-950 px-2 py-1 text-xs text-amber-300", d.banner);
+  return b;
+}
 
 async function api(path) {
   const r = await fetch(path, { method: "GET", cache: "no-store", credentials: "same-origin",
@@ -282,7 +288,7 @@ async function vOpps() {
   for (const k of ["strategy", "label", "safety"]) if (f[k]) q.set(k, f[k]);
   const [d, s] = await Promise.all([api("/api/opportunities?" + q.toString()), api("/api/opportunities/summary")]);
   const out = el("div");
-  add(out, el("h1", "h1", "Opportunity scanner"),
+  add(out, el("h1", "h1", "Opportunity scanner"), sectionBanner(d),
       note("Snapshot " + utc(s.snapshot_at) + " (" + age(s.snapshot_age_s) + "). " + (s.note ? s.note.replace(/\.?$/, ".") : "") +
            " Research only: nothing here is verified execution."));
   const c = s.counts || {};
@@ -325,7 +331,7 @@ async function vMarkets() {
   if (state.mktVenue) q.set("venue", state.mktVenue);
   const d = await api("/api/doctor/markets?" + q.toString());
   const out = el("div");
-  add(out, el("h1", "h1", "Markets"), note("One row per reference asset from the last scan (historical)."));
+  add(out, el("h1", "h1", "Markets"), sectionBanner(d), note("One row per reference asset from the last scan (historical)."));
   add(out, grid("mt-3 max-w-xs", select([["", "all venues"], ["TxFlow", "TxFlow"], ["tradeXYZ", "tradeXYZ"], ["Lighter", "Lighter RH"], ["Arcus", "Arcus"], ["Variational", "Variational"], ["RISEx", "RISEx"]],
     state.mktVenue, (v) => { state.mktVenue = v; state.mktPage = 1; render(); }, "venue")));
   const t = el("table", "tbl mt-3");
@@ -343,7 +349,7 @@ async function vMarkets() {
 async function vPaper() {
   const d = await api("/api/paper/positions?page_size=50" + (state.scenarios ? "&include_scenarios=1" : ""));
   const out = el("div");
-  add(out, el("h1", "h1", "PAPER positions"),
+  add(out, el("h1", "h1", "PAPER positions"), sectionBanner(d),
       note("Simulated on observed public data. Fills are ESTIMATED, never real; funding from published rates is UNVERIFIED as a payment."));
   const tg = el("button", "btn mt-2", state.scenarios ? "Hide stress scenarios" : "Show stress scenarios");
   tg.addEventListener("click", () => { state.scenarios = !state.scenarios; render(); });

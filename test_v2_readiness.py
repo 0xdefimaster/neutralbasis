@@ -178,5 +178,44 @@ class TimeBasisSwitchTests(unittest.TestCase):
         self.assertTrue(self.md.stale(b, "arcus", T0))
 
 
+class SectionLabelTests(unittest.TestCase):
+    """Panel labels: a running recorder never makes an old scan look live."""
+
+    def build(self, scan_age_s, recorder="RUNNING"):
+        import json
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from v2.control import readmodel
+        d = Path(tempfile.mkdtemp(prefix="nb-rm-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        now = 2_000_000_000.0
+        scan = dict(at=now - scan_age_s, counts={}, DISCOVERY={}, ECONOMIC={},
+                    EXECUTION_READINESS={}, _path="MOCK")
+        with mock.patch.object(readmodel, "load_scan", return_value=(scan, [])), \
+                mock.patch.object(readmodel.telemetry, "read_heartbeat",
+                                  return_value=dict(status=recorder, age_s=5.0)):
+            readmodel.build(now=now, out=d / "rm")
+        return {n: json.loads((d / "rm" / (n + ".json")).read_text())
+                for n in ("overview", "opportunities", "paper_positions")}
+
+    def test_old_scan_is_historical_even_with_a_running_recorder(self):
+        r = self.build(scan_age_s=7200)
+        self.assertEqual(r["overview"]["data_mode"], "LIVE_OBSERVED")      # recorder runs
+        self.assertEqual(r["opportunities"]["data_mode"], "HISTORICAL")    # old scan
+        self.assertIn("2.0 h old", r["opportunities"]["banner"])
+        self.assertEqual(r["paper_positions"]["data_mode"], "SIMULATION")
+
+    def test_fresh_scan_with_a_running_recorder_is_live(self):
+        r = self.build(scan_age_s=60)
+        self.assertEqual(r["opportunities"]["data_mode"], "LIVE_OBSERVED")
+        self.assertIsNone(r["opportunities"]["banner"])
+
+    def test_no_recorder_is_historical_everywhere(self):
+        r = self.build(scan_age_s=60, recorder="NOT_RUNNING")
+        self.assertEqual(r["overview"]["data_mode"], "HISTORICAL")
+        self.assertEqual(r["opportunities"]["data_mode"], "HISTORICAL")
+
+
 if __name__ == "__main__":
     unittest.main()
